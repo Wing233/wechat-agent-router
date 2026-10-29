@@ -1,0 +1,10 @@
+{
+  "id": "reminders",
+  "name": "提醒",
+  "version": "1.0.0",
+  "api_version": "1",
+  "entry": "plugin.py",
+  "capabilities": ["tools", "service"],
+  "permissions": ["db:router", "send:wechat"],
+  "description": "一次性 / 间隔 / cron 提醒，支持暂停、取消、推迟"
+}

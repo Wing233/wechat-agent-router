@@ -1,0 +1,41 @@
+{
+  "hub": {
+    "base_url": "http://openilink-hub:9800",
+    "channel_key": "REPLACE",
+    "owner_id": "REPLACE"
+  },
+  "lyph": {
+    "db": "/lyph-data/lyph.sqlite3",
+    "exclude_conversation_prefixes": ["unlimited-check-"],
+    "exclude_visitor_ids": []
+  },
+  "geo": {
+    "vendor_dir": "/app/vendor",
+    "v4": "/geodb/ip2region_v4.xdb",
+    "v6": "/geodb/ip2region_v6.xdb"
+  },
+  "db": "/data/router.db",
+  "data_dir": "/data",
+  "public_base_url": "http://123.57.153.49:9900",
+  "poll_interval": 2,
+  "initial_last_id": 0,
+  "credential_key": "REPLACE_FERNET_KEY",
+  "login_token_secret": "REPLACE",
+  "service_token": "REPLACE",
+  "llm": {
+    "base_url": "https://api.deepseek.com",
+    "api_key": "REPLACE",
+    "model": "deepseek-flash",
+    "system_prompt": ""
+  },
+  "agents": [
+    {
+      "id": "echo",
+      "name": "测试",
+      "description": "回显测试 Agent",
+      "callback_url": "http://127.0.0.1:9900/internal/echo",
+      "callback_secret": "REPLACE",
+      "api_key": "REPLACE"
+    }
+  ]
+}

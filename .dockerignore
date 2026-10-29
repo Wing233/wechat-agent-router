@@ -1,0 +1,5 @@
+geodb
+data
+config.json
+config.example.json
+*.xdb

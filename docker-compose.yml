@@ -1,0 +1,28 @@
+services:
+  router:
+    image: wechat-agent-router:0.1.0
+    container_name: wechat-agent-router
+    restart: unless-stopped
+    ports:
+      - "9900:9900"
+    volumes:
+      - ./config.json:/app/config.json:ro
+      - ./data:/data
+      - ./geodb:/geodb:ro
+      - ./plugins:/app/plugins
+      - ./sandbox:/sandbox
+      - .:/repo
+      - /opt/git/wechat-agent-router.git:/opt/git/wechat-agent-router.git
+      - /var/lib/docker/volumes/lyph_business/_data:/lyph-data
+    networks:
+      - default
+      - hub
+      - lyph
+
+networks:
+  hub:
+    external: true
+    name: openilink-hub_default
+  lyph:
+    external: true
+    name: lyph_private

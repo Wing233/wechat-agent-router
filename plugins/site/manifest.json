@@ -1,0 +1,10 @@
+{
+  "id": "site",
+  "name": "站点数据",
+  "version": "1.0.0",
+  "api_version": "1",
+  "entry": "plugin.py",
+  "capabilities": ["tools", "jobs"],
+  "permissions": ["read:site", "send:wechat"],
+  "description": "lyph 访问、访客、对话查询与定时报告"
+}

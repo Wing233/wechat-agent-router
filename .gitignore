@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.pyo
+config.json
+.env
+data/
+sandbox/
+backups/
+geodb/*.xdb
+*.log
