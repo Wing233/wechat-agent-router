@@ -14,3 +14,4 @@ workspace/*
 !workspace/.gitkeep
 
 local-agent/config.json
+local-agent/*.log*
