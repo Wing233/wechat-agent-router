@@ -417,6 +417,7 @@ def build_system_prompt() -> str:
         "力扣/LeetCode/刷题/做题相关的问题调用 leetcode_stats。",
         "用户发图片或文件时，系统会把图片交给视觉模型、把文件文字附在消息里；只根据实际提供的内容回答，不要假装看到了没读到的东西。",
         "用户要求某个项目 Agent 做事时调用 send_to_agent，不要假装已经完成。",
+        "用户消息以 @AgentID 开头时，系统会直接路由到该 Agent，不经过你；你可以按普通对话理解。",
         "如果用户是在回复某条待处理通知，系统会先做匹配；你不需要猜。",
         "不确定用户指哪个 Agent 时，先反问一句。",
         f"当前时间：{datetime.now(CST).strftime('%Y-%m-%d %H:%M:%S')}（Asia/Shanghai，UTC+8）。",
@@ -505,6 +506,16 @@ def llm_answer(text: str, history: list[dict]) -> str:
 # ---------------------------------------------------------------------------
 def _squash(value: str) -> str:
     return re.sub(r"\s+", "", value or "").lower()
+
+
+EXPLICIT_AGENT_RE = re.compile(r"^\s*@([a-z][a-z0-9_-]{1,63})(?:\s+([\s\S]+))?$")
+
+
+def parse_explicit_agent(text: str):
+    match = EXPLICIT_AGENT_RE.match(text or "")
+    if not match:
+        return None
+    return match.group(1), (match.group(2) or "").strip()
 
 
 def match_quote(quoted: str, pending: list[dict]) -> dict | None:
@@ -653,6 +664,30 @@ def handle_inbound(text: str, message: dict) -> None:
         if isinstance(pending, dict):
             store.log_route(OWNER, text, "pending", pending["code"])
             handle_reply(pending, text)
+            return
+        explicit = parse_explicit_agent(text)
+        if explicit:
+            agent_id, task_text = explicit
+            agent = AGENTS.get(agent_id)
+            if agent is None or agent_id == "echo":
+                send_text(f"没有这个 Agent：@{agent_id}。可用：{', '.join(k for k in AGENTS if k != 'echo')}")
+                return
+            if not task_text:
+                send_text(f"要给 {agent.get('name', agent_id)} 什么任务？")
+                return
+            try:
+                result = call_agent(agent, {
+                    "notification_id": "",
+                    "agent_id": agent_id,
+                    "reply": task_text,
+                    "meta": {"kind": "task", "explicit": True},
+                    "chat_id": OWNER,
+                })
+                send_agent_result(result)
+                store.log_route(OWNER, text, "agent", agent_id)
+            except Exception as exc:
+                log.warning("explicit agent call failed: %s", exc)
+                send_text(f"已经收到，但 {agent.get('name', agent_id)} 暂时没有响应。")
             return
     try:
         answer = answer_with_attachments(text, history, bundle)
