@@ -6,12 +6,10 @@ services:
     ports:
       - "9900:9900"
     volumes:
-      - ./config.json:/app/config.json:ro
+      - .:/app
       - ./data:/data
       - ./geodb:/geodb:ro
-      - ./plugins:/app/plugins
       - ./sandbox:/sandbox
-      - .:/repo
       - /opt/git/wechat-agent-router.git:/opt/git/wechat-agent-router.git
       - /var/lib/docker/volumes/lyph_business/_data:/lyph-data
     networks:

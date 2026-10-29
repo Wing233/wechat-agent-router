@@ -97,7 +97,7 @@ class Evolution:
         return True, payload
 
     def _git_commit(self, pid: str) -> tuple[bool, str]:
-        base = ["git", "-c", "safe.directory=/repo", "-C", "/repo"]
+        base = ["git", "-c", "safe.directory=/app", "-C", "/app"]
         commands = [
             base + ["add", f"plugins/{pid}"],
             base + ["-c", "user.name=evolution", "-c", "user.email=evolution@local",
