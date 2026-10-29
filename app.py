@@ -641,7 +641,8 @@ def leetcode_stats(request: Request):
 async def internal_ask(request: Request):
     service_auth(request)
     body = await request.json()
-    return {"answer": llm_answer(body.get("text", ""), [])}
+    answer = await asyncio.to_thread(llm_answer, body.get("text", ""), [])
+    return {"answer": answer}
 
 
 @app.post("/internal/jobs/{job_id}/run")
