@@ -657,6 +657,30 @@ def handle_inbound(text: str, message: dict) -> None:
         if LEETCODE is not None:
             LEETCODE.notify_login("missing", force=True)
         return
+    explicit = parse_explicit_agent(text) if not has_attachments else None
+    if explicit:
+        agent_id, task_text = explicit
+        agent = AGENTS.get(agent_id)
+        if agent is None or agent_id == "echo":
+            send_text(f"没有这个 Agent：@{agent_id}。可用：{', '.join(k for k in AGENTS if k != 'echo')}")
+            return
+        if not task_text:
+            send_text(f"要给 {agent.get('name', agent_id)} 什么任务？")
+            return
+        try:
+            result = call_agent(agent, {
+                "notification_id": "",
+                "agent_id": agent_id,
+                "reply": task_text,
+                "meta": {"kind": "task", "explicit": True},
+                "chat_id": OWNER,
+            })
+            send_agent_result(result)
+            store.log_route(OWNER, text, "agent", agent_id)
+        except Exception as exc:
+            log.warning("explicit agent call failed: %s", exc)
+            send_text(f"已经收到，但 {agent.get('name', agent_id)} 暂时没有响应。")
+        return
     if not has_attachments:
         pending = match_pending(text, OWNER, quote)
         if pending == "ASKED":
@@ -664,30 +688,6 @@ def handle_inbound(text: str, message: dict) -> None:
         if isinstance(pending, dict):
             store.log_route(OWNER, text, "pending", pending["code"])
             handle_reply(pending, text)
-            return
-        explicit = parse_explicit_agent(text)
-        if explicit:
-            agent_id, task_text = explicit
-            agent = AGENTS.get(agent_id)
-            if agent is None or agent_id == "echo":
-                send_text(f"没有这个 Agent：@{agent_id}。可用：{', '.join(k for k in AGENTS if k != 'echo')}")
-                return
-            if not task_text:
-                send_text(f"要给 {agent.get('name', agent_id)} 什么任务？")
-                return
-            try:
-                result = call_agent(agent, {
-                    "notification_id": "",
-                    "agent_id": agent_id,
-                    "reply": task_text,
-                    "meta": {"kind": "task", "explicit": True},
-                    "chat_id": OWNER,
-                })
-                send_agent_result(result)
-                store.log_route(OWNER, text, "agent", agent_id)
-            except Exception as exc:
-                log.warning("explicit agent call failed: %s", exc)
-                send_text(f"已经收到，但 {agent.get('name', agent_id)} 暂时没有响应。")
             return
     try:
         answer = answer_with_attachments(text, history, bundle)
