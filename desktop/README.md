@@ -17,6 +17,8 @@ python desktop\main.py
 
 也可以双击 `desktop\run.bat`。
 
+> 同一台电脑只运行一个实例：要么用 exe，要么用源码。两边各自使用独立的数据目录，同时运行会重复注册同一个 Agent ID 并争抢任务。exe 已在后台运行时，再次双击 exe 只会打开现有界面。
+
 首次启动会：
 
 1. 读取本机 `config.json`（源码模式是 `local-agent/config.json`，exe 模式在 exe 同目录）；不存在则生成一份空配置
