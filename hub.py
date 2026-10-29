@@ -122,3 +122,28 @@ def parse_text(message: dict) -> str:
         if item.get("type") in (None, "text") and isinstance(item.get("text"), str):
             chunks.append(item["text"])
     return "".join(chunks).strip()
+
+
+def parse_quote(message: dict) -> dict | None:
+    """Extract the quoted/referenced message, if the channel provides one."""
+    try:
+        items = message.get("item_list") or []
+        if isinstance(items, str):
+            items = json.loads(items)
+    except Exception:
+        return None
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        ref = item.get("ref_msg")
+        if not isinstance(ref, dict):
+            continue
+        ref_item = ref.get("item") or {}
+        if not isinstance(ref_item, dict):
+            ref_item = {}
+        return {
+            "title": str(ref.get("title") or ""),
+            "type": str(ref_item.get("type") or ""),
+            "text": str(ref_item.get("text") or ""),
+        }
+    return None

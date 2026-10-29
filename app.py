@@ -25,7 +25,7 @@ from pydantic import BaseModel, Field
 from agent_broker import BROKER
 from data import CST, SiteData
 from geo import Geo
-from hub import Hub, HubError, parse_text
+from hub import Hub, HubError, parse_quote, parse_text
 from llm import LLM, LLMError
 from plugin_loader import PluginLoader
 from registry import JobScheduler, ToolRegistry
@@ -343,13 +343,45 @@ def llm_answer(text: str, history: list[dict]) -> str:
 # ---------------------------------------------------------------------------
 # inbound handling
 # ---------------------------------------------------------------------------
-def match_pending(text: str, chat_id: str) -> dict | str | None:
+def _squash(value: str) -> str:
+    return re.sub(r"\s+", "", value or "").lower()
+
+
+def match_quote(quoted: str, pending: list[dict]) -> dict | None:
+    """Match a quoted message to exactly one pending notification by content."""
+    probe = _squash(quoted)
+    if len(probe) < 6:
+        return None
+    hits: list[dict] = []
+    for item in pending:
+        body = _squash(item.get("text") or "")
+        if len(body) < 6:
+            continue
+        if body[:60] in probe or (len(probe) >= 12 and probe in body):
+            hits.append(item)
+    return hits[0] if len(hits) == 1 else None
+
+
+def match_pending(text: str, chat_id: str, quote: dict | None = None) -> dict | str | None:
     pending = store.active_pending(chat_id)
     match = CODE_RE.search(text.upper())
     if match:
         found = store.by_code(match.group(1))
         if found:
             return found
+    quoted = str((quote or {}).get("text") or (quote or {}).get("title") or "").strip()
+    if quote is not None:
+        qmatch = CODE_RE.search(quoted.upper())
+        if qmatch:
+            found = store.by_code(qmatch.group(1))
+            if found:
+                return found
+        # A quoted message is an explicit target. If it is not one of the
+        # pending notifications, treat this as a normal chat message.
+        found = match_quote(quoted, pending)
+        if found:
+            return found
+        return None
     if len(pending) == 1:
         return pending[0]
     if len(pending) > 1:
@@ -412,6 +444,7 @@ def handle_reply(notification: dict, text: str) -> None:
 
 def handle_inbound(text: str, message: dict) -> None:
     text = (text or "").strip()
+    quote = parse_quote(message)
     if not text:
         send_text("暂不支持这种消息类型，发文字给我吧。")
         return
@@ -422,7 +455,7 @@ def handle_inbound(text: str, message: dict) -> None:
         if LEETCODE is not None:
             LEETCODE.notify_login("missing", force=True)
         return
-    pending = match_pending(text, OWNER)
+    pending = match_pending(text, OWNER, quote)
     if pending == "ASKED":
         return
     if isinstance(pending, dict):
@@ -568,9 +601,11 @@ def notify(body: NotifyIn, request: Request):
         image_path=image_path, meta=body.meta, thread_id=body.thread_id,
     )
     header = f"【{agent.get('name', agent['id'])}】"
-    main_text = f"{header}{text}" if text else f"{header}请查看图片。"
     if body.expect_reply:
-        main_text += f"\n\n回复编号：{code}"
+        main_text = (f"{header}回复编号：{code}\n{text}" if text
+                     else f"{header}回复编号：{code}")
+    else:
+        main_text = f"{header}{text}" if text else f"{header}请查看图片。"
     if image_path:
         send_payload({"kind": "image", "path": image_path, "text": f"{header}请查看图片", "recipient": OWNER})
         ok = send_text(main_text)
