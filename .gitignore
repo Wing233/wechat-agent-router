@@ -11,3 +11,5 @@ geodb/*.xdb
 
 workspace/*
 !workspace/.gitkeep
+
+local-agent/config.json

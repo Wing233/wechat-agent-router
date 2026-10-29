@@ -1,0 +1,19 @@
+{
+  "router": "http://123.57.153.49:9900",
+  "agent_id": "pc-home",
+  "agent_key": "REPLACE_WITH_AGENT_KEY",
+  "default_engine": "opencode",
+  "default_workspace": "router",
+  "workspaces": {
+    "router": "D:\\xx\\wechatbot",
+    "scratch": "D:\\xx\\wechatbot\\scratch"
+  },
+  "engines": {
+    "opencode": ["opencode", "run"],
+    "codex": ["codex", "exec"],
+    "claude": ["claude", "-p"]
+  },
+  "wait_seconds": 60,
+  "task_timeout": 1800,
+  "poll_seconds": 2
+}

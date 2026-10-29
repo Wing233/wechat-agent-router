@@ -20,6 +20,8 @@ def apply(ctx) -> None:
                 "notification_id": "",
                 "agent_id": agent["id"],
                 "reply": args.get("message", ""),
+                "engine": args.get("engine", ""),
+                "workspace": args.get("workspace", ""),
                 "meta": {"kind": "task"},
                 "chat_id": owner,
             })
@@ -34,6 +36,8 @@ def apply(ctx) -> None:
         _schema({
             "agent_id": {"type": "string", "enum": sorted(agents.keys()) or ["none"]},
             "message": {"type": "string"},
+            "engine": {"type": "string", "description": "可选：opencode / codex / claude；不填用本地默认"},
+            "workspace": {"type": "string", "description": "可选：工作区别名或绝对路径；不填用默认工作区"},
         }, ["agent_id", "message"]),
         send_to_agent,
         aliases=("send_to_agent",),
