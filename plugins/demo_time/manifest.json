@@ -1,0 +1,14 @@
+{
+  "id": "demo_time",
+  "name": "时间演示",
+  "version": "0.1.0",
+  "api_version": "1",
+  "entry": "plugin.py",
+  "capabilities": [
+    "tools"
+  ],
+  "permissions": [
+    "net:httpbin.org"
+  ],
+  "description": "查询当前时间"
+}

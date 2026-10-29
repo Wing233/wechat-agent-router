@@ -1,0 +1,11 @@
+{
+  "id": "leetcode",
+  "name": "力扣",
+  "version": "1.0.0",
+  "api_version": "1",
+  "entry": "plugin.py",
+  "capabilities": ["tools", "service", "credential", "jobs"],
+  "permissions": ["db:router", "send:wechat"],
+  "secrets": ["credential_key"],
+  "description": "leetcode.cn 做题数据、Cookie 校验与重新登录"
+}

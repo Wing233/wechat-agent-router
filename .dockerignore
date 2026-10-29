@@ -1,0 +1,15 @@
+.git
+.github
+docs
+desktop
+local-agent
+backups
+data
+workspace
+sandbox
+config.json
+**/__pycache__
+**/*.pyc
+**/*.log*
+*.md
+*.spec

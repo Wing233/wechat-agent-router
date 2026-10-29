@@ -1,0 +1,15 @@
+{
+  "id": "agents",
+  "name": "Agent 路由",
+  "version": "1.0.0",
+  "api_version": "1",
+  "entry": "plugin.py",
+  "capabilities": [
+    "tools"
+  ],
+  "permissions": [
+    "agent:read",
+    "agent:call"
+  ],
+  "description": "把用户请求转交给已注册的项目 Agent（爬虫、部署等）"
+}

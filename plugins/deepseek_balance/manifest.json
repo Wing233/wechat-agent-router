@@ -1,0 +1,11 @@
+{
+  "id": "deepseek_balance",
+  "name": "DeepSeek 余额",
+  "version": "0.1.0",
+  "api_version": "1",
+  "entry": "plugin.py",
+  "capabilities": ["tools"],
+  "permissions": ["net:api.deepseek.com"],
+  "secrets": ["llm_api_key"],
+  "description": "查询 DeepSeek 账户余额"
+}

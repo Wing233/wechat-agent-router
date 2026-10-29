@@ -1,0 +1,62 @@
+{
+  "hub": {
+    "base_url": "http://host.docker.internal:9800",
+    "channel_key": "REPLACE_WITH_HUB_CHANNEL_KEY",
+    "owner_id": "REPLACE_WITH_WECHAT_OWNER_ID"
+  },
+  "db": "/data/router.db",
+  "data_dir": "/data",
+  "public_base_url": "https://router.example.com",
+  "poll_interval": 2,
+  "initial_last_id": 0,
+  "credential_key": "REPLACE_WITH_FERNET_KEY",
+  "login_token_secret": "REPLACE_WITH_RANDOM_SECRET",
+  "service_token": "REPLACE_WITH_RANDOM_TOKEN",
+  "llm": {
+    "base_url": "https://api.deepseek.com",
+    "api_key": "REPLACE_WITH_DEEPSEEK_API_KEY",
+    "model": "deepseek-chat",
+    "system_prompt": ""
+  },
+  "attachments": {
+    "enabled": true,
+    "dir": "/workspace/inbox",
+    "max_files": 3,
+    "max_image_mb": 4,
+    "max_file_mb": 10,
+    "text_chars": 20000
+  },
+  "image": {
+    "enabled": false,
+    "base_url": "https://api.siliconflow.cn/v1",
+    "api_key": "",
+    "model": "Kwai-Kolors/Kolors",
+    "size": "1024x1024",
+    "steps": 20,
+    "guidance": 7.5,
+    "dir": "/workspace/generated"
+  },
+  "agents": [
+    {
+      "id": "echo",
+      "name": "Echo",
+      "description": "本地回显测试 Agent",
+      "callback_url": "http://127.0.0.1:9900/internal/echo",
+      "callback_secret": "REPLACE_WITH_RANDOM_SECRET",
+      "api_key": "REPLACE_WITH_AGENT_API_KEY"
+    },
+    {
+      "id": "pc-home",
+      "name": "家里电脑",
+      "description": "出站轮询型本机 Agent，可运行 opencode / codex / claude",
+      "transport": "poll",
+      "callback_url": "",
+      "callback_secret": "",
+      "api_key": "REPLACE_WITH_AGENT_API_KEY"
+    }
+  ],
+  "jobs": {},
+  "agent_wait_seconds": 60,
+  "plugins": {},
+  "disabled_plugins": ["evolution", "leetcode"]
+}

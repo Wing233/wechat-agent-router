@@ -1,0 +1,50 @@
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+
+# Runtime configuration and secrets
+config.json
+config.json.*
+.env
+.env.*
+desktop/config.json
+local-agent/config.json
+
+# Runtime data
+data/
+workspace/*
+!workspace/.gitkeep
+sandbox/
+backups/
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+*.xdb
+
+# Logs and temporary files
+*.log
+*.log.*
+*.tmp
+*.bak
+*.orig
+*.patch
+*.diff
+
+# Desktop build output
+desktop/.runtime/
+desktop/.venv-build/
+desktop/build/
+desktop/dist/
+desktop/*.spec
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini

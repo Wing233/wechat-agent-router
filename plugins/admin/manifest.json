@@ -1,0 +1,10 @@
+{
+  "id": "admin",
+  "name": "自省与配置",
+  "version": "1.0.0",
+  "api_version": "1",
+  "entry": "plugin.py",
+  "capabilities": ["tools"],
+  "permissions": ["admin"],
+  "description": "查询/修改定时任务与插件，回答 bot 自身的配置问题"
+}

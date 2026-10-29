@@ -1,0 +1,59 @@
+# Changelog
+
+## 1.1.0 — 2026-10-30
+
+首个公开版本。
+
+### 核心
+
+- FastAPI Router，SQLite WAL 状态层
+- OpeniLink Hub 文本 / 图片 / 文件收发
+- 文本、引用、审批码、4 位回复编号
+- 6 轮 LLM 工具循环，重复调用检测，16K 工具结果
+- 通知状态机 + outbox 重试
+- 定时任务调度器，持久化下次运行时间
+
+### 多模态
+
+- 入站图片交给视觉模型
+- 入站 txt / md / csv / json / pdf / docx 文本提取
+- 入站视频/语音保存（暂不解析内容）
+- 出站图片、视频、文件
+- SiliconFlow Kolors 文生图
+
+### Agent
+
+- 出站轮询型本机 Agent（NAT 友好）
+- HTTP 回调型 Agent + HMAC 签名
+- 引擎：OpenCode / Codex / Claude Code / 任意命令
+- 工作区别名 + 路径白名单
+- 任务超时终止进程树
+
+### 桌面端
+
+- PyWebView 桌面控制台
+- 本机 Agent 配置 / 启停 / 日志
+- 引擎与工作区管理
+- 远程 Router 管理：Agent、插件、任务、脱敏配置
+- DPAPI 加密服务令牌
+- PyInstaller 打包
+
+### 插件
+
+- `admin` 自省与配置
+- `agents` Agent 路由
+- `reminders` 一次性 / 间隔 / cron 提醒
+- `todo` 待办清单
+- `ops` 审批制文件操作
+- `leetcode` 做题数据与 Cookie 校验（默认禁用）
+- `deepseek_balance` 余额查询
+- `evolution` 插件生成与安装（默认禁用）
+- `demo_time` / `demo_weather` 示例
+
+### 安全
+
+- `service_token` / Agent Key / 登录签名 / Fernet 加密
+- 文件路径沙箱
+- 写/删/移动审批
+- 配置脱敏
+- 启动时拒绝 `REPLACE` 占位符

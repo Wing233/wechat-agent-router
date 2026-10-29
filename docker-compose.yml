@@ -1,0 +1,16 @@
+services:
+  router:
+    build: .
+    image: wechat-agent-router:latest
+    container_name: wechat-agent-router
+    restart: unless-stopped
+    ports:
+      - "9900:9900"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./config.json:/app/config.json
+      - ./data:/data
+      - ./workspace:/workspace
+      - ./plugins:/app/plugins
+      - ./sandbox:/sandbox

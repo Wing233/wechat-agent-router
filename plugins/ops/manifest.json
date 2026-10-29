@@ -1,0 +1,10 @@
+{
+  "id": "ops",
+  "name": "文件操作",
+  "version": "1.0.0",
+  "api_version": "1",
+  "entry": "plugin.py",
+  "capabilities": ["tools", "service"],
+  "permissions": ["db:router", "send:wechat"],
+  "description": "受限的服务器文件读取/编辑，写操作需微信审批"
+}

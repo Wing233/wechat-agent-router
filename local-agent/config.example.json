@@ -1,0 +1,20 @@
+{
+  "router": "http://127.0.0.1:9900",
+  "agent_id": "pc-home",
+  "agent_key": "REPLACE_WITH_AGENT_KEY",
+  "name": "我的电脑",
+  "description": "本地 Windows 电脑，可运行 OpenCode / Codex / Claude Code。",
+  "default_engine": "opencode",
+  "default_workspace": "workspace",
+  "workspaces": {
+    "workspace": "D:\\wechat-agent-workspace"
+  },
+  "engines": {
+    "opencode": ["opencode", "run"],
+    "codex": ["codex", "exec"],
+    "claude": ["claude", "-p"]
+  },
+  "wait_seconds": 60,
+  "task_timeout": 1800,
+  "poll_seconds": 2
+}

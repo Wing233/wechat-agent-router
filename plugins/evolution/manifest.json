@@ -1,0 +1,11 @@
+{
+  "id": "evolution",
+  "name": "自我进化",
+  "version": "1.0.0",
+  "api_version": "1",
+  "entry": "plugin.py",
+  "capabilities": ["tools", "service"],
+  "permissions": ["db:router", "send:wechat"],
+  "secrets": ["service_token"],
+  "description": "生成 HTTP 连接器插件，沙箱测试后经微信审批安装"
+}

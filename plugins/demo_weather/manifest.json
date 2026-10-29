@@ -1,0 +1,14 @@
+{
+  "id": "demo_weather",
+  "name": "天气演示",
+  "version": "0.1.0",
+  "api_version": "1",
+  "entry": "plugin.py",
+  "capabilities": [
+    "tools"
+  ],
+  "permissions": [
+    "net:api.open-meteo.com"
+  ],
+  "description": "查询北京当前温度"
+}
