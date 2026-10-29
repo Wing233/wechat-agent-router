@@ -240,6 +240,7 @@ def build_system_prompt() -> str:
         "查看、取消、暂停、推迟提醒用对应工具；取消时如果返回 need_choice，先让用户从候选里选。",
         "用户要求给 bot 增加新的 HTTP API 功能时调用 propose_plugin；必须提供真实 API 地址、方法、参数，不能编造。",
         "用户问定时任务多久一次、下次什么时候、修改播报间隔、启停插件时，调用 admin 的 list_jobs / get_job / set_job_interval / set_job_enabled / list_plugins 等工具，不要猜。",
+        "用户要求查看/修改服务器文件时调用 ops 的 fs_list / fs_read / fs_write / fs_replace / fs_delete / fs_move；写或删会发微信审批。允许的根目录：/lyph-src、/app/plugins、/workspace。",
         "可用 Agent：",
     ]
     for agent in AGENTS.values():
@@ -317,6 +318,15 @@ def handle_reply(notification: dict, text: str) -> None:
         except Exception as exc:
             log.warning("evolution reply failed: %s", exc)
             send_text(f"插件安装处理失败：{exc}")
+        return
+    if notification["agent_id"] == "ops" and SERVICES.get("ops"):
+        try:
+            result = SERVICES["ops"].handle_reply(notification, text)
+            send_agent_result(result)
+            store.set_status(notification["id"], "answered")
+        except Exception as exc:
+            log.warning("ops reply failed: %s", exc)
+            send_text(f"文件操作失败：{exc}")
         return
     if not agent:
         send_text("这条通知对应的 Agent 已下线。")
