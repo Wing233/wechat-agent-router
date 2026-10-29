@@ -368,6 +368,11 @@ tbody tr:hover { background: #fbfcfd; }
 .input-compact { width: 92px; padding: 5px 8px; font-size: 12px; }
 .log-list { max-height: calc(100vh - 330px); overflow-y: auto; }
 #ov-logs { max-height: 258px; }
+.pair-code {
+  font-family: var(--mono); font-size: 30px; font-weight: 700; letter-spacing: .26em;
+  color: var(--brand-dark); background: var(--brand-soft); border: 1px dashed #9fd4cc;
+  border-radius: 14px; padding: 14px 16px 12px; text-align: center; margin: 12px 0 10px;
+}
 
 /* ------------------------------------------------------------------ toast */
 .toast-stack { position: fixed; right: 20px; bottom: 20px; z-index: 200; display: flex; flex-direction: column; gap: 8px; pointer-events: none; }

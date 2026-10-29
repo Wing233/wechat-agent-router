@@ -6,6 +6,7 @@
 - 本地引擎：OpenCode / Codex / Claude Code / 任意命令行程序，支持试跑
 - 本地工作区：路径白名单、目录选择、打开目录
 - 服务器：Agent 注册、插件启停/重载、定时任务、脱敏配置、DeepSeek 余额
+- 渠道：QQ / Telegram / Discord 等经 Koishi 接入，绑定主人、允许列表、@ 规则
 - 本机日志：Agent 轮询、任务执行、配置修改
 
 ## 直接运行（源码）
@@ -56,6 +57,43 @@ ssh root@123.57.153.49 "python3 -c \"import json;print(json.load(open('/opt/wech
 ```
 
 `@pc-home` 是确定性路由，不经过 LLM；不带前缀时由 LLM 按 Agent 描述选择。
+
+## QQ / Telegram 渠道（Koishi）
+
+Router 不直接实现 QQ/Telegram 协议，渠道层由 `koishi/` 目录里的 Koishi 网关负责。
+
+服务器上：
+
+```bash
+cd /opt/wechat-agent-router/koishi
+npm install --omit=dev
+# .env 里的 ROUTER_CHANNEL_TOKEN 来自 Router config.json 的 channels.koishi.token
+systemctl enable --now wechat-koishi
+```
+
+配置平台账号：
+
+```powershell
+# 本机开隧道
+ssh -N -L 5140:127.0.0.1:5140 root@123.57.153.49
+```
+
+浏览器打开 `http://127.0.0.1:5140` → 「插件配置」→ 启用 `adapter-onebot` 或 `adapter-telegram` → 「沙盒」测试。
+
+绑定主人：
+
+1. 桌面端「渠道」页查看绑定码
+2. 在 QQ/Telegram 私聊机器人发送 `绑定 ABC123`
+3. 绑定后即可提问；其他用户需要加入允许列表
+
+当前行为：
+
+- 文本消息同步回复到原渠道
+- 60 秒内完成的 Agent 任务也会回到原渠道
+- 超过 60 秒的 Agent 结果暂时仍走微信通知
+- 图片/文件双向传输暂未接入 Router
+
+详见 `koishi/README.md`。
 
 ## 多台电脑
 

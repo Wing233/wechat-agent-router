@@ -1,0 +1,26 @@
+{
+  "name": "wechat-agent-koishi",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Koishi channel gateway for the WeChat Agent Router",
+  "scripts": {
+    "start": "koishi start"
+  },
+  "dependencies": {
+    "@koishijs/plugin-adapter-telegram": "^4.5.11",
+    "@koishijs/plugin-config": "^2.8.7",
+    "@koishijs/plugin-console": "^5.30.11",
+    "@koishijs/plugin-database-sqlite": "^4.7.0",
+    "@koishijs/plugin-help": "^2.4.6",
+    "@koishijs/plugin-http": "^0.6.3",
+    "@koishijs/plugin-insight": "^3.5.2",
+    "@koishijs/plugin-logger": "^2.6.9",
+    "@koishijs/plugin-proxy-agent": "^0.3.3",
+    "@koishijs/plugin-sandbox": "^3.4.2",
+    "@koishijs/plugin-server": "^3.2.9",
+    "@koishijs/plugin-status": "^7.4.10",
+    "koishi": "^4.18.11",
+    "koishi-plugin-adapter-onebot": "^6.9.5",
+    "koishi-plugin-router-bridge": "file:./bridge"
+  }
+}

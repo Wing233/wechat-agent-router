@@ -21,3 +21,9 @@ desktop/.venv-build/
 desktop/build/
 desktop/dist/
 desktop/*.spec
+
+koishi/node_modules/
+koishi/data/
+koishi/.env
+koishi/koishi.yml
+koishi/*.log

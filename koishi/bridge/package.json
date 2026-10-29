@@ -1,0 +1,10 @@
+{
+  "name": "koishi-plugin-router-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Forward Koishi messages to the WeChat Agent Router and send replies back",
+  "main": "index.js",
+  "peerDependencies": {
+    "koishi": "^4.18.0"
+  }
+}

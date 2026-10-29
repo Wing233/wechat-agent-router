@@ -13,7 +13,9 @@ from pathlib import Path
 from data import CST
 
 AGENT_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{1,63}$")
+CHANNEL_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{1,31}$")
 TRUE_VALUES = {"1", "true", "yes", "on"}
+PAIR_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
 
 class SettingsService:
@@ -30,6 +32,7 @@ class SettingsService:
         self.reload_llm = None
         self.reload_hub = None
         self.reload_public = None
+        self._ensure_channels()
 
     def attach(self, loader, scheduler, rebuild, refresh, tools=None,
                reload_agents=None, reload_llm=None, reload_hub=None,
@@ -211,6 +214,152 @@ class SettingsService:
         return self.tools.names() if self.tools else []
 
     # ------------------------------------------------------------------
+    # channels
+    # ------------------------------------------------------------------
+    def _new_pair_code(self) -> str:
+        return "".join(secrets.choice(PAIR_ALPHABET) for _ in range(6))
+
+    def _ensure_channels(self) -> None:
+        channels = self.config.setdefault("channels", {})
+        if "koishi" in channels:
+            return
+        channels["koishi"] = {
+            "id": "koishi",
+            "name": "Koishi 渠道网关",
+            "type": "koishi",
+            "enabled": True,
+            "token": "ch_" + secrets.token_urlsafe(32),
+            "owner_id": "",
+            "allow_users": [],
+            "allow_all": False,
+            "mention_only": False,
+            "pair_code": self._new_pair_code(),
+            "console_url": "http://127.0.0.1:5140",
+            "ssh_tunnel": "",
+            "created_at": datetime.now(CST).isoformat(timespec="seconds"),
+        }
+        self._save()
+        try:
+            self.store.log_plugin_event("admin", "create_channel", "koishi")
+        except Exception:
+            pass
+
+    @staticmethod
+    def _as_bool(value, default: bool = False) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return default
+        return str(value).lower() in TRUE_VALUES
+
+    @staticmethod
+    def _user_list(value) -> list[str]:
+        if isinstance(value, str):
+            parts = re.split(r"[\s,;]+", value)
+        elif isinstance(value, (list, tuple)):
+            parts = value
+        else:
+            parts = []
+        result = []
+        for part in parts:
+            text = str(part).strip()
+            if text and text not in result:
+                result.append(text[:120])
+        return result
+
+    def channels_view(self) -> list[dict]:
+        items = []
+        for channel_id, channel in (self.config.get("channels") or {}).items():
+            item = dict(channel)
+            item["id"] = channel_id
+            item["token"] = self._mask(item.get("token"))
+            item["configured"] = bool(item.get("owner_id"))
+            item["allow_users"] = list(item.get("allow_users") or [])
+            items.append(item)
+        return sorted(items, key=lambda item: item["id"])
+
+    def channel_get(self, channel_id: str) -> dict:
+        channel = (self.config.get("channels") or {}).get(channel_id)
+        if not channel:
+            raise ValueError(f"渠道 {channel_id} 不存在")
+        return channel
+
+    def upsert_channel(self, payload: dict) -> dict:
+        channel_id = str(payload.get("id") or "koishi").strip()
+        if not CHANNEL_ID_RE.match(channel_id):
+            raise ValueError("渠道 ID 只能用小写字母、数字、下划线或短横线")
+        channels = self.config.setdefault("channels", {})
+        existing = channels.get(channel_id)
+        item = dict(existing or {})
+        item["id"] = channel_id
+        item["name"] = str(payload.get("name") or item.get("name") or channel_id)[:80]
+        item["type"] = str(payload.get("type") or item.get("type") or "koishi")[:32]
+        item["enabled"] = self._as_bool(payload.get("enabled"), bool(item.get("enabled", True)))
+        if "owner_id" in payload:
+            item["owner_id"] = str(payload.get("owner_id") or "").strip()[:160]
+        if "allow_users" in payload:
+            item["allow_users"] = self._user_list(payload.get("allow_users"))
+        item["allow_all"] = self._as_bool(payload.get("allow_all"), bool(item.get("allow_all", False)))
+        item["mention_only"] = self._as_bool(payload.get("mention_only"), bool(item.get("mention_only", False)))
+        if "console_url" in payload:
+            item["console_url"] = str(payload.get("console_url") or "").strip()[:300]
+        if "ssh_tunnel" in payload:
+            item["ssh_tunnel"] = str(payload.get("ssh_tunnel") or "").strip()[:500]
+        token = str(payload.get("token") or "").strip()
+        if token and "..." not in token:
+            item["token"] = token
+        elif not item.get("token"):
+            item["token"] = "ch_" + secrets.token_urlsafe(32)
+        pair_code = str(payload.get("pair_code") or "").strip().upper()
+        if pair_code and "..." not in pair_code:
+            item["pair_code"] = pair_code
+        elif not item.get("pair_code") and not item.get("owner_id"):
+            item["pair_code"] = self._new_pair_code()
+        item.setdefault("created_at", datetime.now(CST).isoformat(timespec="seconds"))
+        channels[channel_id] = item
+        self._save()
+        self.store.log_plugin_event("admin", "upsert_channel", channel_id)
+        view = dict(item)
+        view["token"] = self._mask(view.get("token"))
+        view["configured"] = bool(view.get("owner_id"))
+        return view
+
+    def bind_channel_owner(self, channel_id: str, user_id: str) -> dict:
+        user_id = str(user_id or "").strip()
+        if not user_id:
+            raise ValueError("user_id 不能为空")
+        channel = self.channel_get(channel_id)
+        channel["owner_id"] = user_id
+        users = list(channel.get("allow_users") or [])
+        if user_id not in users:
+            users.append(user_id)
+        channel["allow_users"] = users
+        channel["pair_code"] = ""
+        self._save()
+        self.store.log_plugin_event("admin", "bind_channel_owner", f"{channel_id} {user_id}")
+        view = dict(channel)
+        view["token"] = self._mask(view.get("token"))
+        view["configured"] = True
+        return view
+
+    def rotate_channel_pair_code(self, channel_id: str) -> dict:
+        channel = self.channel_get(channel_id)
+        code = self._new_pair_code()
+        channel["pair_code"] = code
+        self._save()
+        self.store.log_plugin_event("admin", "rotate_channel_pair_code", channel_id)
+        return {"id": channel_id, "pair_code": code}
+
+    def reset_channel_owner(self, channel_id: str) -> dict:
+        channel = self.channel_get(channel_id)
+        code = self._new_pair_code()
+        channel["owner_id"] = ""
+        channel["pair_code"] = code
+        self._save()
+        self.store.log_plugin_event("admin", "reset_channel_owner", channel_id)
+        return {"id": channel_id, "pair_code": code}
+
+    # ------------------------------------------------------------------
     # agents
     # ------------------------------------------------------------------
     def _mask(self, value) -> str:
@@ -311,6 +460,7 @@ class SettingsService:
             "jobs": cfg.get("jobs") or {},
             "agents": self.agents_view(),
             "plugins": cfg.get("plugins") or {},
+            "channels": self.channels_view(),
             "disabled_plugins": cfg.get("disabled_plugins") or [],
             "poll_interval": cfg.get("poll_interval"),
             "agent_wait_seconds": cfg.get("agent_wait_seconds", 60),

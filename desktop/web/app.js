@@ -12,6 +12,10 @@ const state = {
   serverTried: false,
   serverLoading: false,
   serverTab: "overview",
+  channels: null,
+  channelError: "",
+  channelTried: false,
+  channelLoading: false,
   balance: null,
   page: "overview",
   logs: [],
@@ -837,6 +841,17 @@ const PAGES = {
       if (state.bootstrap?.server?.connected && !state.server && !state.serverTried) loadServer(true);
     },
   },
+  channels: {
+    title: "渠道", eyebrow: "CHANNELS",
+    subtitle: "QQ / Telegram 经 Koishi 接入，Router 只负责路由和权限。",
+    render: renderChannels,
+    actions: () => state.bootstrap?.server?.connected
+      ? `<button class="btn btn-sm" data-action="channel-refresh">${icon("refresh")}刷新</button>`
+      : "",
+    after: () => {
+      if (state.bootstrap?.server?.connected && !state.channels && !state.channelTried) loadChannels(true);
+    },
+  },
   logs: {
     title: "日志", eyebrow: "OBSERVABILITY",
     subtitle: "本地执行、轮询和配置操作的完整轨迹。",
@@ -893,6 +908,182 @@ async function loadServer(render = true) {
   } finally {
     state.serverLoading = false;
   }
+}
+
+/* ------------------------------------------------------------------ channels */
+function routerHost() {
+  try {
+    return new URL(state.config?.router || "").hostname || "127.0.0.1";
+  } catch {
+    return "127.0.0.1";
+  }
+}
+
+function channelLogRow(item) {
+  const direction = item.direction === "in" ? "入站" : "出站";
+  const level = item.ok === false ? "danger" : item.direction === "in" ? "brand" : "ok";
+  return `<tr>
+    <td class="mono tiny">${esc(fmtTime(item.ts))}</td>
+    <td>${badge(direction, level)}</td>
+    <td>${esc(item.platform || "—")}</td>
+    <td class="mono tiny">${esc(item.user_id || "—")}</td>
+    <td>${esc(short(item.text || item.detail || "", 80))}</td>
+    <td>${item.ok === false ? badge("失败", "danger") : badge("正常", "ok")}</td>
+  </tr>`;
+}
+
+function renderChannels() {
+  if (!state.bootstrap?.server?.connected) {
+    return `<div class="server-connect"><section class="card"><div class="card-body">
+      <div class="connect-illustration">${icon("wifi")}</div>
+      <h2 class="connect-title">先连接服务器</h2>
+      <p class="connect-sub">渠道配置保存在 Router 的 config.json，桌面端通过服务令牌读取。</p>
+      <button class="btn btn-primary" data-action="go-server">${icon("server")}去连接服务器</button>
+    </div></section></div>`;
+  }
+  const data = state.channels;
+  if (!data) {
+    if (state.channelError) {
+      return `<div class="card"><div class="card-body">${callout("danger", "读取渠道失败", state.channelError,
+        `<button class="btn btn-sm btn-secondary" data-action="channel-refresh">${icon("refresh")}重试</button>`)}</div></div>`;
+    }
+    return `<div class="card"><div class="card-body">${emptyState("wifi", "正在读取渠道", "读取 Koishi 网关配置和最近消息。")}</div></div>`;
+  }
+  const channels = data.channels || [];
+  const logs = data.logs || [];
+  const primary = channels.find((item) => item.id === "koishi") || channels[0] || {};
+  const bound = channels.filter((item) => item.configured || item.owner_id).length;
+  const messages = channels.reduce((sum, item) => sum + (Number(item.messages) || 0), 0);
+  const tunnel = primary.ssh_tunnel || `ssh -N -L 5140:127.0.0.1:5140 root@${routerHost()}`;
+  const consoleUrl = primary.console_url || "http://127.0.0.1:5140";
+  const pair = primary.pair_code || "";
+  const owner = primary.owner_id || "";
+  const primaryId = primary.id || "koishi";
+  return `
+    ${callout("info", "渠道层交给 Koishi，Router 只做大脑",
+      "QQ、Telegram、Discord 等协议由 Koishi 适配器处理；Router 只接收统一消息、校验权限并把回复发回原渠道。平台账号密码保存在 Koishi，不进入 Router。")}
+    <div class="stat-strip">
+      <div class="stat"><div class="stat-label">${icon("wifi")}渠道</div><div class="stat-value">${channels.length}</div><div class="stat-note">${channels.filter((item) => item.enabled).length} 个启用</div></div>
+      <div class="stat"><div class="stat-label">${icon("shield")}已绑定</div><div class="stat-value">${bound}</div><div class="stat-note">${owner ? esc(owner) : "等待首次绑定"}</div></div>
+      <div class="stat"><div class="stat-label">${icon("activity")}消息</div><div class="stat-value">${messages}</div><div class="stat-note">本次 Router 启动以来</div></div>
+      <div class="stat"><div class="stat-label">${icon("terminal")}控制台</div><div class="stat-value" style="font-size:14px">127.0.0.1:5140</div><div class="stat-note">仅服务器本机监听</div></div>
+    </div>
+
+    <div class="grid-2">
+      <section class="card">
+        <div class="card-head"><div><h2 class="card-title">绑定主人</h2><p class="card-sub">未绑定或未授权的用户不能触发工具和 Agent。</p></div>${owner ? badge("已绑定", "ok") : badge("待绑定", "warn")}</div>
+        <div class="card-body">
+          ${owner
+            ? `<div class="callout callout-ok">${icon("shield")}<div><strong>${esc(primary.name || primaryId)}</strong><p>Owner：<span class="mono">${esc(owner)}</span> · 允许用户 ${(primary.allow_users || []).length} 人</p></div></div>
+               <div class="hero-actions"><button class="btn btn-sm" data-action="channel-edit" data-channel="${esc(primaryId)}">${icon("edit")}编辑渠道</button><button class="btn btn-sm btn-danger" data-action="channel-reset-owner" data-channel="${esc(primaryId)}">${icon("refresh")}重置绑定</button></div>`
+            : `<div class="pair-code">${esc(pair || "------")}</div>
+               <p class="muted tiny">在 QQ / Telegram 私聊机器人发送：</p>
+               <div class="copy-row"><code>绑定 ${esc(pair || "XXXXXX")}</code><button class="btn btn-sm" data-action="copy" data-copy="绑定 ${esc(pair || "")}">${icon("copy")}复制</button></div>
+               <div class="hero-actions"><button class="btn btn-sm" data-action="channel-pair" data-channel="${esc(primaryId)}">${icon("refresh")}重新生成绑定码</button><button class="btn btn-sm" data-action="channel-edit" data-channel="${esc(primaryId)}">${icon("edit")}编辑渠道</button></div>`}
+          <div class="divider"></div>
+          <div class="switch-row"><div class="switch-copy"><strong>渠道启用</strong><small>关闭后 Koishi 的消息会被 Router 拒绝。</small></div><button class="switch ${primary.enabled ? "on" : ""}" type="button" data-action="channel-toggle" data-channel="${esc(primaryId)}" data-enabled="${primary.enabled ? "true" : "false"}" aria-label="启停渠道"></button></div>
+          <div class="switch-row"><div class="switch-copy"><strong>仅允许 Owner</strong><small>${(primary.allow_users || []).length ? `允许列表：${esc((primary.allow_users || []).join(", "))}` : "还没有额外允许用户"}</small></div><button class="btn btn-sm" data-action="channel-edit" data-channel="${esc(primaryId)}">管理</button></div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-head"><div><h2 class="card-title">Koishi 控制台</h2><p class="card-sub">平台登录、二维码、adapter 配置都在这里。</p></div>${badge("仅本机", "brand")}</div>
+        <div class="card-body">
+          ${callout("warn", "控制台没有公网暴露", `Koishi 只监听 127.0.0.1:5140。先在本机开 SSH 隧道，再打开 ${consoleUrl}。`)}
+          <div class="token-help" style="margin-top:14px">
+            <div class="tiny muted">1. 在本机 PowerShell 执行：</div>
+            <code>${esc(tunnel)}</code>
+            <div class="copy-row" style="margin-top:8px"><button class="btn btn-sm" data-action="copy" data-copy="${esc(tunnel)}">${icon("copy")}复制隧道命令</button><button class="btn btn-sm btn-secondary" data-action="open-console" data-url="${esc(consoleUrl)}">${icon("external")}打开控制台</button></div>
+          </div>
+          <p class="tiny muted" style="margin-top:12px">在控制台「插件配置」里启用 <span class="mono">adapter-onebot</span> 或 <span class="mono">adapter-telegram</span>，然后到「沙盒」先测试。平台账号密码不会写入 Router。</p>
+        </div>
+      </section>
+    </div>
+
+    <section class="card" style="margin-top:16px">
+      <div class="card-head"><div><h2 class="card-title">渠道列表</h2><p class="card-sub">一个 Koishi 网关可以同时接多个平台。</p></div><button class="btn btn-sm btn-ghost" data-action="channel-refresh">${icon("refresh")}刷新</button></div>
+      <div class="card-body">
+        ${channels.length ? `<div class="table-wrap"><table><thead><tr><th>渠道</th><th>类型</th><th>状态</th><th>Owner</th><th>允许用户</th><th>最近入站</th><th class="right">操作</th></tr></thead><tbody>
+          ${channels.map((channel) => `<tr>
+            <td><div class="cell-title">${esc(channel.name || channel.id)}</div><div class="cell-sub mono">${esc(channel.id)}</div></td>
+            <td>${badge(channel.type || "koishi", "brand")}</td>
+            <td><button class="switch ${channel.enabled ? "on" : ""}" type="button" data-action="channel-toggle" data-channel="${esc(channel.id)}" data-enabled="${channel.enabled ? "true" : "false"}" aria-label="启停渠道"></button> ${channel.configured ? badge("已绑定", "ok") : badge("未绑定", "warn")}</td>
+            <td class="mono tiny">${esc(channel.owner_id || "—")}</td>
+            <td>${(channel.allow_users || []).length ? `<div class="chips">${channel.allow_users.slice(0, 3).map((user) => `<span class="chip">${esc(user)}</span>`).join("")}${channel.allow_users.length > 3 ? `<span class="chip">+${channel.allow_users.length - 3}</span>` : ""}</div>` : `<span class="muted tiny">仅 Owner</span>`}</td>
+            <td class="muted tiny">${channel.last_inbound ? esc(fmtTime(channel.last_inbound, true)) : "—"}</td>
+            <td><div class="row-actions"><button class="btn btn-sm" data-action="channel-edit" data-channel="${esc(channel.id)}">${icon("edit")}编辑</button></div></td>
+          </tr>`).join("")}
+        </tbody></table></div>` : emptyState("wifi", "还没有渠道", "Router 启动时会自动创建 koishi 渠道。")}
+      </div>
+    </section>
+
+    <section class="card" style="margin-top:16px">
+      <div class="card-head"><div><h2 class="card-title">渠道消息</h2><p class="card-sub">最近 50 条入站和出站，保存在 Router 内存中。</p></div><button class="btn btn-sm btn-ghost" data-action="channel-refresh">${icon("refresh")}刷新</button></div>
+      <div class="card-body">
+        ${logs.length ? `<div class="table-wrap"><table><thead><tr><th>时间</th><th>方向</th><th>平台</th><th>用户</th><th>内容</th><th>状态</th></tr></thead><tbody>${logs.slice().reverse().map(channelLogRow).join("")}</tbody></table></div>` : emptyState("activity", "还没有渠道消息", "在 Koishi 控制台或 QQ/Telegram 里发一条消息试试。")}
+      </div>
+    </section>`;
+}
+
+async function loadChannels(render = true) {
+  if (!state.bootstrap?.server?.connected) return;
+  if (state.channelLoading) return;
+  state.channelLoading = true;
+  state.channelTried = true;
+  try {
+    const data = await api("/api/server/channels");
+    state.channels = data;
+    state.channelError = "";
+    if (render || state.page === "channels") renderPage();
+  } catch (error) {
+    state.channelError = error.message;
+    if (render || state.page === "channels") renderPage();
+    else toast(error.message, "error");
+  } finally {
+    state.channelLoading = false;
+  }
+}
+
+function channelModal(channel) {
+  const allowUsers = Array.isArray(channel.allow_users) ? channel.allow_users.join("\n") : "";
+  const tunnel = channel.ssh_tunnel || `ssh -N -L 5140:127.0.0.1:5140 root@${routerHost()}`;
+  openModal({
+    title: `编辑渠道 ${channel.id}`,
+    wide: true,
+    body: `<form id="modal-form"><div class="form-grid">
+      <div class="field"><label>渠道 ID</label><input class="input mono" name="channel_id" value="${esc(channel.id)}" readonly></div>
+      <div class="field"><label>名称</label><input class="input" name="channel_name" value="${esc(channel.name || "")}"></div>
+      <div class="field"><label>类型</label><select class="select" name="channel_type"><option value="koishi" ${channel.type === "koishi" ? "selected" : ""}>koishi</option><option value="webhook" ${channel.type === "webhook" ? "selected" : ""}>webhook</option></select></div>
+      <div class="field"><label>启用</label><select class="select" name="channel_enabled"><option value="true" ${channel.enabled ? "selected" : ""}>启用</option><option value="false" ${!channel.enabled ? "selected" : ""}>停用</option></select></div>
+      <div class="field span-2"><label>Owner ID</label><input class="input mono" name="channel_owner" value="${esc(channel.owner_id || "")}" placeholder="例如 qq:123456789 或 telegram:123456"><small>绑定码绑定后会自动写入；也可以手动填。</small></div>
+      <div class="field span-2"><label>允许用户</label><textarea class="textarea mono" name="channel_allow" rows="3" placeholder="每行一个 platform:user_id">${esc(allowUsers)}</textarea><small>Owner 自动拥有权限；这里只填额外允许的用户。</small></div>
+      <div class="field"><label>允许所有用户</label><select class="select" name="channel_allow_all"><option value="false" ${!channel.allow_all ? "selected" : ""}>否（推荐）</option><option value="true" ${channel.allow_all ? "selected" : ""}>是</option></select></div>
+      <div class="field"><label>群聊必须 @</label><select class="select" name="channel_mention_only"><option value="false" ${!channel.mention_only ? "selected" : ""}>否</option><option value="true" ${channel.mention_only ? "selected" : ""}>是</option></select></div>
+      <div class="field span-2"><label>Koishi 控制台地址</label><input class="input mono" name="channel_console" value="${esc(channel.console_url || "http://127.0.0.1:5140")}"></div>
+      <div class="field span-2"><label>SSH 隧道命令</label><input class="input mono" name="channel_tunnel" value="${esc(tunnel)}"></div>
+      <div class="span-2">${callout("info", "渠道令牌", "令牌由 Router 生成并只显示掩码；Koishi 通过 .env 读取同一个令牌。不要在前端或聊天里传令牌。")}</div>
+    </div></form>`,
+    onSubmit: async (form) => {
+      const payload = {
+        id: String(form.get("channel_id") || "").trim(),
+        name: String(form.get("channel_name") || "").trim(),
+        type: String(form.get("channel_type") || "koishi"),
+        enabled: String(form.get("channel_enabled") || "true") === "true",
+        owner_id: String(form.get("channel_owner") || "").trim(),
+        allow_users: String(form.get("channel_allow") || ""),
+        allow_all: String(form.get("channel_allow_all") || "false") === "true",
+        mention_only: String(form.get("channel_mention_only") || "false") === "true",
+        console_url: String(form.get("channel_console") || "").trim(),
+        ssh_tunnel: String(form.get("channel_tunnel") || "").trim(),
+      };
+      await api("/api/server/channels", { method: "POST", body: payload });
+      state.channels = null;
+      state.channelTried = false;
+      await loadChannels(false);
+      renderPage();
+      toast("渠道配置已保存");
+    },
+  });
 }
 
 /* ------------------------------------------------------------------ actions */
@@ -1117,6 +1308,8 @@ document.addEventListener("submit", async (event) => {
       state.server = result.overview;
       state.serverError = "";
       state.serverTried = true;
+      state.channels = null;
+      state.channelTried = false;
       if (state.bootstrap?.server) {
         state.bootstrap.server.connected = true;
         state.bootstrap.server.url = result.server.url;
@@ -1324,8 +1517,62 @@ document.addEventListener("click", async (event) => {
         state.server = null;
         state.serverTried = false;
         state.serverError = "";
+        state.channels = null;
+        state.channelTried = false;
         toast("已断开服务器");
         renderPage();
+        break;
+      }
+      case "channel-refresh":
+        state.channels = null;
+        state.channelError = "";
+        state.channelTried = false;
+        await loadChannels(true);
+        break;
+      case "channel-toggle": {
+        const id = target.dataset.channel;
+        const enabled = target.dataset.enabled === "true";
+        if (enabled && !await confirmAction("停用渠道", "停用后来自这个渠道的消息会被 Router 拒绝。", "停用")) break;
+        await api("/api/server/channels", { method: "POST", body: { id, enabled: !enabled } });
+        toast(enabled ? "渠道已停用" : "渠道已启用");
+        state.channels = null;
+        state.channelTried = false;
+        await loadChannels(true);
+        break;
+      }
+      case "channel-pair": {
+        const id = target.dataset.channel;
+        const result = await api(`/api/server/channels/${encodeURIComponent(id)}/pair`, { method: "POST" });
+        const channel = (state.channels?.channels || []).find((item) => item.id === id);
+        if (channel) channel.pair_code = result.pair_code;
+        toast("已生成新的绑定码");
+        renderPage();
+        break;
+      }
+      case "channel-reset-owner": {
+        const id = target.dataset.channel;
+        if (!await confirmAction("重置绑定", "当前 Owner 会失去权限，并生成新的绑定码。", "重置")) break;
+        const result = await api(`/api/server/channels/${encodeURIComponent(id)}/reset-owner`, { method: "POST" });
+        const channel = (state.channels?.channels || []).find((item) => item.id === id);
+        if (channel) {
+          channel.owner_id = "";
+          channel.configured = false;
+          channel.pair_code = result.pair_code;
+        }
+        toast("已重置绑定");
+        renderPage();
+        break;
+      }
+      case "channel-edit": {
+        const id = target.dataset.channel;
+        const channel = (state.channels?.channels || []).find((item) => item.id === id);
+        if (channel) channelModal(channel);
+        break;
+      }
+      case "open-console": {
+        const url = target.dataset.url || "http://127.0.0.1:5140";
+        const opened = window.open(url, "_blank");
+        if (!opened) toast(`请手动打开 ${url}（需要先开 SSH 隧道）`, "warn");
         break;
       }
       case "register-self": {

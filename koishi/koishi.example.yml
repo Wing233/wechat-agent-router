@@ -1,0 +1,28 @@
+plugins:
+  group:server:
+    server:
+      port: 5140
+      maxPort: 5149
+
+  group:console:
+    console:
+      open: false
+    config: {}
+    logger: {}
+    status: {}
+    insight: {}
+    sandbox: {}
+
+  group:storage:
+    database-sqlite:
+      path: data/koishi.db
+
+  group:adapter:
+    ~adapter-onebot: {}
+    ~adapter-telegram: {}
+
+  router-bridge:
+    routerUrl: http://127.0.0.1:9900
+    token: "${{ env.ROUTER_CHANNEL_TOKEN }}"
+    channel: koishi
+    timeoutMs: 90000

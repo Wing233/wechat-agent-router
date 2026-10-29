@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field
 
 from agent_broker import BROKER
 from attachments import AttachmentError, Attachments
+from channels import ChannelManager
 from data import CST, SiteData
 from geo import Geo
 from hub import Hub, HubError, parse_quote, parse_text
@@ -274,6 +275,7 @@ TOOLS = ToolRegistry()
 JOBS: list = []
 SERVICES: dict = {}
 SETTINGS = SettingsService(CFG, store, CONFIG_PATH)
+CHANNELS = ChannelManager(CFG)
 LOADER = PluginLoader(
     plugins_dir=Path("/app/plugins"),
     tools=TOOLS,
@@ -407,12 +409,12 @@ TOOLS.register(
 )
 
 
-def build_system_prompt() -> str:
+def build_system_prompt(origin: dict | None = None) -> str:
     lines = [
         CFG["llm"].get("system_prompt", ""),
         "",
         "## 微信网关职责",
-        "你在微信里服务站主。回答要简洁、口语化，不要 Markdown 表格。",
+        "你在即时通讯软件里服务站主。回答要简洁、口语化，不要 Markdown 表格。",
         "站点访问、访客、IP 归属地、AI 对话内容必须调用工具查询，绝不能编造数字；查不到就直说。",
         "力扣/LeetCode/刷题/做题相关的问题调用 leetcode_stats。",
         "用户发图片或文件时，系统会把图片交给视觉模型、把文件文字附在消息里；只根据实际提供的内容回答，不要假装看到了没读到的东西。",
@@ -437,14 +439,23 @@ def build_system_prompt() -> str:
         lines.append(f"- {agent['id']}：{agent.get('name','')}，{agent.get('description','')}")
     if not AGENTS:
         lines.append("- （暂无）")
+    if origin:
+        lines.extend([
+            "",
+            "## 当前会话",
+            f"渠道：{origin.get('platform') or origin.get('channel') or '未知'}",
+            f"聊天类型：{origin.get('chat_type') or '未知'}",
+            f"用户：{origin.get('user_name') or origin.get('user_id') or '未知'}",
+            "你的回复会自动发回当前渠道，不要假设用户在微信里。",
+        ])
     return "\n".join(lines)
 
 
 SYSTEM_PROMPT = build_system_prompt()
 
 
-def llm_answer(text: str, history: list[dict]) -> str:
-    messages = [{"role": "system", "content": build_system_prompt()}]
+def llm_answer(text: str, history: list[dict], origin: dict | None = None) -> str:
+    messages = [{"role": "system", "content": build_system_prompt(origin)}]
     for item in history:
         if item["role"] in ("user", "assistant"):
             messages.append({"role": item["role"], "content": item["content"]})
@@ -911,6 +922,90 @@ async def internal_ask(request: Request):
     return {"answer": answer}
 
 
+@app.post("/channel/inbound")
+async def channel_inbound(request: Request):
+    """Generic inbound endpoint used by Koishi/other chat gateways."""
+    body = await request.json()
+    channel_id = str(body.get("channel") or "koishi").strip()
+    channel, error = CHANNELS.authenticate(channel_id, request.headers.get("x-channel-token", ""))
+    if channel is None:
+        raise HTTPException(401 if "令牌" in error else 403, error)
+    platform = str(body.get("platform") or channel_id).strip()[:32]
+    chat_id = str(body.get("chat_id") or "").strip()[:200]
+    user_id = str(body.get("user_id") or "").strip()[:200]
+    user_name = str(body.get("user_name") or "").strip()[:80]
+    chat_type = str(body.get("chat_type") or "private").strip()[:20]
+    text = str(body.get("text") or "").strip()[:4000]
+    if not chat_id or not user_id:
+        raise HTTPException(400, "chat_id and user_id required")
+    if not text:
+        return {"ignored": True}
+
+    owner = str(channel.get("owner_id") or "")
+    if text in {"/id", "id", "我的id", "我的ID"}:
+        return {"reply": f"platform={platform}\nuser_id={user_id}\nchat_id={chat_id}"}
+
+    if text.startswith("绑定") or text.lower().startswith("/bind"):
+        raw = text[2:] if text.startswith("绑定") else text[5:]
+        parts = raw.strip().split()
+        code = parts[0].upper() if parts else ""
+        if owner:
+            return {"reply": "这个渠道已经绑定过主人了。需要换绑请在桌面端「渠道」页重置。"}
+        expected = str(channel.get("pair_code") or "").upper()
+        if code and expected and hmac.compare_digest(code, expected):
+            SETTINGS.bind_channel_owner(channel_id, user_id)
+            CHANNELS.record(channel_id, "in", platform=platform, chat_id=chat_id,
+                            user_id=user_id, text=text, detail="owner bound")
+            return {"reply": f"绑定成功。当前用户：{user_id}。现在可以直接提问，或用 @pc-home 派任务。"}
+        CHANNELS.record(channel_id, "in", platform=platform, chat_id=chat_id,
+                        user_id=user_id, text=text, ok=False, detail="bad pair code")
+        return {"reply": "绑定码不对，请在桌面端「渠道」页查看最新绑定码。"}
+
+    if not owner:
+        return {"reply": "这个渠道还没有绑定主人。请发送：绑定 "
+                         f"{channel.get('pair_code') or 'XXXXXX'}（绑定码在桌面端「渠道」页）。"}
+    allowed = (user_id == owner or bool(channel.get("allow_all"))
+               or user_id in (channel.get("allow_users") or []))
+    if not allowed:
+        CHANNELS.record(channel_id, "in", platform=platform, chat_id=chat_id,
+                        user_id=user_id, text=text, ok=False, detail="unauthorized user")
+        return {"reply": "未授权。请联系管理员把你的 ID 加入允许列表。"}
+    if chat_type != "private" and channel.get("mention_only") and not bool(body.get("is_mention")):
+        return {"ignored": True}
+
+    session_id = f"channel:{channel_id}:{chat_id}"
+    origin = {
+        "channel": channel_id,
+        "platform": platform,
+        "chat_id": chat_id,
+        "chat_type": chat_type,
+        "user_id": user_id,
+        "user_name": user_name or user_id,
+        "message_id": str(body.get("message_id") or "")[:200],
+    }
+    history = store.recent_messages(session_id, 10)
+    store.add_message(session_id, "user", text)
+    CHANNELS.record(channel_id, "in", platform=platform, chat_id=chat_id,
+                    user_id=user_id, text=text)
+    try:
+        answer = await asyncio.to_thread(llm_answer, text, history, origin)
+    except LLMError as exc:
+        log.error("channel llm failed: %s", exc)
+        CHANNELS.record(channel_id, "out", platform=platform, chat_id=chat_id,
+                        user_id=user_id, text="", ok=False, detail=str(exc)[:200])
+        return {"reply": "AI 暂时不可用，稍后再试。"}
+    except Exception as exc:
+        log.exception("channel inbound failed: %s", exc)
+        CHANNELS.record(channel_id, "out", platform=platform, chat_id=chat_id,
+                        user_id=user_id, text="", ok=False, detail=str(exc)[:200])
+        return {"reply": "处理这条消息时出错了，请稍后再试。"}
+    store.add_message(session_id, "assistant", answer)
+    store.log_route(session_id, text, "channel", f"{channel_id}:{platform}")
+    CHANNELS.record(channel_id, "out", platform=platform, chat_id=chat_id,
+                    user_id=user_id, text=answer)
+    return {"reply": answer, "channel": channel_id, "platform": platform, "chat_id": chat_id}
+
+
 @app.post("/internal/jobs/{job_id}/run")
 def run_job(job_id: str, request: Request):
     service_auth(request)
@@ -1037,6 +1132,41 @@ async def settings_agent_upsert(request: Request):
 def settings_agent_delete(agent_id: str, request: Request):
     service_auth(request)
     return _settings_call(SETTINGS.delete_agent, agent_id)
+
+
+@app.get("/internal/settings/channels")
+def settings_channels(request: Request):
+    service_auth(request)
+    items = SETTINGS.channels_view()
+    statuses = CHANNELS.status_all()
+    for item in items:
+        item.update(statuses.get(item["id"], {}))
+    return {"channels": items, "logs": CHANNELS.recent_logs("", 50)}
+
+
+@app.post("/internal/settings/channels")
+async def settings_channel_upsert(request: Request):
+    service_auth(request)
+    body = await request.json()
+    return _settings_call(SETTINGS.upsert_channel, body)
+
+
+@app.post("/internal/settings/channels/{channel_id}/pair")
+def settings_channel_pair(channel_id: str, request: Request):
+    service_auth(request)
+    return _settings_call(SETTINGS.rotate_channel_pair_code, channel_id)
+
+
+@app.post("/internal/settings/channels/{channel_id}/reset-owner")
+def settings_channel_reset_owner(channel_id: str, request: Request):
+    service_auth(request)
+    return _settings_call(SETTINGS.reset_channel_owner, channel_id)
+
+
+@app.get("/internal/settings/channels/logs")
+def settings_channel_logs(request: Request, channel: str = "", limit: int = 50):
+    service_auth(request)
+    return {"logs": CHANNELS.recent_logs(channel, max(1, min(limit, 200)))}
 
 
 @app.get("/internal/settings/plugins")

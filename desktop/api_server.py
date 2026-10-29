@@ -270,6 +270,20 @@ class ApiHandler(BaseHTTPRequestHandler):
             return app.server_plugin_action(unquote(m.group(1)), m.group(2))
         if method == "GET" and path == "/api/server/balance":
             return app.server_balance()
+        if method == "GET" and path == "/api/server/channels":
+            return app.server_channels()
+        if method == "POST" and path == "/api/server/channels":
+            return app.server_channel_update(body)
+        m = match(r"/api/server/channels/([^/]+)/pair")
+        if m and method == "POST":
+            return app.server_channel_pair(unquote(m.group(1)))
+        m = match(r"/api/server/channels/([^/]+)/reset-owner")
+        if m and method == "POST":
+            return app.server_channel_reset_owner(unquote(m.group(1)))
+        if method == "GET" and path == "/api/server/channels/logs":
+            channel = (query.get("channel") or [""])[0]
+            limit = _as_int(query, "limit", 50)
+            return app.server_channel_logs(channel, limit)
         if method == "GET" and path == "/api/server/logs":
             return app.server_logs(_as_int(query, "after", 0))
         if method == "POST" and path == "/api/server/register-self":

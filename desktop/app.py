@@ -356,6 +356,27 @@ class DesktopApp:
     def server_balance(self) -> dict:
         return self.router_json("GET", "/internal/settings/balance")
 
+    def server_channels(self) -> dict:
+        return self.router_json("GET", "/internal/settings/channels")
+
+    def server_channel_update(self, payload: dict) -> dict:
+        return self.router_json("POST", "/internal/settings/channels", payload)
+
+    def server_channel_pair(self, channel_id: str) -> dict:
+        from urllib.parse import quote
+        return self.router_json("POST", f"/internal/settings/channels/{quote(channel_id)}/pair")
+
+    def server_channel_reset_owner(self, channel_id: str) -> dict:
+        from urllib.parse import quote
+        return self.router_json("POST", f"/internal/settings/channels/{quote(channel_id)}/reset-owner")
+
+    def server_channel_logs(self, channel_id: str = "", limit: int = 50) -> dict:
+        params = f"?limit={int(limit)}"
+        if channel_id:
+            from urllib.parse import quote
+            params += "&channel=" + quote(channel_id)
+        return self.router_json("GET", "/internal/settings/channels/logs" + params)
+
     def server_logs(self, after: int = 0) -> dict:
         return self.router_json("GET", f"/internal/settings/logs?after={int(after)}")
 

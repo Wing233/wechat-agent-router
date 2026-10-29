@@ -1,0 +1,18 @@
+[Unit]
+Description=Koishi channel gateway for WeChat Agent Router
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/wechat-agent-router/koishi
+EnvironmentFile=/opt/wechat-agent-router/koishi/.env
+Environment=TZ=Asia/Shanghai
+ExecStart=/usr/bin/node /opt/wechat-agent-router/koishi/node_modules/koishi/bin.js start
+Restart=always
+RestartSec=5
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target
