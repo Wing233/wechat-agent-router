@@ -18,10 +18,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import parse_qs
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
+from agent_broker import BROKER
 from data import CST, SiteData
 from geo import Geo
 from hub import Hub, HubError, parse_text
@@ -157,6 +158,20 @@ def new_code() -> str:
 
 
 def call_agent(agent: dict, payload: dict, timeout: int = 20) -> dict:
+    if agent.get("transport") == "poll":
+        wait_seconds = int(CFG.get("agent_wait_seconds", 60))
+        result, task_id, done = BROKER.enqueue(agent["id"], {
+            "message": payload.get("reply", ""),
+            "engine": payload.get("engine", ""),
+            "workspace": payload.get("workspace", ""),
+            "chat_id": payload.get("chat_id", OWNER),
+            "meta": payload.get("meta") or {},
+            "wait_seconds": wait_seconds,
+        }, wait_seconds)
+        if result:
+            return {"text": result.get("text", ""), "final": True}
+        return {"text": f"任务已交给 {agent.get('name', agent['id'])}，完成后会通知你。",
+                "final": False, "task_id": task_id}
     body = json.dumps(payload, ensure_ascii=False).encode()
     sig = hmac.new(agent.get("callback_secret", "").encode(), body, hashlib.sha256).hexdigest()
     req = urllib.request.Request(agent["callback_url"], data=body, method="POST")
@@ -165,6 +180,17 @@ def call_agent(agent: dict, payload: dict, timeout: int = 20) -> dict:
     req.add_header("X-Router-Timestamp", str(int(time.time())))
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
+
+
+def agent_auth(request: Request) -> dict:
+    key = request.headers.get("x-agent-key", "")
+    auth = request.headers.get("authorization", "")
+    if not key and auth.lower().startswith("bearer "):
+        key = auth[7:].strip()
+    for agent in AGENTS.values():
+        if key and hmac.compare_digest(agent.get("api_key", ""), key):
+            return agent
+    raise HTTPException(401, "invalid agent key")
 
 
 def send_agent_result(result: dict) -> None:
@@ -242,7 +268,8 @@ def build_system_prompt() -> str:
         "查看、取消、暂停、推迟提醒用对应工具；取消时如果返回 need_choice，先让用户从候选里选。",
         "用户要求给 bot 增加新的 HTTP API 功能时调用 propose_plugin；必须提供真实 API 地址、方法、参数，不能编造。",
         "用户问定时任务多久一次、下次什么时候、修改播报间隔、启停插件时，调用 admin 的 list_jobs / get_job / set_job_interval / set_job_enabled / list_plugins 等工具，不要猜。",
-        "用户要求查看/修改服务器文件时调用 ops 的 fs_list / fs_read / fs_write / fs_replace / fs_delete / fs_move；写或删会发微信审批。允许的根目录：/lyph-src、/app/plugins、/workspace。",
+        "用户要求查看/修改服务器文件时调用 ops 的 fs_list / fs_read / fs_write / fs_replace / fs_delete / fs_move；写或删会发微信审批。允许的根目录：/app、/lyph-src、/app/plugins、/workspace。",
+        "代码检查任务：只读目标插件的 plugin.py、adapter.py、manifest.json，最多读 3 个文件；不要列 /app 或 /lyph-src 根目录；拿到 job 定义和 adapter 逻辑后立即回答。",
         "可用 Agent：",
     ]
     for agent in AGENTS.values():
@@ -262,7 +289,7 @@ def llm_answer(text: str, history: list[dict]) -> str:
             messages.append({"role": item["role"], "content": item["content"]})
     messages.append({"role": "user", "content": text})
     tool_trace: list[dict] = []
-    seen: set[str] = set()
+    seen: dict[str, dict] = {}
     for round_no in range(6):
         message = llm.complete(messages, TOOLS.definitions())
         calls = message.get("tool_calls") or []
@@ -279,16 +306,31 @@ def llm_answer(text: str, history: list[dict]) -> str:
             signature = name + "|" + json.dumps(args, ensure_ascii=False, sort_keys=True, default=str)
             if signature in seen:
                 log.info("llm repeated tool call: %s", signature[:300])
-                return f"这个查询重复了（{name}），我先停一下。你是想查 lyph 的预设问题，还是查站点数据？"
-            seen.add(signature)
+                previous = json.dumps(seen[signature], ensure_ascii=False, default=str)[:2000]
+                return f"我重复调用了 {name}，先停一下。上一次结果是：\n{previous}\n你想继续查哪一部分？"
+            seen[signature] = {"pending": True}
             log.info("llm round %s tool=%s args=%s", round_no, name,
                      json.dumps(args, ensure_ascii=False)[:300])
             result = TOOLS.execute(name, args)
+            seen[signature] = result
             tool_trace.append({"name": name, "args": args, "result": result})
             log.info("llm tool result %s: %s", name, str(result)[:300])
             encoded = json.dumps(result, ensure_ascii=False, default=str)
-            messages.append({"role": "tool", "tool_call_id": call.get("id", ""), "content": encoded[:6000]})
+            messages.append({"role": "tool", "tool_call_id": call.get("id", ""), "content": encoded[:16000]})
     if tool_trace:
+        try:
+            messages.append({"role": "user",
+                             "content": "请基于以上工具结果直接回答，不要再调用工具；信息不足就说明缺什么。"})
+            final = llm.complete(messages, None)
+            content = (final.get("content") or "").strip()
+            if content:
+                return content
+        except Exception as exc:
+            log.warning("final summarization failed: %s", exc)
+        reads = [item for item in tool_trace if "fs_read" in item["name"]]
+        if reads:
+            payload = json.dumps(reads[-1]["result"], ensure_ascii=False, default=str)
+            return f"我读到的内容：\n{payload[:1500]}"
         last = tool_trace[-1]
         result = last["result"]
         if isinstance(result, dict) and result.get("error"):
@@ -500,7 +542,7 @@ def health():
     return {"ok": True, "time": now_iso(), "agents": list(AGENTS), "tools": TOOLS.names(),
             "jobs": list(SCHEDULER.jobs), "plugins": list(LOADER.loaded),
             "plugin_errors": LOADER.errors, "services": list(SERVICES),
-            "credentials": list(CREDENTIALS)}
+            "credentials": list(CREDENTIALS), "agent_broker": BROKER.status()}
 
 
 @app.post("/v1/notify")
@@ -544,6 +586,36 @@ def notify_status(nid: str, request: Request):
     if not item or item["agent_id"] != agent["id"]:
         raise HTTPException(404, "not found")
     return {key: item[key] for key in ("id", "code", "status", "reply_text", "created_at", "expires_at")}
+
+
+@app.post("/agent/register")
+async def agent_register(request: Request):
+    agent = agent_auth(request)
+    body = await request.json()
+    BROKER.register(agent["id"], body)
+    return {"ok": True, "agent_id": agent["id"]}
+
+
+@app.get("/agent/tasks")
+def agent_tasks(request: Request, agent_id: str = ""):
+    agent = agent_auth(request)
+    if agent_id and agent_id != agent["id"]:
+        raise HTTPException(403, "agent mismatch")
+    task = BROKER.take(agent["id"])
+    if not task:
+        return Response(status_code=204)
+    return task
+
+
+@app.post("/agent/result")
+async def agent_result(request: Request):
+    agent = agent_auth(request)
+    body = await request.json()
+    task_id = str(body.get("task_id") or "")
+    if not task_id:
+        raise HTTPException(400, "task_id required")
+    ok = BROKER.complete(task_id, bool(body.get("ok")), str(body.get("text") or ""))
+    return {"ok": ok}
 
 
 @app.post("/v1/notify/{nid}/cancel")

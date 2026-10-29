@@ -6,7 +6,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-ALLOWED_ROOTS = (Path("/lyph-src"), Path("/app/plugins"), Path("/workspace"))
+ALLOWED_ROOTS = (Path("/app"), Path("/lyph-src"), Path("/app/plugins"), Path("/workspace"))
 DENY_PARTS = {".git", ".env", "config.json", "data", "node_modules", "__pycache__",
               "runtime", "host-before", "host-packages"}
 MAX_BYTES = 64 * 1024
@@ -34,7 +34,7 @@ class Ops:
         path = Path(raw).resolve(strict=False)
         root = next((item for item in ALLOWED_ROOTS if path == item or item in path.parents), None)
         if root is None:
-            raise OpsError("路径不在允许范围：/lyph-src、/app/plugins、/workspace")
+            raise OpsError("路径不在允许范围：/app、/lyph-src、/app/plugins、/workspace")
         if any(part in DENY_PARTS for part in path.parts):
             raise OpsError("该路径属于禁止访问的区域")
         return path
@@ -191,21 +191,21 @@ def apply(ctx) -> None:
 
     ctx.tools.register(
         "fs_list",
-        "列出服务器目录。允许的根：/lyph-src、/app/plugins、/workspace；禁止 .git/.env/config.json/data。",
+        "列出服务器目录。允许的根：/app、/lyph-src、/app/plugins、/workspace；禁止 .git/.env/config.json/data。",
         _schema({"path": {"type": "string"}}, ["path"]),
         _guard(lambda a: service.list_dir(a.get("path", ""))),
         aliases=("fs_list",),
     )
     ctx.tools.register(
         "fs_read",
-        "读取服务器文本文件（最大 64KB）。允许的根：/lyph-src、/app/plugins、/workspace。",
+        "读取服务器文本文件（最大 64KB）。允许的根：/app、/lyph-src、/app/plugins、/workspace。",
         _schema({"path": {"type": "string"}}, ["path"]),
         _guard(lambda a: service.read(a.get("path", ""))),
         aliases=("fs_read",),
     )
     ctx.tools.register(
         "fs_write",
-        "写入服务器文件（最大 64KB），会先发微信审批。允许的根：/lyph-src、/app/plugins、/workspace。",
+        "写入服务器文件（最大 64KB），会先发微信审批。允许的根：/app、/lyph-src、/app/plugins、/workspace。",
         _schema({"path": {"type": "string"}, "content": {"type": "string"}}, ["path", "content"]),
         _guard(lambda a: service.write(a.get("path", ""), a.get("content", ""))),
         aliases=("fs_write",),

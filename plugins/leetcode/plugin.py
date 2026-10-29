@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from .adapter import LeetCode
 
+from registry import Job
+
 
 def _schema(properties: dict, required: list[str] | None = None) -> dict:
     return {"type": "object", "properties": properties, "required": required or []}
@@ -25,6 +27,26 @@ def apply(ctx) -> None:
         lambda a: adapter.get_stats(int(a.get("limit") or 10)),
         aliases=("leetcode_stats",),
     )
+
+    options = (ctx.root_config.get("jobs") or {}).get("leetcode_check", {})
+    if options.get("enabled", True):
+        interval = int(options.get("interval_minutes", 360))
+
+        def check_cookie() -> dict:
+            data = adapter.get_stats(5)
+            return {"login_status": data.get("login_status"),
+                    "username": data.get("username")}
+
+        ctx.jobs.register(Job(
+            id="leetcode_check",
+            interval_minutes=interval,
+            handler=check_cookie,
+            enabled=True,
+            skip_empty=False,
+            window_minutes=int(options.get("window_minutes", 0) or 0),
+            meta={"type": "service", "plugin": "leetcode"},
+        ))
+        ctx.log.info("registered leetcode_check every %s minutes", interval)
 
     ctx.log.info("leetcode adapter registered")
     ctx.on_unload(lambda: ctx.log.info("leetcode plugin unloaded"))

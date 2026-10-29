@@ -177,6 +177,8 @@ class LeetCode:
             self._last_status = checked
             if ok:
                 account = username
+                status = "active"
+                self.store.mark_credential("leetcode", "active", "")
             else:
                 self.store.mark_credential("leetcode", "expired", error)
                 self.notify_login("expired")
