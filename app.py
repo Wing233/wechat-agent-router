@@ -10,9 +10,11 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 import urllib.request
 import uuid
+from collections import deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,13 +31,47 @@ from geo import Geo
 from hub import Hub, HubError, parse_quote, parse_text
 from imagegen import ImageGen
 from llm import LLM, LLMError
-from plugin_loader import PluginLoader
+from plugin_loader import PluginError, PluginLoader
 from registry import JobScheduler, ToolRegistry
 from settings_service import SettingsService
 from store import Store, now_iso
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("router")
+
+
+class RingLogHandler(logging.Handler):
+    """Keep a bounded in-memory log tail for the desktop console."""
+
+    def __init__(self, capacity: int = 800):
+        super().__init__()
+        self.items: deque[dict] = deque(maxlen=capacity)
+        self._lock = threading.Lock()
+        self._seq = 0
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            message = self.format(record)
+        except Exception:
+            message = str(record.msg)
+        with self._lock:
+            self._seq += 1
+            self.items.append({
+                "id": self._seq,
+                "ts": datetime.fromtimestamp(record.created, timezone.utc).astimezone(CST).isoformat(timespec="seconds"),
+                "level": record.levelname,
+                "logger": record.name,
+                "message": message[:4000],
+            })
+
+    def since(self, after: int = 0, limit: int = 300) -> list[dict]:
+        with self._lock:
+            return [item for item in self.items if item["id"] > after][-limit:]
+
+
+LOG_RING = RingLogHandler()
+LOG_RING.setFormatter(logging.Formatter("%(message)s"))
+logging.getLogger().addHandler(LOG_RING)
 
 CONFIG_PATH = os.environ.get("ROUTER_CONFIG", "/app/config.json")
 with open(CONFIG_PATH, "r", encoding="utf-8") as fh:
@@ -272,7 +308,44 @@ def rebuild_scheduler() -> None:
 
 refresh_services()
 rebuild_scheduler()
-SETTINGS.attach(LOADER, SCHEDULER, rebuild_scheduler, refresh_services, TOOLS)
+
+
+def reload_agents() -> None:
+    global SYSTEM_PROMPT
+    AGENTS.clear()
+    AGENTS.update({item["id"]: item for item in CFG.get("agents", [])})
+    if "agents" in LOADER.loaded:
+        try:
+            LOADER.reload("agents")
+        except Exception:
+            log.exception("agents plugin refresh failed")
+    try:
+        SYSTEM_PROMPT = build_system_prompt()
+    except Exception:
+        log.exception("system prompt refresh failed")
+
+
+def reload_llm() -> None:
+    cfg = CFG.get("llm") or {}
+    llm.endpoint = str(cfg.get("base_url") or "").rstrip("/") + "/chat/completions"
+    llm.api_key = str(cfg.get("api_key") or "")
+    llm.model = str(cfg.get("model") or "")
+
+
+def reload_hub() -> None:
+    global BASE, hub
+    BASE = str(CFG["hub"]["base_url"]).rstrip("/")
+    hub = Hub(BASE, CFG["hub"]["channel_key"], OWNER)
+
+
+def reload_public() -> None:
+    global PUBLIC_BASE
+    PUBLIC_BASE = str(CFG.get("public_base_url") or "").rstrip("/")
+
+
+SETTINGS.attach(LOADER, SCHEDULER, rebuild_scheduler, refresh_services, TOOLS,
+                reload_agents=reload_agents, reload_llm=reload_llm,
+                reload_hub=reload_hub, reload_public=reload_public)
 
 
 def send_media_tool(args: dict) -> dict:
@@ -358,6 +431,8 @@ def build_system_prompt() -> str:
         "可用 Agent：",
     ]
     for agent in AGENTS.values():
+        if agent.get("id") == "echo":
+            continue
         lines.append(f"- {agent['id']}：{agent.get('name','')}，{agent.get('description','')}")
     if not AGENTS:
         lines.append("- （暂无）")
@@ -687,7 +762,8 @@ async def lifespan(_: FastAPI):
         task.cancel()
 
 
-app = FastAPI(title="WeChat Agent Router", lifespan=lifespan)
+app = FastAPI(title="WeChat Agent Router", lifespan=lifespan,
+              docs_url=None, redoc_url=None, openapi_url=None)
 
 
 @app.get("/health")
@@ -849,6 +925,149 @@ def enable_plugin(pid: str, request: Request):
     return plugin_state()
 
 
+# ---------------------------------------------------------------------------
+# settings API for the desktop console (service token only)
+# ---------------------------------------------------------------------------
+def _settings_call(fn, *args, **kwargs):
+    try:
+        return fn(*args, **kwargs)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+    except PluginError as exc:
+        raise HTTPException(400, str(exc)) from None
+
+
+def _agents_with_presence() -> list[dict]:
+    broker = BROKER.status()
+    items = []
+    for item in SETTINGS.agents_view():
+        info = broker["agents"].get(item["id"])
+        item["online"] = bool(info and info.get("online"))
+        item["last_seen"] = info.get("last_seen") if info else None
+        item["runtime"] = (info or {}).get("meta") or {}
+        items.append(item)
+    return items
+
+
+@app.get("/internal/settings/overview")
+def settings_overview(request: Request):
+    service_auth(request)
+    return {
+        "time": now_iso(),
+        "version": "1.1.0",
+        "agents": _agents_with_presence(),
+        "plugins": SETTINGS.plugins(),
+        "plugin_errors": LOADER.errors,
+        "jobs": SETTINGS.list_jobs(),
+        "config": SETTINGS.config_view(),
+        "services": list(SERVICES),
+        "tools": TOOLS.names(),
+        "credentials": list(CREDENTIALS),
+        "broker": BROKER.status(),
+        "events": store.list_plugin_events(20),
+        "logs": LOG_RING.since(0, 80),
+    }
+
+
+@app.get("/internal/settings/config")
+def settings_config(request: Request, section: str = "all"):
+    service_auth(request)
+    return SETTINGS.config_view(section)
+
+
+@app.patch("/internal/settings/config")
+async def settings_config_set(request: Request):
+    service_auth(request)
+    body = await request.json()
+    key = str(body.get("key") or "")
+    if not key:
+        raise HTTPException(400, "key required")
+    return _settings_call(SETTINGS.config_set, key, body.get("value"))
+
+
+@app.get("/internal/settings/agents")
+def settings_agents(request: Request):
+    service_auth(request)
+    return {"agents": _agents_with_presence(), "broker": BROKER.status()}
+
+
+@app.post("/internal/settings/agents")
+async def settings_agent_upsert(request: Request):
+    service_auth(request)
+    body = await request.json()
+    return _settings_call(SETTINGS.upsert_agent, body)
+
+
+@app.delete("/internal/settings/agents/{agent_id}")
+def settings_agent_delete(agent_id: str, request: Request):
+    service_auth(request)
+    return _settings_call(SETTINGS.delete_agent, agent_id)
+
+
+@app.get("/internal/settings/plugins")
+def settings_plugins(request: Request):
+    service_auth(request)
+    return {"plugins": SETTINGS.plugins(), "errors": LOADER.errors,
+            "events": store.list_plugin_events(30)}
+
+
+@app.post("/internal/settings/plugins/{pid}/reload")
+def settings_plugin_reload(pid: str, request: Request):
+    service_auth(request)
+    return _settings_call(SETTINGS.reload_plugin, pid)
+
+
+@app.post("/internal/settings/plugins/{pid}/enable")
+def settings_plugin_enable(pid: str, request: Request):
+    service_auth(request)
+    return _settings_call(SETTINGS.enable_plugin, pid)
+
+
+@app.post("/internal/settings/plugins/{pid}/disable")
+def settings_plugin_disable(pid: str, request: Request):
+    service_auth(request)
+    return _settings_call(SETTINGS.disable_plugin, pid)
+
+
+@app.get("/internal/settings/jobs")
+def settings_jobs(request: Request):
+    service_auth(request)
+    return {"jobs": SETTINGS.list_jobs()}
+
+
+@app.patch("/internal/settings/jobs/{job_id}")
+async def settings_job_update(job_id: str, request: Request):
+    service_auth(request)
+    body = await request.json()
+    current = SETTINGS.get_job(job_id)
+    if current is None:
+        raise HTTPException(404, "job not found")
+    if "interval_minutes" in body:
+        _settings_call(SETTINGS.set_job_interval, job_id, int(body["interval_minutes"]),
+                       int(body.get("window_minutes") or body["interval_minutes"]))
+    if "enabled" in body:
+        _settings_call(SETTINGS.set_job_enabled, job_id, bool(body["enabled"]))
+    return SETTINGS.get_job(job_id) or {"id": job_id}
+
+
+@app.post("/internal/settings/jobs/{job_id}/run")
+def settings_job_run(job_id: str, request: Request):
+    service_auth(request)
+    return SCHEDULER.run_by_id(job_id)
+
+
+@app.get("/internal/settings/balance")
+def settings_balance(request: Request):
+    service_auth(request)
+    return _settings_call(SETTINGS.api_balance)
+
+
+@app.get("/internal/settings/logs")
+def settings_logs(request: Request, after: int = 0, limit: int = 300):
+    service_auth(request)
+    return {"logs": LOG_RING.since(after, max(1, min(limit, 800)))}
+
+
 @app.post("/internal/reminders/tick")
 def reminder_tick(request: Request):
     service_auth(request)
@@ -887,3 +1106,13 @@ async def login_submit(request: Request, service: str, token: str = ""):
         return HTMLResponse(adapter.login_html(f'<p class="err">校验失败：{html.escape(result.get("error", "未知错误"))}</p>'))
     send_text(f"✅ {service} 登录已更新，账号：{result.get('username') or '未知'}")
     return HTMLResponse(adapter.login_html(f'<p class="ok">已保存并校验通过：{html.escape(result.get("username") or "")}</p>'))
+
+
+@app.get("/agent-login/{service}", response_class=HTMLResponse)
+def login_page_alias(service: str, token: str = ""):
+    return login_page(service, token)
+
+
+@app.post("/agent-login/{service}", response_class=HTMLResponse)
+async def login_submit_alias(request: Request, service: str, token: str = ""):
+    return await login_submit(request, service, token)

@@ -1,0 +1,147 @@
+# 微信 Agent 桌面控制台
+
+本目录是 `local-agent` 的桌面壳和可视化配置界面。它同时管理：
+
+- 本机 Agent：身份、Agent Key、Router 地址、默认引擎/工作区、超时、启停、取消任务
+- 本地引擎：OpenCode / Codex / Claude Code / 任意命令行程序，支持试跑
+- 本地工作区：路径白名单、目录选择、打开目录
+- 服务器：Agent 注册、插件启停/重载、定时任务、脱敏配置、DeepSeek 余额
+- 本机日志：Agent 轮询、任务执行、配置修改
+
+## 直接运行（源码）
+
+```powershell
+cd D:\xx\wechatbot\agent-router
+python desktop\main.py
+```
+
+也可以双击 `desktop\run.bat`。
+
+首次启动会：
+
+1. 读取 `local-agent/config.json`；不存在则生成一份空配置
+2. 启动本地 HTTP 服务（默认 `127.0.0.1:8765`，被占用时自动换端口）
+3. 打开 WebView2 窗口；没有 WebView2 时回退 Edge 应用窗口/默认浏览器
+4. 如果配置了 Router，自动启动本机 Agent
+
+无窗口后台运行：
+
+```powershell
+python desktop\main.py --headless
+```
+
+再次双击 exe/主程序时，会检测已运行的实例并直接打开它的界面，不会重复启动 Agent。
+
+## 首次配置
+
+1. 打开「本机 Agent」，填写：
+   - Agent ID：例如 `pc-home`、`pc-office`，必须唯一
+   - Router 地址：例如 `http://123.57.153.49:9900`
+   - Agent Key：可以点「生成」，保存后同步到服务器
+   - 默认引擎 / 默认工作区
+2. 点「保存并应用」。
+3. 打开「服务器」，填写服务令牌并连接：
+
+```powershell
+ssh root@123.57.153.49 "python3 -c \"import json;print(json.load(open('/opt/wechat-agent-router/config.json'))['service_token'])\""
+```
+
+4. 连接成功后点「Agents」→「注册本机」。
+5. 微信里发：
+
+```text
+用 pc-home 的 codex 在 scratch 工作区只回复 PONG，不要修改任何文件
+```
+
+## 多台电脑
+
+每台电脑单独运行一份桌面端：
+
+- `agent_id` 必须不同：`pc-home` / `pc-office` / `pc-laptop`
+- `agent_key` 必须不同：每台点「生成」即可
+- 每台电脑自己配置引擎和工作区；服务器只传别名
+- 连接同一个 Router，各自点「注册本机」
+- 微信里用描述或 `@pc-id` 区分（当前 LLM 按描述选择，`@id` 显式前缀是下一步）
+
+不要把 `local-agent/config.json` 或 `desktop/.runtime/` 提交到 git。
+
+## 打包 exe
+
+```powershell
+cd D:\xx\wechatbot\agent-router
+powershell -ExecutionPolicy Bypass -File desktop\build.ps1
+```
+
+输出：
+
+```text
+desktop\dist\WeChatAgentDesktop.exe
+```
+
+建议把 exe 放在独立目录（例如 `D:\WeChatAgent\`）再运行。首次运行会在 exe 同目录创建：
+
+```text
+config.json        # 本机 Agent 配置（含 Agent Key，权限 600）
+data\              # 日志、实例状态、加密后的服务令牌
+```
+
+如果 exe 所在目录不可写（例如 Program Files），会自动改用 `%LOCALAPPDATA%\WeChatAgentDesktop`。
+
+## 开机自启
+
+「设置」→「开机自动启动」会创建当前用户的 Startup 快捷方式，目标参数为 `--headless`。不会注册 Windows 服务，也不需要管理员权限。
+
+关闭：
+
+- 在界面里关掉开关，或删除
+  `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\WeChatAgentDesktop.lnk`
+
+## 安全边界
+
+- 本地 HTTP 只监听 `127.0.0.1`
+- 每次启动生成随机 `X-Desktop-Token`；页面通过 URL fragment 获取，不进入服务器日志
+- 校验 `Host`，拒绝非本机 Host（防 DNS rebinding）
+- 服务令牌用 Windows DPAPI 加密保存在 `data/secrets.json`，API 只返回是否已配置
+- Agent Key / Channel Key / API Key 在界面中始终掩码，写接口只写不回显
+- 所有服务器管理接口要求 `X-Service-Token`
+- 文件操作/服务器配置修改会写入插件审计事件
+
+## 常用参数
+
+```text
+--config PATH     指定 local-agent/config.json
+--headless        只启动后台服务，不打开窗口
+--window auto     WebView2 → Edge → 浏览器（默认）
+--window webview  强制 WebView2
+--window edge     强制 Edge 应用窗口
+--window browser  强制默认浏览器
+```
+
+## 故障排查
+
+| 现象 | 处理 |
+|---|---|
+| 窗口打不开 | 确认已安装 Microsoft Edge WebView2 Runtime；或加 `--window edge` |
+| 连不上 Router | 用「测试 Router」检查地址、端口、服务器安全组 |
+| Agent 不在线 | 检查 Agent ID/Key 是否与服务器 `agents` 一致；看「日志」 |
+| Codex 拒绝执行 | 工作区需要是 git 仓库或被 Codex 信任；可在工作区 `git init` |
+| Claude 报订阅错误 | 本地 Claude Code 的账号订阅无效/过期，与桥无关 |
+| 试跑没输出 | 看「日志」和试跑弹窗；确认 CLI 已安装并在 PATH |
+| 修改配置后没生效 | 保存会重启本机 Agent；服务器配置保存后立即生效 |
+
+## 开发
+
+主要文件：
+
+```text
+desktop/main.py          入口、单实例、窗口模式
+desktop/app.py           DesktopApp：Agent 生命周期 + 服务器代理
+desktop/api_server.py    127.0.0.1 HTTP API + 静态资源
+desktop/secret_store.py  Windows DPAPI
+desktop/autostart.py     Startup 快捷方式
+desktop/web/             无构建步骤的原生 HTML/CSS/JS
+local-agent/agent_core.py  Agent 核心（CLI 和桌面端共用）
+local-agent/agent.py      命令行入口
+```
+
+改 `desktop/web/` 后重启桌面进程即可（静态资源在启动时加载）。

@@ -15,3 +15,9 @@ workspace/*
 
 local-agent/config.json
 local-agent/*.log*
+
+desktop/.runtime/
+desktop/.venv-build/
+desktop/build/
+desktop/dist/
+desktop/*.spec

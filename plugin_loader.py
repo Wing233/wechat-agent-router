@@ -144,6 +144,7 @@ class PluginLoader:
         self.audit_fn = audit_fn
         self.loaded: dict[str, dict] = {}
         self.errors: dict[str, str] = {}
+        self.disabled: set[str] = set(root_config.get("disabled_plugins") or [])
         if str(self.plugins_dir.parent) not in sys.path:
             sys.path.insert(0, str(self.plugins_dir.parent))
 
@@ -178,10 +179,13 @@ class PluginLoader:
 
     def load_all(self) -> None:
         for manifest_path in sorted(self.plugins_dir.glob("*/manifest.json")):
+            pid = manifest_path.parent.name
+            if pid in self.disabled:
+                log.info("plugin disabled, skipping: %s", pid)
+                continue
             try:
                 self.load(manifest_path)
             except Exception as exc:
-                pid = manifest_path.parent.name
                 self.errors[pid] = str(exc)[:500]
                 self._audit("error", pid, str(exc)[:500])
                 log.exception("plugin %s failed to load", pid)
@@ -189,6 +193,8 @@ class PluginLoader:
     def load(self, manifest_path: Path) -> None:
         manifest = self._manifest(manifest_path)
         pid = manifest.id
+        if pid in self.disabled:
+            raise PluginError(f"plugin disabled: {pid}")
         module = importlib.import_module(f"plugins.{pid}.{Path(manifest.entry).stem}")
         if pid in self.loaded:
             self._dispose(pid)
@@ -248,25 +254,60 @@ class PluginLoader:
         manifest_path = self.plugins_dir / pid / "manifest.json"
         if not manifest_path.is_file():
             raise PluginError(f"plugin not found: {pid}")
+        self.disabled.discard(pid)
         self.load(manifest_path)
         return True
+
+    def disable(self, pid: str) -> bool:
+        if pid not in self.loaded:
+            return False
+        self.disabled.add(pid)
+        return self.unload(pid)
+
+    def _describe_entry(self, pid: str, manifest: PluginManifest, entry: dict | None) -> dict:
+        return {
+            "id": pid,
+            "name": manifest.name,
+            "version": manifest.version,
+            "description": manifest.description,
+            "capabilities": manifest.capabilities,
+            "permissions": manifest.permissions,
+            "secrets": manifest.secrets,
+            "tools": self.tools.names_for_plugin(pid) if entry else [],
+            "jobs": [job.id for job in self.jobs if (job.meta or {}).get("plugin") == pid] if entry else [],
+            "services": (entry or {}).get("services") or [],
+            "enabled": pid not in self.disabled,
+            "loaded": entry is not None,
+            "error": self.errors.get(pid, ""),
+        }
 
     def describe(self) -> list[dict]:
         items = []
         for pid, entry in self.loaded.items():
-            manifest = entry["manifest"]
-            items.append({
-                "id": pid,
-                "name": manifest.name,
-                "version": manifest.version,
-                "capabilities": manifest.capabilities,
-                "permissions": manifest.permissions,
-                "secrets": manifest.secrets,
-                "tools": self.tools.names_for_plugin(pid),
-                "jobs": [job.id for job in self.jobs if (job.meta or {}).get("plugin") == pid],
-                "services": entry.get("services") or [],
-            })
+            items.append(self._describe_entry(pid, entry["manifest"], entry))
         return items
+
+    def describe_all(self) -> list[dict]:
+        items: dict[str, dict] = {}
+        for pid, entry in self.loaded.items():
+            items[pid] = self._describe_entry(pid, entry["manifest"], entry)
+        for manifest_path in sorted(self.plugins_dir.glob("*/manifest.json")):
+            pid = manifest_path.parent.name
+            if pid in items:
+                continue
+            try:
+                manifest = self._manifest(manifest_path)
+            except Exception as exc:
+                items[pid] = {
+                    "id": pid, "name": pid, "version": "", "description": "",
+                    "capabilities": [], "permissions": [], "secrets": [],
+                    "tools": [], "jobs": [], "services": [],
+                    "enabled": pid not in self.disabled, "loaded": False,
+                    "error": str(exc)[:300],
+                }
+                continue
+            items[pid] = self._describe_entry(pid, manifest, None)
+        return sorted(items.values(), key=lambda item: item["id"])
 
     def unload_all(self) -> None:
         for pid in list(self.loaded):

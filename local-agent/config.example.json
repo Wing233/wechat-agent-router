@@ -1,12 +1,13 @@
 {
-  "router": "http://123.57.153.49:9900",
+  "router": "http://127.0.0.1:9900",
   "agent_id": "pc-home",
   "agent_key": "REPLACE_WITH_AGENT_KEY",
+  "name": "我的电脑",
+  "description": "本地 Windows 电脑，可运行 OpenCode / Codex / Claude Code。",
   "default_engine": "opencode",
-  "default_workspace": "router",
+  "default_workspace": "workspace",
   "workspaces": {
-    "router": "D:\\xx\\wechatbot",
-    "scratch": "D:\\xx\\wechatbot\\scratch"
+    "workspace": "D:\\wechat-agent-workspace"
   },
   "engines": {
     "opencode": ["opencode", "run"],

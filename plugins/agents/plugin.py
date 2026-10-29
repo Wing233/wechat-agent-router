@@ -34,7 +34,7 @@ def apply(ctx) -> None:
         "send_to_agent",
         "把用户请求转交给已注册的项目 Agent 处理，例如爬虫、部署。",
         _schema({
-            "agent_id": {"type": "string", "enum": sorted(agents.keys()) or ["none"]},
+            "agent_id": {"type": "string", "enum": sorted(k for k in agents if k != "echo") or ["none"]},
             "message": {"type": "string"},
             "engine": {"type": "string", "description": "可选：opencode / codex / claude；不填用本地默认"},
             "workspace": {"type": "string", "description": "可选：工作区别名或绝对路径；不填用默认工作区"},
