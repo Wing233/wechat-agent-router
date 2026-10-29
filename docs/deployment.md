@@ -23,6 +23,14 @@ mkdir -p data workspace sandbox
 docker compose up -d --build
 ```
 
+如果拉取 `python:3.12-slim` 很慢，可以给 Docker 配置 registry mirror；如果 pip 很慢，可以：
+
+```bash
+docker build \
+  --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
+  -t wechat-agent-router:latest .
+```
+
 `docker-compose.yml` 默认：
 
 - 端口 `9900:9900`
