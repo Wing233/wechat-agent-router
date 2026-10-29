@@ -20,7 +20,7 @@ def apply(ctx) -> None:
 
     ctx.tools.register(
         "list_jobs",
-        "查询 bot 当前所有定时任务：任务 id、间隔分钟、窗口、所属插件、下次运行时间、是否启用。用户问“站点快报多久播报一次”时调用。",
+        "查询 bot 当前所有定时任务：任务 id、间隔分钟、窗口、所属插件、下次运行时间、是否启用。用户问“这个任务多久跑一次”时调用。",
         _schema({}),
         _guard(lambda a: settings.list_jobs()),
         aliases=("list_jobs",),
