@@ -62,6 +62,20 @@ def apply(ctx) -> None:
         aliases=("realtime",),
     )
 
+    presets = {
+        "default": ["有哪些项目", "你的技术栈", "有哪些文章"],
+        "content": ["博客列表", "文档列表", "生活日报列表"],
+        "companies": ["只看深圳", "再比较岗位", "这些企业按行业分布"],
+    }
+    ctx.tools.register(
+        "preset_questions",
+        "查询 lyph 对话的预设问题/建议问题。用户问“lyph 预设问题有哪些”时调用。",
+        _schema({"intent": {"type": "string", "enum": ["default", "content", "companies"]}}),
+        lambda a: {"intent": a.get("intent") or "default",
+                   "questions": presets.get(a.get("intent") or "default", presets["default"])},
+        aliases=("preset_questions",),
+    )
+
     options = (ctx.root_config.get("jobs") or {}).get("site_report", {})
     if options.get("enabled", True):
         interval = int(options.get("interval_minutes", 30))

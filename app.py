@@ -261,7 +261,9 @@ def llm_answer(text: str, history: list[dict]) -> str:
         if item["role"] in ("user", "assistant"):
             messages.append({"role": item["role"], "content": item["content"]})
     messages.append({"role": "user", "content": text})
-    for _ in range(4):
+    tool_trace: list[dict] = []
+    seen: set[str] = set()
+    for round_no in range(6):
         message = llm.complete(messages, TOOLS.definitions())
         calls = message.get("tool_calls") or []
         if not calls:
@@ -269,14 +271,31 @@ def llm_answer(text: str, history: list[dict]) -> str:
         messages.append({"role": "assistant", "content": message.get("content"), "tool_calls": calls})
         for call in calls:
             fn = call.get("function") or {}
+            name = fn.get("name", "")
             try:
                 args = json.loads(fn.get("arguments") or "{}")
             except Exception:
                 args = {}
-            result = TOOLS.execute(fn.get("name", ""), args)
+            signature = name + "|" + json.dumps(args, ensure_ascii=False, sort_keys=True, default=str)
+            if signature in seen:
+                log.info("llm repeated tool call: %s", signature[:300])
+                return f"这个查询重复了（{name}），我先停一下。你是想查 lyph 的预设问题，还是查站点数据？"
+            seen.add(signature)
+            log.info("llm round %s tool=%s args=%s", round_no, name,
+                     json.dumps(args, ensure_ascii=False)[:300])
+            result = TOOLS.execute(name, args)
+            tool_trace.append({"name": name, "args": args, "result": result})
+            log.info("llm tool result %s: %s", name, str(result)[:300])
             encoded = json.dumps(result, ensure_ascii=False, default=str)
             messages.append({"role": "tool", "tool_call_id": call.get("id", ""), "content": encoded[:6000]})
-    return "查询步骤有点多，先把问题缩小一点，我继续查。"
+    if tool_trace:
+        last = tool_trace[-1]
+        result = last["result"]
+        if isinstance(result, dict) and result.get("error"):
+            return f"工具 {last['name']} 报错了：{str(result['error'])[:300]}。要不要换个查法？"
+        payload = json.dumps(result, ensure_ascii=False, default=str)
+        return f"我查到一些结果，但工具调用到上限了：\n{payload[:800]}"
+    return "我没能完成这次查询，换个更具体的问法试试？"
 
 
 # ---------------------------------------------------------------------------
