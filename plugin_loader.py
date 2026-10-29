@@ -81,7 +81,7 @@ class PluginContext:
     def resource(self, name: str):
         required = {
             "site": "read:site", "geo": "read:site", "store": "db:router",
-            "agents": "agent:read", "call_agent": "agent:call",
+            "agents": "agent:read", "call_agent": "agent:call", "settings": "admin",
         }.get(name)
         if required and required not in self.permissions:
             raise PermissionError(f"plugin {self.id} lacks permission {required}")

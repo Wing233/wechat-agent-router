@@ -28,6 +28,7 @@ from hub import Hub, HubError, parse_text
 from llm import LLM, LLMError
 from plugin_loader import PluginLoader
 from registry import JobScheduler, ToolRegistry
+from settings_service import SettingsService
 from store import Store, now_iso
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -187,11 +188,13 @@ def send_agent_result(result: dict) -> None:
 TOOLS = ToolRegistry()
 JOBS: list = []
 SERVICES: dict = {}
+SETTINGS = SettingsService(CFG, store, CONFIG_PATH)
 LOADER = PluginLoader(
     plugins_dir=Path("/app/plugins"),
     tools=TOOLS,
     jobs=JOBS,
-    resources={"site": site, "geo": geo, "store": store, "agents": AGENTS, "call_agent": call_agent},
+    resources={"site": site, "geo": geo, "store": store, "agents": AGENTS,
+               "call_agent": call_agent, "settings": SETTINGS},
     root_config={"jobs": CFG.get("jobs", {}), "plugins": CFG.get("plugins", {}), "owner": OWNER},
     send_fn=send_text,
     services=SERVICES,
@@ -213,10 +216,12 @@ def refresh_services() -> None:
 def rebuild_scheduler() -> None:
     global SCHEDULER
     SCHEDULER = JobScheduler(store, JOBS)
+    SETTINGS.scheduler = SCHEDULER
 
 
 refresh_services()
 rebuild_scheduler()
+SETTINGS.attach(LOADER, SCHEDULER, rebuild_scheduler, refresh_services, TOOLS)
 
 
 def build_system_prompt() -> str:
@@ -234,6 +239,7 @@ def build_system_prompt() -> str:
         "用户说“提醒我/到点提醒/每X分钟提醒/每天X点提醒”时调用 create_reminder；一次性时间换算成带 +08:00 的 ISO。",
         "查看、取消、暂停、推迟提醒用对应工具；取消时如果返回 need_choice，先让用户从候选里选。",
         "用户要求给 bot 增加新的 HTTP API 功能时调用 propose_plugin；必须提供真实 API 地址、方法、参数，不能编造。",
+        "用户问定时任务多久一次、下次什么时候、修改播报间隔、启停插件时，调用 admin 的 list_jobs / get_job / set_job_interval / set_job_enabled / list_plugins 等工具，不要猜。",
         "可用 Agent：",
     ]
     for agent in AGENTS.values():
