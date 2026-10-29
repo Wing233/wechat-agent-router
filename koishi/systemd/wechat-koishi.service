@@ -9,6 +9,7 @@ User=root
 WorkingDirectory=/opt/wechat-agent-router/koishi
 EnvironmentFile=/opt/wechat-agent-router/koishi/.env
 Environment=TZ=Asia/Shanghai
+UMask=0077
 ExecStart=/usr/bin/node /opt/wechat-agent-router/koishi/node_modules/koishi/bin.js start
 Restart=always
 RestartSec=5
