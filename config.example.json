@@ -36,6 +36,15 @@
     "max_file_mb": 10,
     "text_chars": 20000
   },
+  "image": {
+    "base_url": "https://api.siliconflow.cn/v1",
+    "api_key": "REPLACE",
+    "model": "Kwai-Kolors/Kolors",
+    "size": "1024x1024",
+    "steps": 20,
+    "guidance": 7.5,
+    "dir": "/workspace/generated"
+  },
   "agents": [
     {
       "id": "echo",

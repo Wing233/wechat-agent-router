@@ -27,6 +27,7 @@ from attachments import AttachmentError, Attachments
 from data import CST, SiteData
 from geo import Geo
 from hub import Hub, HubError, parse_quote, parse_text
+from imagegen import ImageGen
 from llm import LLM, LLMError
 from plugin_loader import PluginLoader
 from registry import JobScheduler, ToolRegistry
@@ -68,6 +69,17 @@ ATTACHMENTS = Attachments(
     max_text_chars=int(ATTACH_CFG.get("text_chars", 20000)),
 )
 AGENTS = {item["id"]: item for item in CFG.get("agents", [])}
+IMAGE_CFG = CFG.get("image") or {}
+IMAGEGEN = ImageGen(
+    IMAGE_CFG.get("base_url") or "https://api.siliconflow.cn/v1",
+    IMAGE_CFG.get("api_key", ""),
+    IMAGE_CFG.get("model") or "Kwai-Kolors/Kolors",
+    size=IMAGE_CFG.get("size") or "1024x1024",
+    steps=int(IMAGE_CFG.get("steps", 20)),
+    guidance=float(IMAGE_CFG.get("guidance", 7.5)),
+)
+GENERATED_DIR = Path(IMAGE_CFG.get("dir") or "/workspace/generated")
+GENERATED_DIR.mkdir(parents=True, exist_ok=True)
 LOGIN_SECRET = CFG["login_token_secret"].encode()
 SERVICE_TOKEN = CFG["service_token"]
 PUBLIC_BASE = CFG["public_base_url"].rstrip("/")
@@ -295,6 +307,33 @@ TOOLS.register(
 )
 
 
+def generate_image_tool(args: dict) -> dict:
+    prompt = str(args.get("prompt") or "").strip()
+    if not prompt:
+        return {"error": "缺少 prompt"}
+    if not IMAGEGEN.enabled:
+        return {"error": "还没有配置生图 API"}
+    try:
+        path = IMAGEGEN.generate_to_file(prompt, GENERATED_DIR, args.get("size"))
+        hub.send_file(str(path), str(args.get("caption") or "画好了"))
+    except Exception as exc:
+        return {"error": f"生图失败：{exc}"}
+    return {"ok": True, "path": str(path), "prompt": prompt[:200]}
+
+
+TOOLS.register(
+    "generate_image",
+    "根据文字描述生成图片并发到微信（SiliconFlow Kolors）。用户让你画图、画自画像、生成插画时使用。",
+    {"type": "object", "properties": {
+        "prompt": {"type": "string", "description": "详细的中文画面描述"},
+        "size": {"type": "string", "description": "可选尺寸，如 1024x1024、960x1280、768x1024"},
+        "caption": {"type": "string", "description": "可选图片说明"},
+    }, "required": ["prompt"]},
+    generate_image_tool,
+    aliases=("draw_image", "text_to_image"),
+)
+
+
 def build_system_prompt() -> str:
     lines = [
         CFG["llm"].get("system_prompt", ""),
@@ -314,6 +353,7 @@ def build_system_prompt() -> str:
         "用户问定时任务多久一次、下次什么时候、修改播报间隔、启停插件时，调用 admin 的 list_jobs / get_job / set_job_interval / set_job_enabled / list_plugins 等工具，不要猜。",
         "用户要求查看/修改服务器文件时调用 ops 的 fs_list / fs_read / fs_write / fs_replace / fs_delete / fs_move；写或删会发微信审批。允许的根目录：/app、/lyph-src、/app/plugins、/workspace。",
         "用户要求把服务器上的图片、视频或文件发到微信时调用 send_media；路径只允许 /workspace 或 /data/images。",
+        "用户让你画图、生成图片、画自画像时调用 generate_image，不要用 ASCII、HTML 或代码块糊弄；prompt 用详细中文描述，生成后会自动发到微信。",
         "代码检查任务：只读目标插件的 plugin.py、adapter.py、manifest.json，最多读 3 个文件；不要列 /app 或 /lyph-src 根目录；拿到 job 定义和 adapter 逻辑后立即回答。",
         "可用 Agent：",
     ]
