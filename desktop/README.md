@@ -19,7 +19,7 @@ python desktop\main.py
 
 首次启动会：
 
-1. 读取 `local-agent/config.json`；不存在则生成一份空配置
+1. 读取本机 `config.json`（源码模式是 `local-agent/config.json`，exe 模式在 exe 同目录）；不存在则生成一份空配置
 2. 启动本地 HTTP 服务（只监听 `127.0.0.1`，端口自动分配）
 3. 打开 WebView2 窗口；没有 WebView2 时回退 Edge 应用窗口/默认浏览器
 4. 如果配置了 Router，自动启动本机 Agent
@@ -50,8 +50,10 @@ ssh root@123.57.153.49 "python3 -c \"import json;print(json.load(open('/opt/wech
 5. 微信里发：
 
 ```text
-用 pc-home 的 codex 在 scratch 工作区只回复 PONG，不要修改任何文件
+@pc-home 用 codex 在 scratch 工作区只回复 PONG，不要修改任何文件
 ```
+
+`@pc-home` 是确定性路由，不经过 LLM；不带前缀时由 LLM 按 Agent 描述选择。
 
 ## 多台电脑
 
@@ -61,7 +63,7 @@ ssh root@123.57.153.49 "python3 -c \"import json;print(json.load(open('/opt/wech
 - `agent_key` 必须不同：每台点「生成」即可
 - 每台电脑自己配置引擎和工作区；服务器只传别名
 - 连接同一个 Router，各自点「注册本机」
-- 微信里用描述或 `@pc-id` 区分（当前 LLM 按描述选择，`@id` 显式前缀是下一步）
+- 微信里用 `@pc-home` / `@pc-office` 显式路由；不带前缀时由 LLM 按描述选择
 
 不要把 `local-agent/config.json` 或 `desktop/.runtime/` 提交到 git。
 
