@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import os
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -158,3 +160,83 @@ class SettingsService:
 
     def tool_names(self) -> list[str]:
         return self.tools.names() if self.tools else []
+
+    # ------------------------------------------------------------------
+    def _mask(self, value) -> str:
+        text = str(value or "")
+        if not text:
+            return ""
+        return text[:6] + "..." + text[-4:] if len(text) > 12 else "***"
+
+    def config_view(self, section: str = "all") -> dict:
+        cfg = self.config
+        llm = dict(cfg.get("llm") or {})
+        llm["api_key"] = self._mask(llm.get("api_key"))
+        llm["system_prompt"] = f"<{len(llm.get('system_prompt') or '')} chars>"
+        hub = dict(cfg.get("hub") or {})
+        hub["channel_key"] = self._mask(hub.get("channel_key"))
+        agents = []
+        for agent in cfg.get("agents") or []:
+            item = dict(agent)
+            item["api_key"] = self._mask(item.get("api_key"))
+            item["callback_secret"] = self._mask(item.get("callback_secret"))
+            agents.append(item)
+        credentials = {key: self._mask(cfg.get(key)) for key in
+                       ("credential_key", "service_token", "login_token_secret")}
+        data = {
+            "llm": llm,
+            "hub": hub,
+            "jobs": cfg.get("jobs") or {},
+            "agents": agents,
+            "plugins": cfg.get("plugins") or {},
+            "poll_interval": cfg.get("poll_interval"),
+            "public_base_url": cfg.get("public_base_url"),
+            "credentials": credentials,
+        }
+        return data if section == "all" else {section: data.get(section)}
+
+    def config_set(self, key: str, value) -> dict:
+        key = str(key or "").strip()
+        if key == "poll_interval":
+            interval = int(value)
+            if interval < 1 or interval > 60:
+                raise ValueError("poll_interval 应在 1–60 秒之间")
+            self.config["poll_interval"] = interval
+            self._save()
+            return {"key": key, "value": interval}
+        parts = key.split(".")
+        if len(parts) == 3 and parts[0] == "jobs":
+            job_id, field = parts[1], parts[2]
+            if field == "interval_minutes":
+                return self.set_job_interval(job_id, int(value))
+            if field == "window_minutes":
+                current = self.get_job(job_id) or {}
+                return self.set_job_interval(job_id, int(current.get("interval_minutes") or value), int(value))
+            if field == "enabled":
+                enabled = value if isinstance(value, bool) else str(value).lower() in {"1", "true", "yes", "on"}
+                return self.set_job_enabled(job_id, enabled)
+        raise ValueError("只允许修改 poll_interval 和 jobs.<id>.interval_minutes/window_minutes/enabled")
+
+    def api_balance(self) -> dict:
+        llm = self.config.get("llm") or {}
+        base = str(llm.get("base_url") or "https://api.deepseek.com").rstrip("/")
+        key = str(llm.get("api_key") or "")
+        if not key:
+            raise ValueError("未配置 llm.api_key")
+        request = urllib.request.Request(base + "/user/balance",
+                                         headers={"Authorization": "Bearer " + key})
+        try:
+            with urllib.request.urlopen(request, timeout=15) as response:
+                data = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", "replace")[:300]
+            raise ValueError(f"HTTP {exc.code}: {detail}") from None
+        balances = []
+        for item in data.get("balance_infos") or []:
+            balances.append({
+                "currency": item.get("currency"),
+                "total": item.get("total_balance"),
+                "granted": item.get("granted_balance"),
+                "topped_up": item.get("topped_up_balance"),
+            })
+        return {"is_available": data.get("is_available"), "balances": balances}

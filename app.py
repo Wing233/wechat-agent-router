@@ -198,7 +198,9 @@ LOADER = PluginLoader(
     root_config={"jobs": CFG.get("jobs", {}), "plugins": CFG.get("plugins", {}), "owner": OWNER},
     send_fn=send_text,
     services=SERVICES,
-    secrets={"credential_key": CFG["credential_key"], "service_token": SERVICE_TOKEN},
+    secrets={"credential_key": CFG["credential_key"], "service_token": SERVICE_TOKEN,
+             "llm_api_key": CFG["llm"]["api_key"],
+             "ops_token": (CFG.get("ops_agent") or {}).get("token", "")},
     login_url_fn=login_url,
     audit_fn=lambda plugin_id, action, detail: store.log_plugin_event(plugin_id, action, detail),
 )

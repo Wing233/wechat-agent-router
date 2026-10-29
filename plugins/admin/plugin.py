@@ -67,6 +67,32 @@ def apply(ctx) -> None:
         aliases=("list_tools",),
     )
     ctx.tools.register(
+        "config_get",
+        "查看 bot 当前配置，密钥会脱敏。可查 llm、hub、jobs、agents、plugins、credentials、poll_interval、public_base_url。",
+        _schema({"section": {"type": "string", "enum": [
+            "all", "llm", "hub", "jobs", "agents", "plugins", "credentials",
+            "poll_interval", "public_base_url"]}}),
+        _guard(lambda a: settings.config_view(a.get("section", "all"))),
+        aliases=("config_get",),
+    )
+    ctx.tools.register(
+        "config_set",
+        "修改非敏感配置：poll_interval、jobs.<id>.interval_minutes、jobs.<id>.window_minutes、jobs.<id>.enabled。不能修改任何密钥。",
+        _schema({
+            "key": {"type": "string", "description": "例如 poll_interval 或 jobs.site_report.interval_minutes"},
+            "value": {"type": "string", "description": "新值；数字/布尔也用字符串传入"},
+        }, ["key", "value"]),
+        _guard(lambda a: settings.config_set(a.get("key", ""), a.get("value"))),
+        aliases=("config_set",),
+    )
+    ctx.tools.register(
+        "api_balance",
+        "查询 DeepSeek API 账户余额。使用已配置的 API key，不会把 key 暴露给用户。",
+        _schema({}),
+        _guard(lambda a: settings.api_balance()),
+        aliases=("api_balance",),
+    )
+    ctx.tools.register(
         "reload_plugin",
         "热加载指定插件；修改插件代码后使用。",
         _schema({"plugin_id": {"type": "string"}}, ["plugin_id"]),

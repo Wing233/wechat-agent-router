@@ -15,11 +15,15 @@ TOOL = {
 
 
 def apply(ctx):
+    api_key = ctx.secret("llm_api_key")
+
     def handler(args):
         url = URL
         for key, value in (args or {}).items():
             url = url.replace("{" + key + "}", urllib.parse.quote(str(value)))
-        status, body = ctx.http_request(METHOD, url, timeout=TIMEOUT)
+        status, body = ctx.http_request(
+            METHOD, url, headers={"Authorization": "Bearer " + api_key}, timeout=TIMEOUT
+        )
         return {"status": status, "body": body[:4000]}
 
     ctx.tools.register(TOOL["name"], TOOL["description"], TOOL["parameters"], handler,
