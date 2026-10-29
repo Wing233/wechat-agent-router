@@ -8,6 +8,7 @@ sandbox/
 backups/
 geodb/*.xdb
 *.log
+*.log.err
 
 workspace/*
 !workspace/.gitkeep
