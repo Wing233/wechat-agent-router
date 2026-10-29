@@ -20,6 +20,8 @@ QQ / Telegram / Discord / ...
 
 ## 启动
 
+需要 Node.js 18+（推荐 22）。服务器已安装 Node 22。
+
 ```bash
 cd /opt/wechat-agent-router/koishi
 npm install --omit=dev

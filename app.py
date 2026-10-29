@@ -413,7 +413,7 @@ def build_system_prompt(origin: dict | None = None) -> str:
     lines = [
         CFG["llm"].get("system_prompt", ""),
         "",
-        "## 微信网关职责",
+        "## 即时通讯网关职责",
         "你在即时通讯软件里服务站主。回答要简洁、口语化，不要 Markdown 表格。",
         "站点访问、访客、IP 归属地、AI 对话内容必须调用工具查询，绝不能编造数字；查不到就直说。",
         "力扣/LeetCode/刷题/做题相关的问题调用 leetcode_stats。",
