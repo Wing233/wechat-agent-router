@@ -13,6 +13,7 @@ services:
       - ./workspace:/workspace
       - /opt/lyph:/lyph-src
       - /opt/git/wechat-agent-router.git:/opt/git/wechat-agent-router.git
+      - /opt/git/lyph.git:/opt/git/lyph.git
       - /var/lib/docker/volumes/lyph_business/_data:/lyph-data
     networks:
       - default

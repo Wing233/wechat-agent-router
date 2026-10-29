@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 from pathlib import Path
 
 ALLOWED_ROOTS = (Path("/lyph-src"), Path("/app/plugins"), Path("/workspace"))
@@ -109,6 +110,34 @@ class Ops:
         return self._propose("move", source, f"准备移动 {source} → {target}", dst=str(target))
 
     # ------------------------------------------------------------------
+    def _git_sync(self, paths) -> str:
+        rels: list[str] = []
+        root = Path("/lyph-src")
+        for item in paths:
+            try:
+                rel = str(Path(str(item)).resolve().relative_to(root))
+            except Exception:
+                continue
+            if rel and rel not in rels:
+                rels.append(rel)
+        if not rels:
+            return ""
+        base = ["git", "-c", "safe.directory=/lyph-src", "-C", "/lyph-src"]
+        commands = [
+            base + ["add", "-A", "--", *rels],
+            base + ["-c", "user.name=ops", "-c", "user.email=ops@local",
+                    "commit", "-m", "ops: update " + ", ".join(rels)[:120]],
+            base + ["push", "origin", "main"],
+        ]
+        for command in commands:
+            proc = subprocess.run(command, capture_output=True, text=True, timeout=30)
+            if proc.returncode != 0:
+                output = (proc.stdout + proc.stderr).strip()
+                if "nothing to commit" in output or "no changes added" in output:
+                    continue
+                return f"（git 同步失败：{output[-200:]}）"
+        return "（已同步到 lyph git）"
+
     def handle_reply(self, notification: dict, text: str) -> dict:
         meta = notification.get("meta") or {}
         if not any(word in text.lower() for word in ("approve", "同意", "执行", "通过")):
@@ -138,7 +167,9 @@ class Ops:
             self.store.log_plugin_event("ops", "error", f"{action} {path}: {exc}")
             return {"text": f"操作失败：{exc}", "final": True}
         self.store.log_plugin_event("ops", action, str(path))
-        return {"text": f"✅ {result}", "final": True}
+        touched = [path, Path(str(meta.get("dst")))] if action == "move" else [path]
+        note = self._git_sync(touched)
+        return {"text": f"✅ {result}{note}", "final": True}
 
 
 def _schema(properties: dict, required: list[str] | None = None) -> dict:
