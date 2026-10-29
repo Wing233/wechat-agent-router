@@ -91,6 +91,14 @@ def run_window(url: str, app, mode: str = "auto") -> str:
 
 def open_existing(url: str) -> str:
     """Open the UI of an already-running instance, then let the caller exit."""
+    try:
+        import webview  # type: ignore
+        webview.create_window("微信 Agent 控制台", url, width=1320, height=900,
+                              min_size=(1080, 700), background_color="#f4f6f8")
+        webview.start(debug=False)
+        return "webview"
+    except Exception:
+        pass
     proc = open_app_window(url)
     if proc is not None:
         return "edge"

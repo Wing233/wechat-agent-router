@@ -20,7 +20,7 @@ python desktop\main.py
 首次启动会：
 
 1. 读取 `local-agent/config.json`；不存在则生成一份空配置
-2. 启动本地 HTTP 服务（默认 `127.0.0.1:8765`，被占用时自动换端口）
+2. 启动本地 HTTP 服务（只监听 `127.0.0.1`，端口自动分配）
 3. 打开 WebView2 窗口；没有 WebView2 时回退 Edge 应用窗口/默认浏览器
 4. 如果配置了 Router，自动启动本机 Agent
 

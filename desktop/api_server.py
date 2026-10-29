@@ -49,10 +49,7 @@ class ApiServer:
 
     def start(self) -> None:
         handler = _make_handler(self.app, self)
-        try:
-            self.httpd = ThreadingHTTPServer(("127.0.0.1", 8765), handler)
-        except OSError:
-            self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
         self.httpd.daemon_threads = True
         self.port = int(self.httpd.server_address[1])
         self.url = f"http://127.0.0.1:{self.port}/"
