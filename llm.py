@@ -17,8 +17,11 @@ class LLM:
         self.model = model
         self.timeout = timeout
 
-    def complete(self, messages: list[dict], tools: list[dict] | None = None) -> dict:
+    def complete(self, messages: list[dict], tools: list[dict] | None = None,
+                 max_tokens: int | None = None) -> dict:
         payload = {"model": self.model, "messages": messages, "temperature": 0.3}
+        if max_tokens:
+            payload["max_tokens"] = int(max_tokens)
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"

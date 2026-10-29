@@ -23,6 +23,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 from agent_broker import BROKER
+from attachments import AttachmentError, Attachments
 from data import CST, SiteData
 from geo import Geo
 from hub import Hub, HubError, parse_quote, parse_text
@@ -56,6 +57,16 @@ site = SiteData(
     CFG["lyph"].get("exclude_visitor_ids", []),
 )
 llm = LLM(CFG["llm"]["base_url"], CFG["llm"]["api_key"], CFG["llm"]["model"])
+ATTACH_CFG = CFG.get("attachments") or {}
+ATTACHMENTS = Attachments(
+    hub, llm,
+    base_dir=str(ATTACH_CFG.get("dir") or "/workspace/inbox"),
+    enabled=bool(ATTACH_CFG.get("enabled", True)),
+    max_files=int(ATTACH_CFG.get("max_files", 3)),
+    max_image_bytes=int(float(ATTACH_CFG.get("max_image_mb", 4)) * 1024 * 1024),
+    max_file_bytes=int(float(ATTACH_CFG.get("max_file_mb", 10)) * 1024 * 1024),
+    max_text_chars=int(ATTACH_CFG.get("text_chars", 20000)),
+)
 AGENTS = {item["id"]: item for item in CFG.get("agents", [])}
 LOGIN_SECRET = CFG["login_token_secret"].encode()
 SERVICE_TOKEN = CFG["service_token"]
@@ -252,6 +263,38 @@ rebuild_scheduler()
 SETTINGS.attach(LOADER, SCHEDULER, rebuild_scheduler, refresh_services, TOOLS)
 
 
+def send_media_tool(args: dict) -> dict:
+    raw = str(args.get("path") or "").strip()
+    if not raw:
+        return {"error": "缺少 path"}
+    path = Path(raw).resolve()
+    roots = (Path("/workspace").resolve(), IMAGE_DIR.resolve())
+    if not any(path == root or root in path.parents for root in roots):
+        return {"error": "只允许发送 /workspace 或 /data/images 下的文件"}
+    if not path.is_file():
+        return {"error": f"文件不存在：{path}"}
+    size = path.stat().st_size
+    if size > 32 * 1024 * 1024:
+        return {"error": f"文件过大：{size} 字节（上限 32MB）"}
+    try:
+        hub.send_file(str(path), str(args.get("caption") or ""))
+    except Exception as exc:
+        return {"error": f"发送失败：{exc}"}
+    return {"ok": True, "path": str(path), "size": size}
+
+
+TOOLS.register(
+    "send_media",
+    "把服务器上的图片、视频或文件发到微信。路径必须在 /workspace 或 /data/images 下，单文件不超过 32MB。",
+    {"type": "object", "properties": {
+        "path": {"type": "string", "description": "服务器绝对路径"},
+        "caption": {"type": "string", "description": "可选说明文字"},
+    }, "required": ["path"]},
+    send_media_tool,
+    aliases=("send_file", "send_image"),
+)
+
+
 def build_system_prompt() -> str:
     lines = [
         CFG["llm"].get("system_prompt", ""),
@@ -260,6 +303,7 @@ def build_system_prompt() -> str:
         "你在微信里服务站主。回答要简洁、口语化，不要 Markdown 表格。",
         "站点访问、访客、IP 归属地、AI 对话内容必须调用工具查询，绝不能编造数字；查不到就直说。",
         "力扣/LeetCode/刷题/做题相关的问题调用 leetcode_stats。",
+        "用户发图片或文件时，系统会把图片交给视觉模型、把文件文字附在消息里；只根据实际提供的内容回答，不要假装看到了没读到的东西。",
         "用户要求某个项目 Agent 做事时调用 send_to_agent，不要假装已经完成。",
         "如果用户是在回复某条待处理通知，系统会先做匹配；你不需要猜。",
         "不确定用户指哪个 Agent 时，先反问一句。",
@@ -269,6 +313,7 @@ def build_system_prompt() -> str:
         "用户要求给 bot 增加新的 HTTP API 功能时调用 propose_plugin；必须提供真实 API 地址、方法、参数，不能编造。",
         "用户问定时任务多久一次、下次什么时候、修改播报间隔、启停插件时，调用 admin 的 list_jobs / get_job / set_job_interval / set_job_enabled / list_plugins 等工具，不要猜。",
         "用户要求查看/修改服务器文件时调用 ops 的 fs_list / fs_read / fs_write / fs_replace / fs_delete / fs_move；写或删会发微信审批。允许的根目录：/app、/lyph-src、/app/plugins、/workspace。",
+        "用户要求把服务器上的图片、视频或文件发到微信时调用 send_media；路径只允许 /workspace 或 /data/images。",
         "代码检查任务：只读目标插件的 plugin.py、adapter.py、manifest.json，最多读 3 个文件；不要列 /app 或 /lyph-src 根目录；拿到 job 定义和 adapter 逻辑后立即回答。",
         "可用 Agent：",
     ]
@@ -442,32 +487,67 @@ def handle_reply(notification: dict, text: str) -> None:
         send_text(f"已收到，但 {agent.get('name', agent['id'])} 暂时没有响应，稍后我会再试。")
 
 
+def answer_with_attachments(text: str, history: list[dict], bundle: dict) -> str:
+    notes = list(bundle.get("notes") or [])
+    errors = list(bundle.get("errors") or [])
+    if errors:
+        notes.append("附件处理失败：\n" + "\n".join(errors))
+    images = bundle.get("images") or []
+    if images:
+        prompt = text or "请说明这些图片里有什么。"
+        if notes:
+            prompt += "\n\n附件信息：\n" + "\n\n".join(notes)
+        vision = ATTACHMENTS.describe(images, prompt)
+        if not notes:
+            return vision
+        combined = [f"用户发了图片。视觉模型看到：\n{vision}",
+                    "附件内容：\n" + "\n\n".join(notes)]
+        if text:
+            combined.append("用户问题：" + text)
+        return llm_answer("\n\n".join(combined), history)
+    prompt = text or "请查看我发的附件。"
+    if notes:
+        prompt += "\n\n[附件内容]\n" + "\n\n".join(notes)
+    return llm_answer(prompt, history)
+
+
 def handle_inbound(text: str, message: dict) -> None:
     text = (text or "").strip()
     quote = parse_quote(message)
-    if not text:
+    try:
+        bundle = ATTACHMENTS.collect(message)
+    except Exception as exc:
+        log.warning("attachment collect failed: %s", exc)
+        bundle = {"items": 0, "images": [], "notes": [], "errors": [str(exc)], "saved": []}
+    has_attachments = bool(bundle.get("items"))
+    if not text and not has_attachments:
         send_text("暂不支持这种消息类型，发文字给我吧。")
         return
     history = store.recent_messages(OWNER, 10)
-    store.add_message(OWNER, "user", text)
+    display = text or ("[图片]" if bundle.get("images") else "[附件]")
+    store.add_message(OWNER, "user", display)
     flush_outbox()
     if text in {"力扣登录", "更新力扣", "绑定力扣", "leetcode登录"}:
         if LEETCODE is not None:
             LEETCODE.notify_login("missing", force=True)
         return
-    pending = match_pending(text, OWNER, quote)
-    if pending == "ASKED":
-        return
-    if isinstance(pending, dict):
-        store.log_route(OWNER, text, "pending", pending["code"])
-        handle_reply(pending, text)
-        return
+    if not has_attachments:
+        pending = match_pending(text, OWNER, quote)
+        if pending == "ASKED":
+            return
+        if isinstance(pending, dict):
+            store.log_route(OWNER, text, "pending", pending["code"])
+            handle_reply(pending, text)
+            return
     try:
-        answer = llm_answer(text, history)
+        answer = answer_with_attachments(text, history, bundle)
+    except AttachmentError as exc:
+        log.error("attachment vision failed: %s", exc)
+        answer = f"附件收到了，但识图失败：{exc}"
     except LLMError as exc:
         log.error("llm failed: %s", exc)
         answer = "AI 暂时不可用，稍后我再试。"
-    store.log_route(OWNER, text, "llm")
+    store.log_route(OWNER, display, "llm", "attachment" if has_attachments else "")
     store.add_message(OWNER, "assistant", answer)
     send_text(answer)
 
