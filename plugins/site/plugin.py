@@ -62,18 +62,26 @@ def apply(ctx) -> None:
         aliases=("realtime",),
     )
 
-    presets = {
-        "default": ["有哪些项目", "你的技术栈", "有哪些文章"],
-        "content": ["博客列表", "文档列表", "生活日报列表"],
-        "companies": ["只看深圳", "再比较岗位", "这些企业按行业分布"],
-    }
     ctx.tools.register(
         "preset_questions",
         "查询 lyph 对话的预设问题/建议问题。用户问“lyph 预设问题有哪些”时调用。",
         _schema({"intent": {"type": "string", "enum": ["default", "content", "companies"]}}),
         lambda a: {"intent": a.get("intent") or "default",
-                   "questions": presets.get(a.get("intent") or "default", presets["default"])},
+                   "questions": site.preset_questions(a.get("intent") or "default")},
         aliases=("preset_questions",),
+    )
+    ctx.tools.register(
+        "set_preset_questions",
+        "修改 lyph 对话的预设问题（1–5 条）。用户要求修改预设问题时调用；intent 是 default/content/companies。",
+        _schema({
+            "intent": {"type": "string", "enum": ["default", "content", "companies"]},
+            "questions": {"type": "array", "items": {"type": "string", "maxLength": 120},
+                          "minItems": 1, "maxItems": 5},
+        }, ["intent", "questions"]),
+        lambda a: {"ok": True, "intent": a.get("intent") or "default",
+                   "questions": site.set_preset_questions(
+                       a.get("intent") or "default", a.get("questions") or [])},
+        aliases=("set_preset_questions",),
     )
 
     options = (ctx.root_config.get("jobs") or {}).get("site_report", {})

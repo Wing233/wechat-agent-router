@@ -1,6 +1,7 @@
 """Read-only queries over the lyph SQLite database."""
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
@@ -8,6 +9,12 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 CST = ZoneInfo("Asia/Shanghai")
+
+DEFAULT_PRESETS = {
+    "default": ["有哪些项目", "你的技术栈", "有哪些文章"],
+    "content": ["博客列表", "文档列表", "生活日报列表"],
+    "companies": ["只看深圳", "再比较岗位", "这些企业按行业分布"],
+}
 
 
 def _parse(value: str) -> datetime:
@@ -221,6 +228,49 @@ class SiteData:
                 [left, right, *values],
             )]
         return {"range": label, "totals": totals, "top_questions": top}
+
+    def preset_questions(self, intent: str = "default") -> list[str]:
+        intent = intent if intent in DEFAULT_PRESETS else "default"
+        try:
+            with self._conn() as conn:
+                row = conn.execute(
+                    "SELECT questions_json FROM chat_presets WHERE intent=?", (intent,)
+                ).fetchone()
+            if row:
+                items = json.loads(row["questions_json"])
+                cleaned = [str(item).strip()[:120] for item in items if str(item).strip()]
+                if cleaned:
+                    return cleaned[:5]
+        except sqlite3.Error:
+            pass
+        return list(DEFAULT_PRESETS[intent])
+
+    def set_preset_questions(self, intent: str, questions: list[str]) -> list[str]:
+        if intent not in DEFAULT_PRESETS:
+            raise ValueError("intent 必须是 default / content / companies")
+        cleaned: list[str] = []
+        for item in questions or []:
+            text = str(item).strip()[:120]
+            if text and text not in cleaned:
+                cleaned.append(text)
+        if not cleaned or len(cleaned) > 5:
+            raise ValueError("预设问题需要 1–5 条")
+        conn = sqlite3.connect(str(self.path), timeout=10)
+        try:
+            conn.execute("PRAGMA busy_timeout=10000")
+            conn.execute("""CREATE TABLE IF NOT EXISTS chat_presets(
+              intent TEXT PRIMARY KEY, questions_json TEXT NOT NULL, updated_at TEXT NOT NULL)""")
+            conn.execute(
+                """INSERT INTO chat_presets(intent,questions_json,updated_at) VALUES(?,?,?)
+                   ON CONFLICT(intent) DO UPDATE SET
+                     questions_json=excluded.questions_json,updated_at=excluded.updated_at""",
+                (intent, json.dumps(cleaned, ensure_ascii=False),
+                 datetime.now(timezone.utc).isoformat(timespec="seconds")),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return cleaned
 
     def realtime(self, minutes: int = 30) -> dict:
         name = "custom"
