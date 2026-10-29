@@ -96,6 +96,8 @@ function isMentioned(session) {
   if (session.isDirect) return true
   const selfId = String(session.selfId || '')
   const elements = Array.isArray(session.elements) ? session.elements : []
-  return elements.some((element) => element && element.type === 'at' &&
-    String(element.attrs?.id || '') === selfId)
+  if (elements.some((element) => element && element.type === 'at' &&
+    String(element.attrs?.id || '') === selfId)) return true
+  const username = String(session.username || '')
+  return Boolean(username && String(session.content || '').includes('@' + username))
 }
