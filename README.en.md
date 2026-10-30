@@ -51,6 +51,7 @@ File changes require an approval code. Images are understood directly. Drawings 
 - [Roadmap](#roadmap)
 - [Contributing](#contributing)
 - [License](#license)
+- [Related projects](#related-projects)
 - [Acknowledgements](#acknowledgements)
 
 ---
@@ -919,6 +920,12 @@ See [`docs/`](docs/) for development docs.
 ## License
 
 [MIT](LICENSE) © 2026 Wing233
+
+---
+
+## Related projects
+
+- [LYPH](https://github.com/Wing233/lyph) — self-hosted personal site + AI agent chat + desktop capture daily reports + PWA collector
 
 ---
 

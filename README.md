@@ -51,6 +51,7 @@
 - [Roadmap](#roadmap)
 - [贡献](#贡献)
 - [License](#license)
+- [相关项目](#相关项目)
 - [致谢](#致谢)
 
 ---
@@ -936,10 +937,15 @@ pytest
 
 ---
 
+## 相关项目
+
+- [LYPH](https://github.com/Wing233/lyph) — 可自托管的个人站点 + AI Agent 对话 + 桌面截图日报 + PWA 采集台
+
+---
+
 ## 致谢
 
-- [OpeniLink Hub](https://github.com/openilink/openilink-hub) — 微信通道与消息管理
-- [FastAPI](https://fastapi.tiangolo.com/) / [Uvicorn](https://www.uvicorn.org/) — HTTP 服务
+- [OpeniLink Hub](https://github.com/openilink/openilink-hub) — 微信通道与消息管理- [FastAPI](https://fastapi.tiangolo.com/) / [Uvicorn](https://www.uvicorn.org/) — HTTP 服务
 - [APScheduler](https://apscheduler.readthedocs.io/) — 定时任务
 - [cryptography](https://cryptography.io/) — Fernet 加密
 - [pypdf](https://pypdf.readthedocs.io/) / [python-docx](https://python-docx.readthedocs.io/) — 文档解析
