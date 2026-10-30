@@ -7,6 +7,7 @@
     "start": "koishi start"
   },
   "dependencies": {
+    "@koishijs/plugin-adapter-qq": "^4.14.0",
     "@koishijs/plugin-adapter-telegram": "^4.5.11",
     "@koishijs/plugin-config": "^2.8.7",
     "@koishijs/plugin-console": "^5.30.11",

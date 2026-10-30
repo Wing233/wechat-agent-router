@@ -1,4 +1,5 @@
 plugins:
+  http: {}
   group:server:
     server:
       port: 5140
@@ -21,6 +22,7 @@ plugins:
 
   group:adapter:
     ~adapter-onebot: {}
+    ~adapter-qq: {}
     ~adapter-telegram: {}
 
   router-bridge:

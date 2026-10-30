@@ -69,6 +69,37 @@ ssh -N -L 5140:127.0.0.1:5140 root@123.57.153.49
 3. 启用插件
 4. 在「沙盒」里先测试一条消息
 
+## 官方 QQ 机器人（AppID + AppSecret）
+
+如果用的是 QQ 开放平台的官方机器人，不要走「设置 AI 服务 → 其他机器人服务」的扫码流程；那个二维码只给已接入 QQ AI 服务协议的第三方平台。自建服务用官方 adapter：
+
+```yaml
+adapter-qq:
+  id: "你的 AppID"
+  secret: "你的 AppSecret"
+  type: private          # 或 public
+  sandbox: false
+  protocol: websocket
+  intents: 33554432      # 群聊 + C2C 消息事件
+```
+
+`id` 是 AppID，`secret` 是 AppSecret；不需要额外的 bot token。配置后 Koishi 会连接：
+
+```text
+wss://api.sgroup.qq.com/websocket
+```
+
+然后把机器人加到 QQ 群：在 QQ 开放平台/机器人资料页使用「分享/添加到群」，用手机 QQ 扫码或打开分享链接。加群后 @ 机器人即可。
+
+如果连接成功但收不到消息，检查：
+
+- 机器人是否已经加入群
+- `type` 是 `private` 还是 `public`
+- `sandbox` 是否与 QQ 后台环境一致
+- `intents` 是否包含群聊/C2C 消息事件
+
+个人 QQ（非官方机器人）才用 NapCat/OneBot 扫码登录，和这个后台不是同一条路。
+
 ## 身份映射
 
 Router 默认把所有 QQ/Telegram 用户当作**只读访客**。要获得和微信主人相同的权限：
