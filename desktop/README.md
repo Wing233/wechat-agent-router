@@ -6,7 +6,7 @@
 - 本地引擎：OpenCode / Codex / Claude Code / 任意命令行程序，支持试跑
 - 本地工作区：路径白名单、目录选择、打开目录
 - 服务器：Agent 注册、插件启停/重载、定时任务、脱敏配置、DeepSeek 余额
-- 渠道：QQ / Telegram / Discord 等经 Koishi 接入，绑定主人、允许列表、@ 规则
+- 渠道：QQ / Telegram / Discord 等经 Koishi 接入，统一身份映射、群聊 @、访客只读
 - 本机日志：Agent 轮询、任务执行、配置修改
 
 ## 直接运行（源码）
@@ -73,18 +73,31 @@ systemctl enable --now wechat-koishi
 
 配置平台账号：
 
+1. 打开 `https://123.57.153.49/koishi/`
+2. 输入 Basic Auth 用户名/密码（保存在服务器 `/root/koishi-console-password.txt`）
+3. 首次访问会要求绑定 Authenticator；之后每次输入 6 位动态码
+4. 「插件配置」→ 启用 `adapter-onebot` 或 `adapter-telegram`
+5. 「沙盒」先测试
+
+忘记 Authenticator 时，在桌面端「渠道」页点「重置 2FA」，再重新绑定。
+
+也可以继续用 SSH 隧道作为备用：
+
 ```powershell
-# 本机开隧道
 ssh -N -L 5140:127.0.0.1:5140 root@123.57.153.49
 ```
 
-浏览器打开 `http://127.0.0.1:5140` → 「插件配置」→ 启用 `adapter-onebot` 或 `adapter-telegram` → 「沙盒」测试。
+身份映射：
 
-绑定主人：
+1. 在 QQ/Telegram 私聊机器人发送 `/id`
+2. 把返回的 `platform:user_id` 填到桌面端「渠道 → 主人身份」
+3. 保存后，该账号的私聊与微信共用同一个 owner 身份、历史、工具和 Agent 路由
 
-1. 桌面端「渠道」页查看绑定码
-2. 在 QQ/Telegram 私聊机器人发送 `绑定 ABC123`
-3. 绑定后即可提问；其他用户需要加入允许列表
+群聊规则：
+
+- 必须 @ 机器人才会处理
+- 非 owner 只读：只能问公开数据，不能碰文件、配置和 Agent
+- 群聊上下文与私聊隔离
 
 当前行为：
 

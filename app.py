@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextvars
 import hashlib
 import hmac
 import html
@@ -21,7 +22,7 @@ from pathlib import Path
 from urllib.parse import parse_qs
 
 from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 from agent_broker import BROKER
@@ -31,6 +32,7 @@ from data import CST, SiteData
 from geo import Geo
 from hub import Hub, HubError, parse_quote, parse_text
 from imagegen import ImageGen
+import koishi_auth as ka
 from llm import LLM, LLMError
 from plugin_loader import PluginError, PluginLoader
 from registry import JobScheduler, ToolRegistry
@@ -39,6 +41,16 @@ from store import Store, now_iso
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("router")
+
+ORIGIN = contextvars.ContextVar("chat_origin", default=None)
+GUEST_TOOLS = {
+    "site__chat_stats",
+    "site__visit_stats",
+    "site__realtime",
+    "leetcode__leetcode_stats",
+    "demo_time__now",
+    "demo_weather__now",
+}
 
 
 class RingLogHandler(logging.Handler):
@@ -187,6 +199,12 @@ def send_payload(payload: dict) -> bool:
 
 
 def send_text(text: str) -> bool:
+    origin = ORIGIN.get()
+    if origin is not None:
+        collector = origin.get("collector")
+        if collector is not None:
+            collector.append(str(text))
+            return True
     return send_payload({"kind": "text", "text": text, "recipient": OWNER})
 
 
@@ -409,7 +427,7 @@ TOOLS.register(
 )
 
 
-def build_system_prompt(origin: dict | None = None) -> str:
+def build_system_prompt(origin: dict | None = None, role: str = "owner") -> str:
     lines = [
         CFG["llm"].get("system_prompt", ""),
         "",
@@ -446,7 +464,15 @@ def build_system_prompt(origin: dict | None = None) -> str:
             f"渠道：{origin.get('platform') or origin.get('channel') or '未知'}",
             f"聊天类型：{origin.get('chat_type') or '未知'}",
             f"用户：{origin.get('user_name') or origin.get('user_id') or '未知'}",
+            f"身份：{'主人' if role == 'owner' else '访客'}",
             "你的回复会自动发回当前渠道，不要假设用户在微信里。",
+        ])
+    if role != "owner":
+        lines.extend([
+            "",
+            "## 只读权限",
+            "当前用户是访客或群成员，只读。不能执行文件操作、Agent 任务、定时提醒、配置修改或任何写操作。",
+            "只能回答一般问题，以及公开的站点统计、力扣统计、时间和天气。",
         ])
     return "\n".join(lines)
 
@@ -454,8 +480,10 @@ def build_system_prompt(origin: dict | None = None) -> str:
 SYSTEM_PROMPT = build_system_prompt()
 
 
-def llm_answer(text: str, history: list[dict], origin: dict | None = None) -> str:
-    messages = [{"role": "system", "content": build_system_prompt(origin)}]
+def llm_answer(text: str, history: list[dict], origin: dict | None = None,
+               role: str = "owner") -> str:
+    messages = [{"role": "system", "content": build_system_prompt(origin, role)}]
+    allowed = None if role == "owner" else GUEST_TOOLS
     for item in history:
         if item["role"] in ("user", "assistant"):
             messages.append({"role": item["role"], "content": item["content"]})
@@ -463,7 +491,7 @@ def llm_answer(text: str, history: list[dict], origin: dict | None = None) -> st
     tool_trace: list[dict] = []
     seen: dict[str, dict] = {}
     for round_no in range(6):
-        message = llm.complete(messages, TOOLS.definitions())
+        message = llm.complete(messages, TOOLS.definitions(allowed))
         calls = message.get("tool_calls") or []
         if not calls:
             return (message.get("content") or "").strip() or "我在，但这次没想出怎么回答。"
@@ -483,7 +511,10 @@ def llm_answer(text: str, history: list[dict], origin: dict | None = None) -> st
             seen[signature] = {"pending": True}
             log.info("llm round %s tool=%s args=%s", round_no, name,
                      json.dumps(args, ensure_ascii=False)[:300])
-            result = TOOLS.execute(name, args)
+            if allowed is not None and name not in allowed:
+                result = {"error": "当前会话是只读模式，不能调用这个工具"}
+            else:
+                result = TOOLS.execute(name, args)
             seen[signature] = result
             tool_trace.append({"name": name, "args": args, "result": result})
             log.info("llm tool result %s: %s", name, str(result)[:300])
@@ -624,7 +655,8 @@ def handle_reply(notification: dict, text: str) -> None:
         send_text(f"已收到，但 {agent.get('name', agent['id'])} 暂时没有响应，稍后我会再试。")
 
 
-def answer_with_attachments(text: str, history: list[dict], bundle: dict) -> str:
+def answer_with_attachments(text: str, history: list[dict], bundle: dict,
+                            origin: dict | None = None, role: str = "owner") -> str:
     notes = list(bundle.get("notes") or [])
     errors = list(bundle.get("errors") or [])
     if errors:
@@ -641,15 +673,22 @@ def answer_with_attachments(text: str, history: list[dict], bundle: dict) -> str
                     "附件内容：\n" + "\n\n".join(notes)]
         if text:
             combined.append("用户问题：" + text)
-        return llm_answer("\n\n".join(combined), history)
+        return llm_answer("\n\n".join(combined), history, origin, role)
     prompt = text or "请查看我发的附件。"
     if notes:
         prompt += "\n\n[附件内容]\n" + "\n\n".join(notes)
-    return llm_answer(prompt, history)
+    return llm_answer(prompt, history, origin, role)
 
 
-def handle_inbound(text: str, message: dict) -> None:
+def _handle_inbound(text: str, message: dict, origin: dict | None = None) -> None:
     text = (text or "").strip()
+    role = str((origin or {}).get("role") or "owner")
+    chat_type = str((origin or {}).get("chat_type") or "private")
+    if origin and (role != "owner" or chat_type != "private"):
+        session_id = f"channel:{origin.get('channel')}:{origin.get('chat_id')}"
+    else:
+        session_id = OWNER
+
     quote = parse_quote(message)
     try:
         bundle = ATTACHMENTS.collect(message)
@@ -660,16 +699,21 @@ def handle_inbound(text: str, message: dict) -> None:
     if not text and not has_attachments:
         send_text("暂不支持这种消息类型，发文字给我吧。")
         return
-    history = store.recent_messages(OWNER, 10)
+    history = store.recent_messages(session_id, 10)
     display = text or ("[图片]" if bundle.get("images") else "[附件]")
-    store.add_message(OWNER, "user", display)
+    store.add_message(session_id, "user", display)
     flush_outbox()
-    if text in {"力扣登录", "更新力扣", "绑定力扣", "leetcode登录"}:
+
+    if origin is None and text in {"力扣登录", "更新力扣", "绑定力扣", "leetcode登录"}:
         if LEETCODE is not None:
             LEETCODE.notify_login("missing", force=True)
         return
+
     explicit = parse_explicit_agent(text) if not has_attachments else None
     if explicit:
+        if role != "owner":
+            send_text("只有主人可以派 Agent 任务。")
+            return
         agent_id, task_text = explicit
         agent = AGENTS.get(agent_id)
         if agent is None or agent_id == "echo":
@@ -684,15 +728,16 @@ def handle_inbound(text: str, message: dict) -> None:
                 "agent_id": agent_id,
                 "reply": task_text,
                 "meta": {"kind": "task", "explicit": True},
-                "chat_id": OWNER,
+                "chat_id": (origin or {}).get("chat_id") or OWNER,
             })
             send_agent_result(result)
-            store.log_route(OWNER, text, "agent", agent_id)
+            store.log_route(session_id, text, "agent", agent_id)
         except Exception as exc:
             log.warning("explicit agent call failed: %s", exc)
             send_text(f"已经收到，但 {agent.get('name', agent_id)} 暂时没有响应。")
         return
-    if not has_attachments:
+
+    if not has_attachments and origin is None:
         pending = match_pending(text, OWNER, quote)
         if pending == "ASKED":
             return
@@ -700,17 +745,28 @@ def handle_inbound(text: str, message: dict) -> None:
             store.log_route(OWNER, text, "pending", pending["code"])
             handle_reply(pending, text)
             return
+
     try:
-        answer = answer_with_attachments(text, history, bundle)
+        answer = answer_with_attachments(text, history, bundle, origin, role)
     except AttachmentError as exc:
         log.error("attachment vision failed: %s", exc)
         answer = f"附件收到了，但识图失败：{exc}"
     except LLMError as exc:
         log.error("llm failed: %s", exc)
         answer = "AI 暂时不可用，稍后我再试。"
-    store.log_route(OWNER, display, "llm", "attachment" if has_attachments else "")
-    store.add_message(OWNER, "assistant", answer)
+    store.log_route(session_id, display, "llm",
+                    "attachment" if has_attachments else ("guest" if role != "owner" else ""))
+    store.add_message(session_id, "assistant", answer)
     send_text(answer)
+
+
+def handle_inbound(text: str, message: dict, origin: dict | None = None) -> None:
+    token = ORIGIN.set(origin) if origin is not None else None
+    try:
+        return _handle_inbound(text, message, origin)
+    finally:
+        if token is not None:
+            ORIGIN.reset(token)
 
 
 # ---------------------------------------------------------------------------
@@ -941,39 +997,20 @@ async def channel_inbound(request: Request):
     if not text:
         return {"ignored": True}
 
-    owner = str(channel.get("owner_id") or "")
-    if text in {"/id", "id", "我的id", "我的ID"}:
-        return {"reply": f"platform={platform}\nuser_id={user_id}\nchat_id={chat_id}"}
-
-    if text.startswith("绑定") or text.lower().startswith("/bind"):
-        raw = text[2:] if text.startswith("绑定") else text[5:]
-        parts = raw.strip().split()
-        code = parts[0].upper() if parts else ""
-        if owner:
-            return {"reply": "这个渠道已经绑定过主人了。需要换绑请在桌面端「渠道」页重置。"}
-        expected = str(channel.get("pair_code") or "").upper()
-        if code and expected and hmac.compare_digest(code, expected):
-            SETTINGS.bind_channel_owner(channel_id, user_id)
-            CHANNELS.record(channel_id, "in", platform=platform, chat_id=chat_id,
-                            user_id=user_id, text=text, detail="owner bound")
-            return {"reply": f"绑定成功。当前用户：{user_id}。现在可以直接提问，或用 @pc-home 派任务。"}
-        CHANNELS.record(channel_id, "in", platform=platform, chat_id=chat_id,
-                        user_id=user_id, text=text, ok=False, detail="bad pair code")
-        return {"reply": "绑定码不对，请在桌面端「渠道」页查看最新绑定码。"}
-
-    if not owner:
-        return {"reply": "这个渠道还没有绑定主人。请发送：绑定 "
-                         f"{channel.get('pair_code') or 'XXXXXX'}（绑定码在桌面端「渠道」页）。"}
-    allowed = (user_id == owner or bool(channel.get("allow_all"))
-               or user_id in (channel.get("allow_users") or []))
-    if not allowed:
-        CHANNELS.record(channel_id, "in", platform=platform, chat_id=chat_id,
-                        user_id=user_id, text=text, ok=False, detail="unauthorized user")
-        return {"reply": "未授权。请联系管理员把你的 ID 加入允许列表。"}
-    if chat_type != "private" and channel.get("mention_only") and not bool(body.get("is_mention")):
+    identity = CFG.get("channel_identity") or {}
+    owner_ids = set(identity.get("owner_ids") or [])
+    role = "owner" if user_id in owner_ids else "guest"
+    is_mention = bool(body.get("is_mention"))
+    if chat_type != "private" and identity.get("group_require_mention", True) and not is_mention:
         return {"ignored": True}
 
-    session_id = f"channel:{channel_id}:{chat_id}"
+    if text in {"/id", "id", "我的id", "我的ID"}:
+        return {"reply": f"platform={platform}\nuser_id={user_id}\nchat_id={chat_id}\nrole={role}"}
+
+    if role != "owner" and not identity.get("guest_enabled", True):
+        return {"reply": "访客只读通道已关闭。请联系主人。"}
+
+    collector: list[str] = []
     origin = {
         "channel": channel_id,
         "platform": platform,
@@ -981,14 +1018,14 @@ async def channel_inbound(request: Request):
         "chat_type": chat_type,
         "user_id": user_id,
         "user_name": user_name or user_id,
+        "role": role,
         "message_id": str(body.get("message_id") or "")[:200],
+        "collector": collector,
     }
-    history = store.recent_messages(session_id, 10)
-    store.add_message(session_id, "user", text)
     CHANNELS.record(channel_id, "in", platform=platform, chat_id=chat_id,
                     user_id=user_id, text=text)
     try:
-        answer = await asyncio.to_thread(llm_answer, text, history, origin)
+        await asyncio.to_thread(handle_inbound, text, {}, origin)
     except LLMError as exc:
         log.error("channel llm failed: %s", exc)
         CHANNELS.record(channel_id, "out", platform=platform, chat_id=chat_id,
@@ -999,11 +1036,12 @@ async def channel_inbound(request: Request):
         CHANNELS.record(channel_id, "out", platform=platform, chat_id=chat_id,
                         user_id=user_id, text="", ok=False, detail=str(exc)[:200])
         return {"reply": "处理这条消息时出错了，请稍后再试。"}
-    store.add_message(session_id, "assistant", answer)
-    store.log_route(session_id, text, "channel", f"{channel_id}:{platform}")
+    answer = "\n\n".join(item for item in collector if str(item).strip()).strip()
+    answer = answer or "我收到了，但这次没有生成回复。"
     CHANNELS.record(channel_id, "out", platform=platform, chat_id=chat_id,
                     user_id=user_id, text=answer)
-    return {"reply": answer, "channel": channel_id, "platform": platform, "chat_id": chat_id}
+    return {"reply": answer, "channel": channel_id, "platform": platform,
+            "chat_id": chat_id, "role": role}
 
 
 @app.post("/internal/jobs/{job_id}/run")
@@ -1141,7 +1179,9 @@ def settings_channels(request: Request):
     statuses = CHANNELS.status_all()
     for item in items:
         item.update(statuses.get(item["id"], {}))
-    return {"channels": items, "logs": CHANNELS.recent_logs("", 50)}
+    return {"channels": items, "logs": CHANNELS.recent_logs("", 50),
+            "identity": SETTINGS.channel_identity_view(),
+            "auth": SETTINGS.koishi_auth_view()}
 
 
 @app.post("/internal/settings/channels")
@@ -1151,22 +1191,262 @@ async def settings_channel_upsert(request: Request):
     return _settings_call(SETTINGS.upsert_channel, body)
 
 
-@app.post("/internal/settings/channels/{channel_id}/pair")
-def settings_channel_pair(channel_id: str, request: Request):
+@app.get("/internal/settings/channel-identity")
+def settings_channel_identity(request: Request):
     service_auth(request)
-    return _settings_call(SETTINGS.rotate_channel_pair_code, channel_id)
+    return SETTINGS.channel_identity_view()
 
 
-@app.post("/internal/settings/channels/{channel_id}/reset-owner")
-def settings_channel_reset_owner(channel_id: str, request: Request):
+@app.post("/internal/settings/channel-identity")
+async def settings_channel_identity_update(request: Request):
     service_auth(request)
-    return _settings_call(SETTINGS.reset_channel_owner, channel_id)
+    body = await request.json()
+    return _settings_call(SETTINGS.upsert_channel_identity, body)
+
+
+@app.post("/internal/settings/koishi-auth/reset")
+def settings_koishi_auth_reset(request: Request):
+    service_auth(request)
+    return _settings_call(SETTINGS.reset_koishi_auth)
 
 
 @app.get("/internal/settings/channels/logs")
 def settings_channel_logs(request: Request, channel: str = "", limit: int = 50):
     service_auth(request)
     return {"logs": CHANNELS.recent_logs(channel, max(1, min(limit, 200)))}
+
+
+# ---------------------------------------------------------------------------
+# Koishi console authenticator gate
+# ---------------------------------------------------------------------------
+KOISHI_COOKIE = "koishi_totp"
+KOISHI_FAILS: dict[str, list[float]] = {}
+
+KOISHI_STYLE = """
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f3f5f7;
+font-family:"Segoe UI","Microsoft YaHei UI",sans-serif;color:#111a22}
+.card{width:min(440px,calc(100vw - 40px));background:#fff;border:1px solid #e3e8ec;
+border-radius:18px;padding:30px 30px 26px;box-shadow:0 18px 48px rgba(16,24,40,.08)}
+.eyebrow{font-size:10px;letter-spacing:.18em;color:#8b969f;font-weight:600}
+h1{font-size:23px;margin:8px 0 6px;letter-spacing:-.02em}
+p{font-size:13px;line-height:1.6;color:#68757f;margin:8px 0}
+.secret{font-family:Consolas,monospace;font-size:19px;letter-spacing:.12em;text-align:center;
+background:#e5f4f1;border:1px dashed #9fd4cc;color:#0a5b55;border-radius:12px;
+padding:14px 10px;margin:14px 0;word-break:break-all}
+code{display:block;background:#f8fafb;border:1px solid #e3e8ec;border-radius:9px;
+padding:9px 10px;font-size:11px;word-break:break-all;color:#2b3945;margin:6px 0 14px}
+label{display:block;font-size:12px;font-weight:600;margin:14px 0 6px}
+input{width:100%;border:1px solid #d3dbe2;border-radius:10px;padding:11px 12px;
+font-size:22px;letter-spacing:.36em;text-align:center;font-family:Consolas,monospace;outline:none}
+input:focus{border-color:#6fbdb3;box-shadow:0 0 0 3px rgba(15,118,110,.16)}
+button{width:100%;margin-top:16px;border:0;border-radius:10px;padding:11px 14px;
+background:#0f766e;color:#fff;font-size:13px;font-weight:650;cursor:pointer}
+button:hover{background:#0a5b55}
+.err{background:#fdecea;border:1px solid #f5c9c5;color:#c2413a;border-radius:9px;
+padding:9px 11px;font-size:12px;margin-top:14px}
+.ok{background:#e4f7ee;border:1px solid #bfe9d5;color:#087451;border-radius:9px;
+padding:9px 11px;font-size:12px;margin-top:14px}
+.link{display:block;text-align:center;margin-top:14px;color:#0f766e;font-size:12px;text-decoration:none}
+"""
+
+KOISHI_PAGE = """<!doctype html>
+<html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{title}}</title><style>{{style}}</style></head>
+<body><main class="card">{{body}}</main></body></html>"""
+
+
+def _koishi_page(title: str, body: str) -> HTMLResponse:
+    page = (KOISHI_PAGE.replace("{{title}}", html.escape(title))
+            .replace("{{style}}", KOISHI_STYLE)
+            .replace("{{body}}", body))
+    return HTMLResponse(page, headers={"Cache-Control": "no-store",
+                                        "X-Frame-Options": "DENY",
+                                        "Referrer-Policy": "no-referrer"})
+
+
+def _koishi_gate(request: Request) -> None:
+    expected = str((CFG.get("koishi_auth") or {}).get("gate_token") or "")
+    if not expected or not hmac.compare_digest(
+            request.headers.get("x-koishi-auth-gate", ""), expected):
+        raise HTTPException(404, "Not Found")
+
+
+def _koishi_session(request: Request) -> bool:
+    auth = CFG.get("koishi_auth") or {}
+    return ka.verify_session(
+        str(auth.get("session_secret") or ""),
+        request.cookies.get(KOISHI_COOKIE, ""),
+        int(auth.get("session_ttl", 43200)),
+    )
+
+
+def _koishi_set_cookie(response: Response) -> Response:
+    auth = CFG.get("koishi_auth") or {}
+    ttl = int(auth.get("session_ttl", 43200))
+    response.set_cookie(
+        KOISHI_COOKIE,
+        ka.issue_session(str(auth.get("session_secret") or ""), ttl),
+        max_age=ttl, httponly=True, secure=True, samesite="lax", path="/",
+    )
+    return response
+
+
+def _koishi_csrf() -> str:
+    auth = CFG.get("koishi_auth") or {}
+    return hmac.new(str(auth.get("session_secret") or "").encode(),
+                    b"koishi-auth-form", hashlib.sha256).hexdigest()[:32]
+
+
+def _koishi_next(value: str) -> str:
+    text = str(value or "")
+    if text.startswith("/koishi/") and "://" not in text and "\r" not in text and "\n" not in text:
+        return text
+    return "/koishi/"
+
+
+def _koishi_client_ip(request: Request) -> str:
+    return request.headers.get("x-real-ip") or (request.client.host if request.client else "")
+
+
+def _koishi_rate_ok(ip: str) -> bool:
+    now = time.time()
+    rows = [stamp for stamp in KOISHI_FAILS.get(ip, []) if now - stamp < 300]
+    KOISHI_FAILS[ip] = rows
+    return len(rows) < 12
+
+
+def _koishi_fail(ip: str) -> None:
+    KOISHI_FAILS.setdefault(ip, []).append(time.time())
+
+
+def _koishi_setup_body(secret: str, username: str, error: str = "") -> str:
+    pretty = " ".join(secret[i:i + 4] for i in range(0, len(secret), 4))
+    uri = f"otpauth://totp/Koishi:{username}?secret={secret}&issuer=Koishi"
+    return f"""
+<div class="eyebrow">KOISHI CONSOLE</div>
+<h1>绑定 Authenticator</h1>
+<p>用 Google Authenticator、Microsoft Authenticator 或 Authy 手动输入下面的密钥。绑定后，每次登录还需要输入 6 位动态验证码。</p>
+<div class="secret">{html.escape(pretty)}</div>
+<p>也可以复制这个 otpauth URI：</p>
+<code>{html.escape(uri)}</code>
+<form method="post" action="/koishi-auth/setup">
+  <input type="hidden" name="csrf" value="{_koishi_csrf()}">
+  <label>输入 Authenticator 当前验证码</label>
+  <input name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" required>
+  <button type="submit">验证并启用</button>
+</form>
+{('<div class="err">' + html.escape(error) + '</div>') if error else ''}
+"""
+
+
+def _koishi_login_body(next_url: str, error: str = "") -> str:
+    return f"""
+<div class="eyebrow">KOISHI CONSOLE</div>
+<h1>二次验证</h1>
+<p>Basic Auth 已通过。请输入 Authenticator 中的 6 位验证码。</p>
+<form method="post" action="/koishi-auth/login?next={html.escape(next_url)}">
+  <input type="hidden" name="csrf" value="{_koishi_csrf()}">
+  <label>动态验证码</label>
+  <input name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" required autofocus>
+  <button type="submit">验证并进入</button>
+</form>
+{('<div class="err">' + html.escape(error) + '</div>') if error else ''}
+<a class="link" href="/koishi-auth/logout">清除当前会话</a>
+"""
+
+
+def _koishi_form(raw: bytes) -> dict:
+    text = raw.decode("utf-8", "replace")
+    return {key: (values[0] if values else "") for key, values in parse_qs(text).items()}
+
+
+@app.get("/koishi-auth/check")
+def koishi_auth_check(request: Request):
+    _koishi_gate(request)
+    if _koishi_session(request):
+        return Response(status_code=204)
+    return Response(status_code=403)
+
+
+@app.get("/koishi-auth/setup", response_class=HTMLResponse)
+def koishi_auth_setup(request: Request):
+    _koishi_gate(request)
+    auth = CFG.get("koishi_auth") or {}
+    if auth.get("enrolled"):
+        return RedirectResponse("/koishi-auth/login?next=/koishi/", status_code=303)
+    if _koishi_session(request):
+        return RedirectResponse("/koishi/", status_code=303)
+    return _koishi_page("绑定 Authenticator", _koishi_setup_body(
+        str(auth.get("totp_secret") or ""), str(auth.get("username") or "koishi")))
+
+
+@app.post("/koishi-auth/setup", response_class=HTMLResponse)
+async def koishi_auth_setup_submit(request: Request):
+    _koishi_gate(request)
+    auth = CFG.get("koishi_auth") or {}
+    if auth.get("enrolled"):
+        return RedirectResponse("/koishi-auth/login?next=/koishi/", status_code=303)
+    form = _koishi_form(await request.body())
+    ip = _koishi_client_ip(request)
+    error = ""
+    if not hmac.compare_digest(str(form.get("csrf") or ""), _koishi_csrf()):
+        error = "表单已过期，请刷新页面。"
+    elif not _koishi_rate_ok(ip):
+        error = "尝试次数过多，请 5 分钟后再试。"
+    elif not ka.verify_totp(str(auth.get("totp_secret") or ""), str(form.get("code") or "")):
+        _koishi_fail(ip)
+        error = "验证码不对，请检查 Authenticator 的时间。"
+    if error:
+        return _koishi_page("绑定 Authenticator", _koishi_setup_body(
+            str(auth.get("totp_secret") or ""), str(auth.get("username") or "koishi"), error))
+    SETTINGS.enroll_koishi_auth()
+    response = RedirectResponse("/koishi/", status_code=303)
+    return _koishi_set_cookie(response)
+
+
+@app.get("/koishi-auth/login", response_class=HTMLResponse)
+def koishi_auth_login(request: Request):
+    _koishi_gate(request)
+    auth = CFG.get("koishi_auth") or {}
+    if not auth.get("enrolled"):
+        return RedirectResponse("/koishi-auth/setup", status_code=303)
+    next_url = _koishi_next(request.query_params.get("next", "/koishi/"))
+    if _koishi_session(request):
+        return RedirectResponse(next_url, status_code=303)
+    return _koishi_page("Koishi 二次验证", _koishi_login_body(next_url))
+
+
+@app.post("/koishi-auth/login", response_class=HTMLResponse)
+async def koishi_auth_login_submit(request: Request):
+    _koishi_gate(request)
+    auth = CFG.get("koishi_auth") or {}
+    if not auth.get("enrolled"):
+        return RedirectResponse("/koishi-auth/setup", status_code=303)
+    next_url = _koishi_next(request.query_params.get("next", "/koishi/"))
+    form = _koishi_form(await request.body())
+    ip = _koishi_client_ip(request)
+    error = ""
+    if not hmac.compare_digest(str(form.get("csrf") or ""), _koishi_csrf()):
+        error = "表单已过期，请刷新页面。"
+    elif not _koishi_rate_ok(ip):
+        error = "尝试次数过多，请 5 分钟后再试。"
+    elif not ka.verify_totp(str(auth.get("totp_secret") or ""), str(form.get("code") or "")):
+        _koishi_fail(ip)
+        error = "验证码不对，请检查 Authenticator 的时间。"
+    if error:
+        return _koishi_page("Koishi 二次验证", _koishi_login_body(next_url, error))
+    KOISHI_FAILS.pop(ip, None)
+    response = RedirectResponse(next_url, status_code=303)
+    return _koishi_set_cookie(response)
+
+
+@app.get("/koishi-auth/logout")
+def koishi_auth_logout(request: Request):
+    _koishi_gate(request)
+    response = RedirectResponse("/koishi-auth/login?next=/koishi/", status_code=303)
+    response.delete_cookie(KOISHI_COOKIE, path="/")
+    return response
 
 
 @app.get("/internal/settings/plugins")

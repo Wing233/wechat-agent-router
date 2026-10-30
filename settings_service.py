@@ -11,11 +11,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from data import CST
+from koishi_auth import new_totp_secret
 
 AGENT_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{1,63}$")
 CHANNEL_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{1,31}$")
 TRUE_VALUES = {"1", "true", "yes", "on"}
-PAIR_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
 
 class SettingsService:
@@ -33,6 +33,7 @@ class SettingsService:
         self.reload_hub = None
         self.reload_public = None
         self._ensure_channels()
+        self._ensure_koishi_auth()
 
     def attach(self, loader, scheduler, rebuild, refresh, tools=None,
                reload_agents=None, reload_llm=None, reload_hub=None,
@@ -216,33 +217,46 @@ class SettingsService:
     # ------------------------------------------------------------------
     # channels
     # ------------------------------------------------------------------
-    def _new_pair_code(self) -> str:
-        return "".join(secrets.choice(PAIR_ALPHABET) for _ in range(6))
-
     def _ensure_channels(self) -> None:
         channels = self.config.setdefault("channels", {})
-        if "koishi" in channels:
-            return
-        channels["koishi"] = {
-            "id": "koishi",
-            "name": "Koishi 渠道网关",
-            "type": "koishi",
-            "enabled": True,
-            "token": "ch_" + secrets.token_urlsafe(32),
-            "owner_id": "",
-            "allow_users": [],
-            "allow_all": False,
-            "mention_only": False,
-            "pair_code": self._new_pair_code(),
-            "console_url": "http://127.0.0.1:5140",
-            "ssh_tunnel": "",
-            "created_at": datetime.now(CST).isoformat(timespec="seconds"),
-        }
-        self._save()
-        try:
-            self.store.log_plugin_event("admin", "create_channel", "koishi")
-        except Exception:
-            pass
+        identity = self.config.setdefault("channel_identity", {})
+        changed = False
+        if "owner_ids" not in identity:
+            identity["owner_ids"] = []
+            changed = True
+        if "group_require_mention" not in identity:
+            identity["group_require_mention"] = True
+            changed = True
+        if "guest_enabled" not in identity:
+            identity["guest_enabled"] = True
+            changed = True
+        if "koishi" not in channels:
+            channels["koishi"] = {
+                "id": "koishi",
+                "name": "Koishi 渠道网关",
+                "type": "koishi",
+                "enabled": True,
+                "token": "ch_" + secrets.token_urlsafe(32),
+                "console_url": "http://127.0.0.1:5140",
+                "ssh_tunnel": "",
+                "created_at": datetime.now(CST).isoformat(timespec="seconds"),
+            }
+            changed = True
+        for channel in channels.values():
+            old_owner = str(channel.pop("owner_id", "") or "").strip()
+            if old_owner and old_owner not in identity["owner_ids"]:
+                identity["owner_ids"].append(old_owner)
+                changed = True
+            for key in ("pair_code", "allow_users", "allow_all", "mention_only"):
+                if key in channel:
+                    channel.pop(key, None)
+                    changed = True
+        if changed:
+            self._save()
+            try:
+                self.store.log_plugin_event("admin", "ensure_channels", "koishi")
+            except Exception:
+                pass
 
     @staticmethod
     def _as_bool(value, default: bool = False) -> bool:
@@ -267,14 +281,35 @@ class SettingsService:
                 result.append(text[:120])
         return result
 
+    def channel_identity_view(self) -> dict:
+        identity = self.config.get("channel_identity") or {}
+        return {
+            "owner_ids": list(identity.get("owner_ids") or []),
+            "group_require_mention": bool(identity.get("group_require_mention", True)),
+            "guest_enabled": bool(identity.get("guest_enabled", True)),
+        }
+
+    def upsert_channel_identity(self, payload: dict) -> dict:
+        identity = self.config.setdefault("channel_identity", {})
+        if "owner_ids" in payload:
+            identity["owner_ids"] = self._user_list(payload.get("owner_ids"))
+        if "group_require_mention" in payload:
+            identity["group_require_mention"] = self._as_bool(
+                payload.get("group_require_mention"), True)
+        if "guest_enabled" in payload:
+            identity["guest_enabled"] = self._as_bool(payload.get("guest_enabled"), True)
+        self._save()
+        self.store.log_plugin_event(
+            "admin", "upsert_channel_identity",
+            f"owners={len(identity.get('owner_ids') or [])}")
+        return self.channel_identity_view()
+
     def channels_view(self) -> list[dict]:
         items = []
         for channel_id, channel in (self.config.get("channels") or {}).items():
             item = dict(channel)
             item["id"] = channel_id
             item["token"] = self._mask(item.get("token"))
-            item["configured"] = bool(item.get("owner_id"))
-            item["allow_users"] = list(item.get("allow_users") or [])
             items.append(item)
         return sorted(items, key=lambda item: item["id"])
 
@@ -295,12 +330,6 @@ class SettingsService:
         item["name"] = str(payload.get("name") or item.get("name") or channel_id)[:80]
         item["type"] = str(payload.get("type") or item.get("type") or "koishi")[:32]
         item["enabled"] = self._as_bool(payload.get("enabled"), bool(item.get("enabled", True)))
-        if "owner_id" in payload:
-            item["owner_id"] = str(payload.get("owner_id") or "").strip()[:160]
-        if "allow_users" in payload:
-            item["allow_users"] = self._user_list(payload.get("allow_users"))
-        item["allow_all"] = self._as_bool(payload.get("allow_all"), bool(item.get("allow_all", False)))
-        item["mention_only"] = self._as_bool(payload.get("mention_only"), bool(item.get("mention_only", False)))
         if "console_url" in payload:
             item["console_url"] = str(payload.get("console_url") or "").strip()[:300]
         if "ssh_tunnel" in payload:
@@ -310,54 +339,65 @@ class SettingsService:
             item["token"] = token
         elif not item.get("token"):
             item["token"] = "ch_" + secrets.token_urlsafe(32)
-        pair_code = str(payload.get("pair_code") or "").strip().upper()
-        if pair_code and "..." not in pair_code:
-            item["pair_code"] = pair_code
-        elif not item.get("pair_code") and not item.get("owner_id"):
-            item["pair_code"] = self._new_pair_code()
+        for key in ("owner_id", "pair_code", "allow_users", "allow_all", "mention_only"):
+            item.pop(key, None)
         item.setdefault("created_at", datetime.now(CST).isoformat(timespec="seconds"))
         channels[channel_id] = item
         self._save()
         self.store.log_plugin_event("admin", "upsert_channel", channel_id)
         view = dict(item)
         view["token"] = self._mask(view.get("token"))
-        view["configured"] = bool(view.get("owner_id"))
         return view
 
-    def bind_channel_owner(self, channel_id: str, user_id: str) -> dict:
-        user_id = str(user_id or "").strip()
-        if not user_id:
-            raise ValueError("user_id 不能为空")
-        channel = self.channel_get(channel_id)
-        channel["owner_id"] = user_id
-        users = list(channel.get("allow_users") or [])
-        if user_id not in users:
-            users.append(user_id)
-        channel["allow_users"] = users
-        channel["pair_code"] = ""
-        self._save()
-        self.store.log_plugin_event("admin", "bind_channel_owner", f"{channel_id} {user_id}")
-        view = dict(channel)
-        view["token"] = self._mask(view.get("token"))
-        view["configured"] = True
-        return view
+    # ------------------------------------------------------------------
+    # Koishi console authenticator gate
+    # ------------------------------------------------------------------
+    def _ensure_koishi_auth(self) -> None:
+        auth = self.config.setdefault("koishi_auth", {})
+        changed = False
+        if not auth.get("gate_token"):
+            auth["gate_token"] = "kg_" + secrets.token_urlsafe(32)
+            changed = True
+        if not auth.get("session_secret"):
+            auth["session_secret"] = secrets.token_urlsafe(32)
+            changed = True
+        if not auth.get("totp_secret"):
+            auth["totp_secret"] = new_totp_secret()
+            changed = True
+        if "enrolled" not in auth:
+            auth["enrolled"] = False
+            changed = True
+        if "session_ttl" not in auth:
+            auth["session_ttl"] = 43200
+            changed = True
+        auth.setdefault("username", "koishi")
+        if changed:
+            self._save()
 
-    def rotate_channel_pair_code(self, channel_id: str) -> dict:
-        channel = self.channel_get(channel_id)
-        code = self._new_pair_code()
-        channel["pair_code"] = code
-        self._save()
-        self.store.log_plugin_event("admin", "rotate_channel_pair_code", channel_id)
-        return {"id": channel_id, "pair_code": code}
+    def koishi_auth_view(self) -> dict:
+        auth = self.config.get("koishi_auth") or {}
+        return {
+            "enabled": True,
+            "username": auth.get("username", "koishi"),
+            "enrolled": bool(auth.get("enrolled")),
+            "session_ttl": int(auth.get("session_ttl", 43200)),
+        }
 
-    def reset_channel_owner(self, channel_id: str) -> dict:
-        channel = self.channel_get(channel_id)
-        code = self._new_pair_code()
-        channel["owner_id"] = ""
-        channel["pair_code"] = code
+    def enroll_koishi_auth(self) -> dict:
+        auth = self.config.setdefault("koishi_auth", {})
+        auth["enrolled"] = True
         self._save()
-        self.store.log_plugin_event("admin", "reset_channel_owner", channel_id)
-        return {"id": channel_id, "pair_code": code}
+        self.store.log_plugin_event("admin", "enroll_koishi_auth", "totp")
+        return self.koishi_auth_view()
+
+    def reset_koishi_auth(self) -> dict:
+        auth = self.config.setdefault("koishi_auth", {})
+        auth["totp_secret"] = new_totp_secret()
+        auth["session_secret"] = secrets.token_urlsafe(32)
+        auth["enrolled"] = False
+        self._save()
+        self.store.log_plugin_event("admin", "reset_koishi_auth", "totp")
+        return self.koishi_auth_view()
 
     # ------------------------------------------------------------------
     # agents
@@ -461,6 +501,8 @@ class SettingsService:
             "agents": self.agents_view(),
             "plugins": cfg.get("plugins") or {},
             "channels": self.channels_view(),
+            "channel_identity": self.channel_identity_view(),
+            "koishi_auth": self.koishi_auth_view(),
             "disabled_plugins": cfg.get("disabled_plugins") or [],
             "poll_interval": cfg.get("poll_interval"),
             "agent_wait_seconds": cfg.get("agent_wait_seconds", 60),

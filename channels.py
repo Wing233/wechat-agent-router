@@ -73,9 +73,6 @@ class ChannelManager:
         return {
             "id": channel_id,
             "enabled": bool(channel.get("enabled", True)),
-            "configured": bool(channel.get("owner_id")),
-            "owner_id": channel.get("owner_id", ""),
-            "pair_code": channel.get("pair_code", ""),
             "messages": state.get("messages", 0),
             "last_inbound": state.get("last_inbound"),
             "last_outbound": state.get("last_outbound"),

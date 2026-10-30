@@ -274,12 +274,10 @@ class ApiHandler(BaseHTTPRequestHandler):
             return app.server_channels()
         if method == "POST" and path == "/api/server/channels":
             return app.server_channel_update(body)
-        m = match(r"/api/server/channels/([^/]+)/pair")
-        if m and method == "POST":
-            return app.server_channel_pair(unquote(m.group(1)))
-        m = match(r"/api/server/channels/([^/]+)/reset-owner")
-        if m and method == "POST":
-            return app.server_channel_reset_owner(unquote(m.group(1)))
+        if method == "POST" and path == "/api/server/channel-identity":
+            return app.server_channel_identity_update(body)
+        if method == "POST" and path == "/api/server/koishi-auth/reset":
+            return app.server_koishi_auth_reset()
         if method == "GET" and path == "/api/server/channels/logs":
             channel = (query.get("channel") or [""])[0]
             limit = _as_int(query, "limit", 50)

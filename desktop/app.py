@@ -362,13 +362,11 @@ class DesktopApp:
     def server_channel_update(self, payload: dict) -> dict:
         return self.router_json("POST", "/internal/settings/channels", payload)
 
-    def server_channel_pair(self, channel_id: str) -> dict:
-        from urllib.parse import quote
-        return self.router_json("POST", f"/internal/settings/channels/{quote(channel_id)}/pair")
+    def server_channel_identity_update(self, payload: dict) -> dict:
+        return self.router_json("POST", "/internal/settings/channel-identity", payload)
 
-    def server_channel_reset_owner(self, channel_id: str) -> dict:
-        from urllib.parse import quote
-        return self.router_json("POST", f"/internal/settings/channels/{quote(channel_id)}/reset-owner")
+    def server_koishi_auth_reset(self) -> dict:
+        return self.router_json("POST", "/internal/settings/koishi-auth/reset")
 
     def server_channel_logs(self, channel_id: str = "", limit: int = 50) -> dict:
         params = f"?limit={int(limit)}"

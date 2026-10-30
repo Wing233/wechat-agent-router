@@ -38,11 +38,12 @@ class ToolRegistry:
             if alias != name:
                 self._aliases[alias] = name
 
-    def definitions(self) -> list[dict]:
+    def definitions(self, allowed: set[str] | None = None) -> list[dict]:
         return [
             {"type": "function", "function": {"name": t.name, "description": t.description,
                                               "parameters": t.parameters}}
             for t in self._tools.values()
+            if allowed is None or t.name in allowed
         ]
 
     def names(self) -> list[str]:
