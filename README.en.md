@@ -15,6 +15,7 @@ File changes require an approval code. Images are understood directly. Drawings 
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![Docker](https://img.shields.io/badge/Docker-ready-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
 [![GHCR](https://img.shields.io/badge/GHCR-ghcr.io-2496ED?logo=github)](https://github.com/Wing233/wechat-agent-router/pkgs/container/wechat-agent-router)
+[![CI](https://github.com/Wing233/wechat-agent-router/actions/workflows/ci.yml/badge.svg)](https://github.com/Wing233/wechat-agent-router/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-MIT-2dd4bf.svg)](LICENSE)
 [![PRs](https://img.shields.io/badge/PRs-welcome-2dd4bf.svg)](#contributing)
 
