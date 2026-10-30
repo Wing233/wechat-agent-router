@@ -31,6 +31,20 @@ docker build \
   -t wechat-agent-router:latest .
 ```
 
+### 使用 GHCR 预构建镜像
+
+main 分支和 `v*` tag 会自动构建镜像：
+
+```bash
+docker pull ghcr.io/wing233/wechat-agent-router:latest
+```
+
+`docker-compose.yml` 默认 `build: .`；如果要直接用镜像，把 `build` 去掉，并把 `image` 改成：
+
+```yaml
+image: ghcr.io/wing233/wechat-agent-router:latest
+```
+
 `docker-compose.yml` 默认：
 
 - 端口 `9900:9900`

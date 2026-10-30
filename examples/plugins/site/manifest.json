@@ -1,0 +1,11 @@
+{
+  "id": "site",
+  "name": "站点数据示例",
+  "version": "1.0.0",
+  "api_version": "1",
+  "entry": "plugin.py",
+  "capabilities": ["tools"],
+  "permissions": [],
+  "secrets": [],
+  "description": "可选的站点访问/对话统计示例，读取任意兼容 SQLite 库"
+}

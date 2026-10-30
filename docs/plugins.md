@@ -164,6 +164,23 @@ curl -X POST -H "X-Service-Token: $TOKEN" \
 | `demo_time` | 时间示例 |
 | `demo_weather` | 天气示例 |
 
+## 示例：站点数据插件
+
+[`examples/plugins/site`](../examples/plugins/site/) 是一个可选插件，演示如何读取站点自己的 SQLite：
+
+```bash
+cp -r examples/plugins/site plugins/site
+sqlite3 data/site.db < examples/plugins/site/schema.sql
+```
+
+在 `config.json` 里配置：
+
+```json
+"plugins": {"site": {"db": "/data/site.db"}}
+```
+
+它提供 `visit_stats` / `chat_messages` / `chat_stats` 三个只读工具。
+
 ## 测试插件
 
 ```python

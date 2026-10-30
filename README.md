@@ -6,17 +6,26 @@
 
 **把微信变成多台电脑上 AI Agent 的遥控器。**
 
+[简体中文](README.md) · [English](README.en.md)
+
 在微信里发一句话，让家里的 OpenCode、公司的 Codex、笔记本上的 Claude Code 干活；  
 需要改文件时先发审批码，需要看图时直接发图，需要画图时直接生成。
 
 [![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![Docker](https://img.shields.io/badge/Docker-ready-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
+[![GHCR](https://img.shields.io/badge/GHCR-ghcr.io-2496ED?logo=github)](https://github.com/Wing233/wechat-agent-router/pkgs/container/wechat-agent-router)
 [![License](https://img.shields.io/badge/License-MIT-2dd4bf.svg)](LICENSE)
 [![PRs](https://img.shields.io/badge/PRs-welcome-2dd4bf.svg)](#贡献)
 
 [快速开始](#5-分钟跑起来) · [架构](#架构) · [插件](#插件系统) · [配置](#配置参考) · [API](#api-参考) · [安全](#安全模型)
 
+</div>
+
+<div align="center">
+  <img src="docs/assets/demo.gif" alt="文件审批演示" width="360" />
+  <br />
+  <sub>文件审批演示（演示数据）</sub>
 </div>
 
 ---
