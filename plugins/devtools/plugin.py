@@ -177,6 +177,16 @@ def apply(ctx) -> None:
         run_command, aliases=("run_command", "shell", "exec_command"),
     )
     ctx.tools.register(
+        "execute_bash",
+        "执行一条 bash 命令（等价于 run_command），用于装依赖、跑测试、git、看日志。",
+        _schema({
+            "command": {"type": "string", "description": "bash 命令"},
+            "cwd": {"type": "string", "description": "工作目录，默认 /app"},
+            "timeout": {"type": "integer", "minimum": 3, "maximum": 120},
+        }, ["command"]),
+        run_command, aliases=("execute_bash",),
+    )
+    ctx.tools.register(
         "http_request",
         "直接调用任意公开 HTTP API（GET/POST/PUT/PATCH/DELETE），自定义请求头和 JSON 正文。"
         "用于查接口、触发 webhook、调用第三方服务；不能访问内网地址。",

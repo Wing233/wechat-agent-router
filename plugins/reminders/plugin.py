@@ -34,6 +34,23 @@ def apply(ctx) -> None:
         aliases=("create_reminder",),
     )
     ctx.tools.register(
+        "schedule_cron",
+        "创建 cron 定时任务（5 段：分 时 日 月 周），例如 '0 8 * * *' 每天 8 点。",
+        _schema({
+            "cron": {"type": "string", "description": "5 段 cron 表达式"},
+            "text": {"type": "string", "description": "到点要做的事/提醒内容"},
+            "max_occurrences": {"type": "integer", "minimum": 1, "maximum": 1000},
+            "end_at": {"type": "string", "description": "可选，结束时间 ISO"},
+        }, ["cron", "text"]),
+        lambda a: engine.create(
+            chat_id=ctx.config.get("owner") or ctx.root_config.get("owner") or "",
+            text=a.get("text", ""), schedule_type="cron", at="", interval_minutes=0,
+            cron=a.get("cron", ""), max_occurrences=a.get("max_occurrences"),
+            end_at=a.get("end_at", ""),
+        ),
+        aliases=("schedule_cron",),
+    )
+    ctx.tools.register(
         "list_reminders",
         "查看当前还未完成的提醒（active/paused）。",
         _schema({}),

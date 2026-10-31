@@ -221,6 +221,20 @@ def apply(ctx) -> None:
         aliases=("fs_read",),
     )
     ctx.tools.register(
+        "read_file",
+        "读取服务器文本文件（最大 64KB），等价于 fs_read；用于读取项目上下文。",
+        _schema({"path": {"type": "string"}}, ["path"]),
+        _guard(lambda a: service.read(a.get("path", ""))),
+        aliases=("read_file",),
+    )
+    ctx.tools.register(
+        "list_dir",
+        "列出服务器目录，等价于 fs_list；用于浏览项目结构。",
+        _schema({"path": {"type": "string"}}, ["path"]),
+        _guard(lambda a: service.list_dir(a.get("path", ""))),
+        aliases=("list_dir",),
+    )
+    ctx.tools.register(
         "fs_write",
         "写入服务器文件（最大 64KB），默认直接生效。允许的根：/app、/lyph-src、/app/plugins、/workspace。",
         _schema({"path": {"type": "string"}, "content": {"type": "string"}}, ["path", "content"]),

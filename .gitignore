@@ -27,3 +27,9 @@ koishi/data/
 koishi/.env
 koishi/koishi.yml
 koishi/*.log
+
+# Local safe-write backups and config snapshots
+app.py.broken*
+config.json.bak*
+*.orig
+*.rej

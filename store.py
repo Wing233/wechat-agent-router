@@ -44,6 +44,23 @@ CREATE TABLE IF NOT EXISTS outbox (
   tries INTEGER NOT NULL DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS channel_outbox (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  channel_id TEXT NOT NULL,
+  platform TEXT NOT NULL DEFAULT '',
+  chat_id TEXT NOT NULL,
+  user_id TEXT NOT NULL DEFAULT '',
+  text TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  created_at TEXT NOT NULL,
+  sent_at TEXT,
+  error TEXT
+);
+CREATE INDEX IF NOT EXISTS channel_outbox_pending
+  ON channel_outbox(channel_id, status, id);
+CREATE INDEX IF NOT EXISTS channel_outbox_created
+  ON channel_outbox(created_at);
+
 CREATE TABLE IF NOT EXISTS state (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -280,6 +297,65 @@ class Store:
     def bump_outbox(self, oid: int) -> None:
         with self._conn() as conn:
             conn.execute("UPDATE outbox SET tries=tries+1 WHERE id=?", (oid,))
+
+    # --- channel outbox -------------------------------------------------
+    def enqueue_channel(self, channel_id: str, chat_id: str, text: str, *,
+                        platform: str = "", user_id: str = "") -> int:
+        with self._conn() as conn:
+            cursor = conn.execute(
+                "INSERT INTO channel_outbox(channel_id,platform,chat_id,user_id,text,"
+                "status,created_at) VALUES(?,?,?,?,?,'pending',?)",
+                (str(channel_id)[:40], str(platform)[:40], str(chat_id)[:200],
+                 str(user_id)[:200], str(text)[:8000], now_iso()),
+            )
+            return int(cursor.lastrowid)
+
+    def list_channel_outbox(self, channel_id: str, limit: int = 20) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT id,channel_id,platform,chat_id,user_id,text,status,created_at "
+                "FROM channel_outbox WHERE channel_id=? AND status='pending' "
+                "ORDER BY id LIMIT ?", (str(channel_id), max(1, min(int(limit), 100))),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def ack_channel_outbox(self, channel_id: str, ids: list[int], *,
+                           ok: bool = True, error: str = "") -> int:
+        clean = [int(value) for value in ids if str(value).isdigit()][:100]
+        if not clean:
+            return 0
+        placeholders = ",".join("?" for _ in clean)
+        with self._conn() as conn:
+            cursor = conn.execute(
+                f"UPDATE channel_outbox SET status=?, sent_at=?, error=? "
+                f"WHERE channel_id=? AND status='pending' AND id IN ({placeholders})",
+                [("sent" if ok else "error"), now_iso(),
+                 str(error or "")[:500], str(channel_id), *clean],
+            )
+            return int(cursor.rowcount or 0)
+
+    def recent_channel_outbox(self, channel_id: str = "", limit: int = 20) -> list[dict]:
+        sql = ("SELECT id,channel_id,platform,chat_id,user_id,text,status,created_at,"
+               "sent_at,error FROM channel_outbox")
+        args: list = []
+        if channel_id:
+            sql += " WHERE channel_id=?"
+            args.append(str(channel_id))
+        sql += " ORDER BY id DESC LIMIT ?"
+        args.append(max(1, min(int(limit), 200)))
+        with self._conn() as conn:
+            rows = conn.execute(sql, args).fetchall()
+        return [dict(row) for row in rows]
+
+    def cleanup_channel_outbox(self, days: int = 7) -> int:
+        cutoff = time.time() - max(1, int(days)) * 86400
+        stamp = datetime.fromtimestamp(cutoff, timezone.utc).isoformat(timespec="seconds")
+        with self._conn() as conn:
+            cursor = conn.execute(
+                "DELETE FROM channel_outbox WHERE created_at < ?",
+                (stamp,),
+            )
+            return int(cursor.rowcount or 0)
 
     # --- credentials ---------------------------------------------------
     def get_credential(self, service: str) -> dict | None:

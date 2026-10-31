@@ -15,11 +15,78 @@ module.exports.apply = (ctx, config = {}) => {
   const token = String(config.token || process.env.ROUTER_CHANNEL_TOKEN || '')
   const channel = String(config.channel || 'koishi')
   const timeoutMs = Number(config.timeoutMs || 90000)
+  const outboundPollMs = Math.max(1000, Number(config.outboundPollMs || 2000))
   const logger = ctx.logger('router-bridge')
 
   if (!token) {
     logger.warn('ROUTER_CHANNEL_TOKEN is empty; messages will be rejected by Router')
   }
+
+  let outboundTimer = null
+  let outboundBusy = false
+
+  async function ackOutbound(ids, ok, error = '') {
+    if (!ids.length) return
+    try {
+      await fetch(`${routerUrl}/channel/outbound/ack`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Channel-Token': token,
+        },
+        body: JSON.stringify({ channel, ids, ok, error }),
+      })
+    } catch (failure) {
+      logger.warn('outbound ack failed: %s', failure?.message || failure)
+    }
+  }
+
+  async function pollOutbound() {
+    if (outboundBusy || !token) return
+    outboundBusy = true
+    try {
+      const response = await fetch(
+        `${routerUrl}/channel/outbound?channel=${encodeURIComponent(channel)}&limit=10`,
+        { headers: { 'X-Channel-Token': token } },
+      )
+      if (!response.ok) {
+        logger.warn('outbound poll HTTP %s', response.status)
+        return
+      }
+      const data = await response.json().catch(() => ({}))
+      const messages = Array.isArray(data.messages) ? data.messages : []
+      for (const message of messages) {
+        const bot = pickBot(ctx, message.platform)
+        if (!bot) {
+          logger.warn('outbound %s waiting: no bot for platform %s',
+            message.id, message.platform || 'unknown')
+          continue
+        }
+        const target = stripPlatform(message.chat_id, message.platform)
+        try {
+          await bot.sendMessage(target, String(message.text || ''))
+          await ackOutbound([message.id], true)
+          logger.info('outbound %s -> %s', message.id, target)
+        } catch (failure) {
+          await ackOutbound([message.id], false,
+            failure?.message || 'send failed')
+          logger.warn('outbound %s failed: %s', message.id,
+            failure?.message || failure)
+        }
+      }
+    } catch (failure) {
+      logger.warn('outbound poll failed: %s', failure?.message || failure)
+    } finally {
+      outboundBusy = false
+    }
+  }
+
+  outboundTimer = setInterval(pollOutbound, outboundPollMs)
+  if (outboundTimer && typeof outboundTimer.unref === 'function') outboundTimer.unref()
+  ctx.on('dispose', () => {
+    if (outboundTimer) clearInterval(outboundTimer)
+    outboundTimer = null
+  })
 
   ctx.on('message', async (session) => {
     if (!session || session.userId === session.selfId) return
@@ -100,4 +167,20 @@ function isMentioned(session) {
     String(element.attrs?.id || '') === selfId)) return true
   const username = String(session.username || '')
   return Boolean(username && String(session.content || '').includes('@' + username))
+}
+
+function pickBot(ctx, platform) {
+  const bots = Array.isArray(ctx.bots) ? ctx.bots : []
+  const wanted = String(platform || '')
+  if (wanted) {
+    const exact = bots.find((bot) => String(bot.platform || '') === wanted)
+    if (exact) return exact
+  }
+  return bots[0] || null
+}
+
+function stripPlatform(chatId, platform) {
+  const text = String(chatId || '')
+  const prefix = platform ? `${platform}:` : ''
+  return prefix && text.startsWith(prefix) ? text.slice(prefix.length) : text
 }

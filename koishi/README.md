@@ -130,6 +130,7 @@ router-bridge:
   token: "${{ env.ROUTER_CHANNEL_TOKEN }}"
   channel: koishi
   timeoutMs: 90000
+  outboundPollMs: 2000
 ```
 
 `ROUTER_CHANNEL_TOKEN` 来自 Router 的 `config.json`：
@@ -146,6 +147,7 @@ python3 -c "import json;print(json.load(open('/opt/wechat-agent-router/config.js
 
 - 统一入站消息：平台、会话、用户、文本、@ 标记
 - 同步回复：Router 的答案发回原渠道
+- 主动出站：Router 的 `send_to_channel` 写入 `channel_outbox`，Koishi 每 2 秒轮询并发送，支持把结果发到别的 QQ 群/私聊
 - 全局 owner 身份映射、群聊必须 @、非 owner 只读
 - 渠道状态和最近消息（桌面端「渠道」页）
 - 长任务 60 秒内直接回原渠道
@@ -154,7 +156,7 @@ python3 -c "import json;print(json.load(open('/opt/wechat-agent-router/config.js
 
 - 超过 60 秒的 Agent 结果目前仍走微信通知；后续把 origin 带到 `/v1/notify` 即可回原渠道
 - 图片/文件双向传输（Koishi 已收到，Router 暂只处理文本）
-- 主动播报按渠道分发（定时任务目前仍发微信）
+- 定时任务默认仍发微信；可用 `send_to_channel` 手动指定入口
 
 ## 安全
 

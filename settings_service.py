@@ -32,6 +32,7 @@ class SettingsService:
         self.reload_llm = None
         self.reload_hub = None
         self.reload_public = None
+        self.catalog = None
         self._ensure_channels()
         self._ensure_websearch()
         self._ensure_koishi_auth()
@@ -65,6 +66,10 @@ class SettingsService:
         tmp.write_text(text, encoding="utf-8")
         os.chmod(tmp, 0o600)
         tmp.replace(self.config_path)
+
+    def save(self) -> None:
+        """Public persistence hook for kernel services that share config.json."""
+        self._save()
 
     def _plugin_for(self, job) -> str:
         return str((job.meta or {}).get("plugin") or "")
@@ -533,6 +538,7 @@ class SettingsService:
             "poll_interval": cfg.get("poll_interval"),
             "agent_wait_seconds": cfg.get("agent_wait_seconds", 60),
             "public_base_url": cfg.get("public_base_url"),
+            "models": (self.catalog.list() if self.catalog else {}),
             "credentials": credentials,
         }
         return data if section == "all" else {section: data.get(section)}
@@ -544,6 +550,17 @@ class SettingsService:
         section, field = key.split(".", 1)
         self.config.setdefault(section, {})[field] = text
         return True
+
+    def _patch_chat_model(self, patch: dict) -> None:
+        """Keep the catalog's chat entry aligned with legacy llm.* edits."""
+        if not self.catalog:
+            return
+        try:
+            ids = self.catalog.list()["bindings"].get("chat") or []
+            if ids:
+                self.catalog.add({"id": ids[0], **patch})
+        except Exception:
+            pass
 
     def config_set(self, key: str, value) -> dict:
         key = str(key or "").strip()
@@ -596,6 +613,8 @@ class SettingsService:
             else:
                 section, field = key.split(".", 1)
                 self.config.setdefault(section, {})[field] = text
+                if key == "llm.base_url":
+                    self._patch_chat_model({"base_url": text})
                 if key == "llm.base_url" and self.reload_llm:
                     self.reload_llm()
                 if key == "hub.base_url" and self.reload_hub:
@@ -607,6 +626,24 @@ class SettingsService:
             if not model:
                 raise ValueError("模型名不能为空")
             self.config.setdefault("llm", {})["model"] = model
+            if self.catalog:
+                item = next((row for row in (self.config.get("models") or [])
+                             if row.get("id") == model or row.get("model") == model), None)
+                if item is None:
+                    llm_cfg = self.config.get("llm") or {}
+                    try:
+                        item = self.catalog.add({
+                            "id": model,
+                            "name": model,
+                            "base_url": llm_cfg.get("base_url"),
+                            "api_key": llm_cfg.get("api_key"),
+                            "model": model,
+                            "tags": "primary",
+                        })
+                    except Exception:
+                        item = None
+                if item:
+                    self.catalog.bind("chat", [str(item.get("id"))])
             self._save()
             if self.reload_llm:
                 self.reload_llm()
@@ -624,6 +661,8 @@ class SettingsService:
             if self.loader is not None and key == "llm.api_key":
                 self.loader.secrets["llm_api_key"] = self.config["llm"]["api_key"]
             self._save()
+            if key == "llm.api_key":
+                self._patch_chat_model({"api_key": self.config["llm"]["api_key"]})
             if key == "llm.api_key" and self.reload_llm:
                 self.reload_llm()
             if key == "hub.channel_key" and self.reload_hub:

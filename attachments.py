@@ -91,7 +91,8 @@ class Attachments:
     def describe(self, images: list[str], prompt: str) -> str:
         content = [{"type": "text", "text": prompt}]
         content.extend({"type": "image_url", "image_url": {"url": uri}} for uri in images)
-        message = self.llm.complete([{"role": "user", "content": content}], None, max_tokens=1200)
+        message = self.llm.complete([{"role": "user", "content": content}], None,
+                                    max_tokens=1200, purpose="vision")
         text = (message.get("content") or "").strip()
         if not text:
             raise AttachmentError("视觉模型没有返回内容")

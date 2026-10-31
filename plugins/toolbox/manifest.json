@@ -1,0 +1,11 @@
+{
+  "id": "toolbox",
+  "name": "工具箱",
+  "version": "1.0.0",
+  "api_version": "1",
+  "entry": "plugin.py",
+  "capabilities": ["tools", "service"],
+  "permissions": ["db:router", "agent:read", "agent:call", "send:wechat"],
+  "secrets": ["github_token", "slack_webhook"],
+  "description": "环境执行、补丁/快照、记忆与技能、人工确认、GitHub/Slack/SQL、MCP 客户端与浏览器侧车接口"
+}

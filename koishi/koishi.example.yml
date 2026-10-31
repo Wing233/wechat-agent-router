@@ -30,3 +30,4 @@ plugins:
     token: "${{ env.ROUTER_CHANNEL_TOKEN }}"
     channel: koishi
     timeoutMs: 90000
+    outboundPollMs: 2000

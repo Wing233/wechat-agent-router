@@ -9,6 +9,26 @@
     "exclude_conversation_prefixes": ["unlimited-check-"],
     "exclude_visitor_ids": []
   },
+  "sso": {
+    "cookie_name": "lyph_sso",
+    "edge_secret": "REPLACE_EDGE_SECRET"
+  },
+  "agent_bridge": {
+    "allowed_agents": ["lyph"]
+  },
+  "toolbox": {
+    "db": "/data/toolbox.db",
+    "sql_databases": {
+      "router": "/data/router.db",
+      "lyph": "/lyph-data/lyph.sqlite3"
+    },
+    "mcp_servers": [],
+    "browser_service_url": "",
+    "browser_reader_url": "https://api.microlink.io/",
+    "browser_reader_key": "",
+    "github_token": "",
+    "slack_webhook": ""
+  },
   "geo": {
     "vendor_dir": "/app/vendor",
     "v4": "/geodb/ip2region_v4.xdb",
@@ -16,6 +36,10 @@
   },
   "db": "/data/router.db",
   "data_dir": "/data",
+  "trace_db": "/data/traces.db",
+  "trace_retention_days": 30,
+  "eval_db": "/data/evals.db",
+  "eval_cases": "/data/eval_cases.json",
   "public_base_url": "http://123.57.153.49:9900",
   "poll_interval": 2,
   "initial_last_id": 0,
@@ -26,7 +50,22 @@
     "base_url": "https://api.deepseek.com",
     "api_key": "REPLACE",
     "model": "deepseek-flash",
-    "system_prompt": ""
+    "system_prompt": "",
+    "timeout": 90,
+    "input_price_per_m": 2.0,
+    "output_price_per_m": 8.0,
+    "daily_budget_owner": 10,
+    "daily_budget_guest": 1,
+    "spend_db": "/data/spend.db"
+  },
+  "model_bindings": {
+    "chat": ["deepseek-flash"],
+    "vision": ["deepseek-flash"],
+    "judge": ["deepseek-flash"],
+    "control": ["deepseek-flash"],
+    "job.default": ["deepseek-flash"],
+    "plugin.default": ["deepseek-flash"],
+    "embedding": []
   },
   "attachments": {
     "enabled": true,
@@ -53,6 +92,18 @@
       "callback_url": "http://127.0.0.1:9900/internal/echo",
       "callback_secret": "REPLACE",
       "api_key": "REPLACE"
+    },
+    {
+      "id": "lyph",
+      "name": "lyph 站点",
+      "transport": "http",
+      "callback_url": "http://lyph-api-1:8000/api/v1/internal/router/task",
+      "health_url": "http://lyph-api-1:8000/health",
+      "callback_secret": "REPLACE_CALLBACK_SECRET",
+      "api_key": "REPLACE_BROKER_KEY",
+      "bridge_key": "REPLACE_BRIDGE_KEY",
+      "timeout": 180,
+      "dispatch": true
     }
   ]
 }

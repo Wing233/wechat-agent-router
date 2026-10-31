@@ -71,7 +71,7 @@ def apply(ctx) -> None:
         "查看 bot 当前配置，密钥会脱敏。可查 llm、hub、jobs、agents、plugins、credentials、poll_interval、public_base_url。",
         _schema({"section": {"type": "string", "enum": [
             "all", "llm", "hub", "jobs", "agents", "plugins", "credentials",
-            "poll_interval", "public_base_url"]}}),
+            "models", "poll_interval", "public_base_url"]}}),
         _guard(lambda a: settings.config_view(a.get("section", "all"))),
         aliases=("config_get",),
     )

@@ -27,17 +27,24 @@ from pydantic import BaseModel, Field
 
 from agent_broker import BROKER
 from attachments import AttachmentError, Attachments
+import capabilities
 from channels import ChannelManager
 from data import CST, SiteData
+import evals
 from geo import Geo
 from hub import Hub, HubError, parse_quote, parse_text
 from imagegen import ImageGen
 import koishi_auth as ka
-from llm import LLM, LLMError
+from llm import LLM, LLMBudgetError, LLMError
+import agent_bridge
+import models
+import sso_routes
 from plugin_loader import PluginError, PluginLoader
 from registry import JobScheduler, ToolRegistry
 from settings_service import SettingsService
 from store import Store, now_iso
+import traces
+import trace_ctx
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("router")
@@ -89,6 +96,7 @@ class RingLogHandler(logging.Handler):
 LOG_RING = RingLogHandler()
 LOG_RING.setFormatter(logging.Formatter("%(message)s"))
 logging.getLogger().addHandler(LOG_RING)
+trace_ctx.install_logging()
 
 CONFIG_PATH = os.environ.get("ROUTER_CONFIG", "/app/config.json")
 with open(CONFIG_PATH, "r", encoding="utf-8") as fh:
@@ -101,6 +109,19 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 IMAGE_DIR = DATA_DIR / "images"
 IMAGE_DIR.mkdir(parents=True, exist_ok=True)
 
+TRACE_DB = str(CFG.get("trace_db") or (DATA_DIR / "traces.db"))
+EVAL_DB = str(CFG.get("eval_db") or (DATA_DIR / "evals.db"))
+EVAL_CASES = str(CFG.get("eval_cases") or (DATA_DIR / "eval_cases.json"))
+try:
+    traces.configure(TRACE_DB)
+    traces.prune(int(CFG.get("trace_retention_days") or 30))
+except Exception as exc:
+    log.warning("trace store unavailable: %s", exc)
+try:
+    evals.configure(EVAL_DB, EVAL_CASES)
+except Exception as exc:
+    log.warning("eval store unavailable: %s", exc)
+
 store = Store(CFG["db"])
 hub = Hub(BASE, CFG["hub"]["channel_key"], OWNER)
 geo = Geo(CFG["geo"]["vendor_dir"], CFG["geo"]["v4"], CFG["geo"].get("v6", ""))
@@ -110,7 +131,34 @@ site = SiteData(
     CFG["lyph"].get("exclude_conversation_prefixes", ["unlimited-check-"]),
     CFG["lyph"].get("exclude_visitor_ids", []),
 )
-llm = LLM(CFG["llm"]["base_url"], CFG["llm"]["api_key"], CFG["llm"]["model"])
+
+
+def _llm_options() -> dict:
+    """B-lite knobs read from config.json (all optional, safe defaults)."""
+    cfg = CFG.get("llm") or {}
+    budgets = {
+        str(key)[len("daily_budget_"):]: float(value or 0)
+        for key, value in cfg.items()
+        if str(key).startswith("daily_budget_")
+    }
+    if "owner" not in budgets:
+        budgets["owner"] = float(cfg.get("daily_budget_owner") or 0)
+    if "guest" not in budgets:
+        budgets["guest"] = float(cfg.get("daily_budget_guest") or 0)
+    return {
+        "timeout": int(cfg.get("timeout") or 90),
+        "fallback_base_url": str(cfg.get("fallback_base_url") or ""),
+        "fallback_api_key": str(cfg.get("fallback_api_key") or ""),
+        "fallback_model": str(cfg.get("fallback_model") or ""),
+        "input_price_per_m": float(cfg.get("input_price_per_m") or 0),
+        "output_price_per_m": float(cfg.get("output_price_per_m") or 0),
+        "spend_db": str(cfg.get("spend_db") or (DATA_DIR / "spend.db")),
+        "budgets": budgets,
+    }
+
+
+llm = LLM(CFG["llm"]["base_url"], CFG["llm"]["api_key"], CFG["llm"]["model"],
+          **_llm_options())
 ATTACH_CFG = CFG.get("attachments") or {}
 ATTACHMENTS = Attachments(
     hub, llm,
@@ -203,6 +251,7 @@ def send_payload(payload: dict) -> bool:
 
 
 def send_text(text: str) -> bool:
+    traces.note_output(str(text))
     origin = ORIGIN.get()
     if origin is not None:
         collector = origin.get("collector")
@@ -240,6 +289,29 @@ def new_code() -> str:
 
 
 def call_agent(agent: dict, payload: dict, timeout: int = 20) -> dict:
+    started = time.perf_counter()
+    trace_id = trace_ctx.get_trace_id()
+    try:
+        result = _call_agent_impl(agent, payload, timeout)
+        traces.span(
+            trace_id, "agent", str(agent.get("id") or ""), status="ok",
+            latency_ms=int((time.perf_counter() - started) * 1000),
+            detail={"transport": agent.get("transport") or "http",
+                    "task_id": result.get("task_id") if isinstance(result, dict) else None,
+                    "final": result.get("final") if isinstance(result, dict) else None},
+        )
+        return result
+    except Exception as exc:
+        traces.span(
+            trace_id, "agent", str(agent.get("id") or ""), status="error",
+            latency_ms=int((time.perf_counter() - started) * 1000),
+            detail={"transport": agent.get("transport") or "http",
+                    "error": str(exc)[:400]},
+        )
+        raise
+
+
+def _call_agent_impl(agent: dict, payload: dict, timeout: int = 20) -> dict:
     if agent.get("transport") == "poll":
         wait_seconds = int(CFG.get("agent_wait_seconds", 60))
         result, task_id, done = BROKER.enqueue(agent["id"], {
@@ -254,6 +326,7 @@ def call_agent(agent: dict, payload: dict, timeout: int = 20) -> dict:
             return {"text": result.get("text", ""), "final": True}
         return {"text": f"任务已交给 {agent.get('name', agent['id'])}，完成后会通知你。",
                 "final": False, "task_id": task_id}
+    timeout = max(1, int(agent.get("timeout") or timeout))
     body = json.dumps(payload, ensure_ascii=False).encode()
     sig = hmac.new(agent.get("callback_secret", "").encode(), body, hashlib.sha256).hexdigest()
     req = urllib.request.Request(agent["callback_url"], data=body, method="POST")
@@ -298,6 +371,9 @@ JOBS: list = []
 SERVICES: dict = {}
 SETTINGS = SettingsService(CFG, store, CONFIG_PATH)
 CHANNELS = ChannelManager(CFG)
+MODELS = models.ModelCatalog(CFG, save_fn=SETTINGS.save)
+SETTINGS.catalog = MODELS
+llm.configure(provider_resolver=MODELS.resolve)
 LOADER = PluginLoader(
     plugins_dir=Path("/app/plugins"),
     tools=TOOLS,
@@ -305,12 +381,15 @@ LOADER = PluginLoader(
     resources={"site": site, "geo": geo, "store": store, "agents": AGENTS,
                "call_agent": call_agent, "settings": SETTINGS},
     root_config={"jobs": CFG.get("jobs", {}), "plugins": CFG.get("plugins", {}), "owner": OWNER,
-                 "websearch": CFG.setdefault("websearch", {"provider": "bing", "default_count": 5})},
+                 "websearch": CFG.setdefault("websearch", {"provider": "bing", "default_count": 5}),
+                 "toolbox": CFG.get("toolbox", {})},
     send_fn=send_text,
     services=SERVICES,
     secrets={"credential_key": CFG["credential_key"], "service_token": SERVICE_TOKEN,
              "llm_api_key": CFG["llm"]["api_key"],
              "web_search_api_key": (CFG.get("websearch") or {}).get("api_key", ""),
+             "github_token": (CFG.get("toolbox") or {}).get("github_token", ""),
+             "slack_webhook": (CFG.get("toolbox") or {}).get("slack_webhook", ""),
              "ops_token": (CFG.get("ops_agent") or {}).get("token", "")},
     login_url_fn=login_url,
     audit_fn=lambda plugin_id, action, detail: store.log_plugin_event(plugin_id, action, detail),
@@ -353,9 +432,13 @@ def reload_agents() -> None:
 
 def reload_llm() -> None:
     cfg = CFG.get("llm") or {}
-    llm.endpoint = str(cfg.get("base_url") or "").rstrip("/") + "/chat/completions"
-    llm.api_key = str(cfg.get("api_key") or "")
-    llm.model = str(cfg.get("model") or "")
+    llm.configure(
+        base_url=str(cfg.get("base_url") or ""),
+        api_key=str(cfg.get("api_key") or ""),
+        model=str(cfg.get("model") or ""),
+        **_llm_options(),
+        provider_resolver=MODELS.resolve,
+    )
 
 
 def reload_hub() -> None:
@@ -372,6 +455,21 @@ def reload_public() -> None:
 SETTINGS.attach(LOADER, SCHEDULER, rebuild_scheduler, refresh_services, TOOLS,
                 reload_agents=reload_agents, reload_llm=reload_llm,
                 reload_hub=reload_hub, reload_public=reload_public)
+
+CAPS = capabilities.CapabilityService(
+    TOOLS,
+    settings=SETTINGS,
+    catalog=MODELS,
+    llm=llm,
+    spend_path=llm.spend_db or str(DATA_DIR / "spend.db"),
+    reload_llm=reload_llm,
+    trace_path=TRACE_DB,
+    eval_db=EVAL_DB,
+    channels=CHANNELS,
+    send_wechat=lambda text: send_payload(
+        {"kind": "text", "text": text, "recipient": OWNER}),
+)
+CAPS.register()
 
 
 def send_media_tool(args: dict) -> dict:
@@ -441,6 +539,10 @@ def build_system_prompt(origin: dict | None = None, role: str = "owner") -> str:
         "你在即时通讯软件里服务站主。回答要简洁、口语化，不要 Markdown 表格。",
         "站点访问、访客、IP 归属地、AI 对话内容必须调用工具查询，绝不能编造数字；查不到就直说。",
         "涉及实时信息、新闻、价格、政策、人物、产品、网页内容时，先调用 web_search；需要读全文时用 web_fetch；不要凭记忆编造。",
+        "涉及用户长期偏好、项目约定或以前解决过的问题时，先调用 memory_search；解决可复用的问题后用 learn_skill 固化。",
+        "高危操作先调用 ask_human_confirmation，等主人回复 APPROVE 并用 confirm_action 确认后再执行。",
+        "需要跑代码用 python_repl 或 run_sandbox；改代码用 write_patch；回滚用 snapshot_checkpoint。",
+        "复杂任务可用 delegate_to_subagent 派给已注册 Agent；定时任务用 schedule_cron。",
         "力扣/LeetCode/刷题/做题相关的问题调用 leetcode_stats。",
         "用户发图片或文件时，系统会把图片交给视觉模型、把文件文字附在消息里；只根据实际提供的内容回答，不要假装看到了没读到的东西。",
         "用户要求某个项目 Agent 做事时调用 send_to_agent，不要假装已经完成。",
@@ -488,6 +590,8 @@ def build_system_prompt(origin: dict | None = None, role: str = "owner") -> str:
             "- 服务器命令：run_command 可以在容器里执行 shell，用于装依赖、跑测试、git、看日志、处理文件；一次一条，别执行破坏性命令。",
             "- 文件：fs_list / fs_read / fs_write / fs_replace / fs_delete / fs_move 可读写 /app、/lyph-src、/workspace，默认立即生效。",
             "- 网络：web_search 搜实时信息，web_fetch 读网页正文，http_request 调任意公开 API。",
+            "- 入口：list_channels 查看微信/QQ 等已接入入口；send_to_channel 把消息发到指定入口，不传 chat_id 时发到该入口最近活跃会话。",
+            "- 模型与成本：model_list / model_add / model_bind / model_switch_chat / model_test 管理模型；cost_report / budget_set 看花费和预算；trace_search / trace_get / trace_explain 查链路；eval_run / eval_drift 看质量；insight_report / optimize_suggest / optimize_apply 做诊断和优化。",
             "- 本机或长任务：send_to_agent 派给已注册的项目 Agent（例如 pc-home）。",
             "如果确实缺少必要信息或工具，说明缺什么、你试过什么，不要用“我做不到”敷衍。",
         ])
@@ -499,6 +603,7 @@ SYSTEM_PROMPT = build_system_prompt()
 
 def llm_answer(text: str, history: list[dict], origin: dict | None = None,
                role: str = "owner") -> str:
+    trace_id = trace_ctx.get_trace_id()
     messages = [{"role": "system", "content": build_system_prompt(origin, role)}]
     allowed = None if role == "owner" else GUEST_TOOLS
     for item in history:
@@ -508,7 +613,8 @@ def llm_answer(text: str, history: list[dict], origin: dict | None = None,
     tool_trace: list[dict] = []
     seen: dict[str, dict] = {}
     for round_no in range(10):
-        message = llm.complete(messages, TOOLS.definitions(allowed))
+        message = llm.complete(messages, TOOLS.definitions(allowed),
+                               role=role, trace_id=trace_id)
         calls = message.get("tool_calls") or []
         if not calls:
             return (message.get("content") or "").strip() or "我在，但这次没想出怎么回答。"
@@ -523,15 +629,24 @@ def llm_answer(text: str, history: list[dict], origin: dict | None = None,
             signature = name + "|" + json.dumps(args, ensure_ascii=False, sort_keys=True, default=str)
             if signature in seen:
                 log.info("llm repeated tool call: %s", signature[:300])
+                traces.span(trace_id, "tool", name, status="error",
+                            detail={"args": args, "error": "repeated call"})
                 previous = json.dumps(seen[signature], ensure_ascii=False, default=str)[:2000]
                 return f"我重复调用了 {name}，先停一下。上一次结果是：\n{previous}\n你想继续查哪一部分？"
             seen[signature] = {"pending": True}
             log.info("llm round %s tool=%s args=%s", round_no, name,
                      json.dumps(args, ensure_ascii=False)[:300])
+            tool_started = time.perf_counter()
             if allowed is not None and name not in allowed:
                 result = {"error": "当前会话是只读模式，不能调用这个工具"}
             else:
                 result = TOOLS.execute(name, args)
+            traces.span(
+                trace_id, "tool", name,
+                status="error" if isinstance(result, dict) and result.get("error") else "ok",
+                latency_ms=int((time.perf_counter() - tool_started) * 1000),
+                detail={"args": args, "result": result},
+            )
             seen[signature] = result
             tool_trace.append({"name": name, "args": args, "result": result})
             log.info("llm tool result %s: %s", name, str(result)[:300])
@@ -541,7 +656,7 @@ def llm_answer(text: str, history: list[dict], origin: dict | None = None,
         try:
             messages.append({"role": "user",
                              "content": "请基于以上工具结果直接回答，不要再调用工具；信息不足就说明缺什么。"})
-            final = llm.complete(messages, None)
+            final = llm.complete(messages, None, role=role, trace_id=trace_id)
             content = (final.get("content") or "").strip()
             if content:
                 return content
@@ -653,6 +768,15 @@ def handle_reply(notification: dict, text: str) -> None:
             log.warning("ops reply failed: %s", exc)
             send_text(f"文件操作失败：{exc}")
         return
+    if notification["agent_id"] == "toolbox" and SERVICES.get("toolbox"):
+        try:
+            result = SERVICES["toolbox"].handle_reply(notification, text)
+            send_agent_result(result)
+            store.set_status(notification["id"], "answered")
+        except Exception as exc:
+            log.warning("toolbox reply failed: %s", exc)
+            send_text(f"确认处理失败：{exc}")
+        return
     if not agent:
         send_text("这条通知对应的 Agent 已下线。")
         return
@@ -698,6 +822,46 @@ def answer_with_attachments(text: str, history: list[dict], bundle: dict,
 
 
 def _handle_inbound(text: str, message: dict, origin: dict | None = None) -> None:
+    """Set a trace id (and role) for every inbound message, then dispatch."""
+    role = str((origin or {}).get("role") or "owner")
+    meta = origin or {}
+    source = str(meta.get("platform") or meta.get("channel") or "wechat")
+    with trace_ctx.request(role=role) as trace_id:
+        token = traces.begin_capture()
+        started = time.perf_counter()
+        traces.start(
+            trace_id,
+            source=source,
+            role=role,
+            session=str(meta.get("chat_id") or OWNER),
+            channel=str(meta.get("channel") or ""),
+            user_id=str(meta.get("user_id") or OWNER),
+            input=text,
+            meta={"chat_type": meta.get("chat_type"),
+                  "platform": source,
+                  "message_id": meta.get("message_id")},
+        )
+        status = "ok"
+        error = ""
+        try:
+            return _handle_inbound_impl(text, message, origin)
+        except Exception as exc:
+            status = "error"
+            error = str(exc)[:2000]
+            traces.span(trace_id, "inbound", "handler", status="error",
+                        latency_ms=int((time.perf_counter() - started) * 1000),
+                        detail=error)
+            raise
+        finally:
+            output = traces.end_capture(token)
+            failure = traces.take_failure()
+            if failure:
+                status, error = failure
+            traces.finish(trace_id, status=status, error=error, output=output,
+                          latency_ms=int((time.perf_counter() - started) * 1000))
+
+
+def _handle_inbound_impl(text: str, message: dict, origin: dict | None = None) -> None:
     text = (text or "").strip()
     role = str((origin or {}).get("role") or "owner")
     chat_type = str((origin or {}).get("chat_type") or "private")
@@ -751,6 +915,7 @@ def _handle_inbound(text: str, message: dict, origin: dict | None = None) -> Non
             store.log_route(session_id, text, "agent", agent_id)
         except Exception as exc:
             log.warning("explicit agent call failed: %s", exc)
+            traces.mark_failed("agent_error", str(exc))
             send_text(f"已经收到，但 {agent.get('name', agent_id)} 暂时没有响应。")
         return
 
@@ -768,9 +933,15 @@ def _handle_inbound(text: str, message: dict, origin: dict | None = None) -> Non
         answer = answer_with_attachments(text, history, bundle, origin, role)
     except AttachmentError as exc:
         log.error("attachment vision failed: %s", exc)
+        traces.mark_failed("attachment_error", str(exc))
         answer = f"附件收到了，但识图失败：{exc}"
+    except LLMBudgetError as exc:
+        log.warning("llm budget exceeded: %s", exc)
+        traces.mark_failed("budget_exceeded", str(exc))
+        answer = exc.user_message
     except LLMError as exc:
         log.error("llm failed: %s", exc)
+        traces.mark_failed("llm_error", str(exc))
         answer = "AI 暂时不可用，稍后我再试。"
     store.log_route(session_id, display, "llm",
                     "attachment" if has_attachments else ("guest" if role != "owner" else ""))
@@ -824,6 +995,7 @@ async def maintenance_loop() -> None:
             flush_outbox()
             if time.time() - last_check > 6 * 3600:
                 last_check = time.time()
+                store.cleanup_channel_outbox(7)
                 if LEETCODE is not None:
                     await asyncio.to_thread(LEETCODE.get_stats, 5)
         except Exception as exc:
@@ -891,7 +1063,9 @@ def health():
     return {"ok": True, "time": now_iso(), "agents": list(AGENTS), "tools": TOOLS.names(),
             "jobs": list(SCHEDULER.jobs), "plugins": list(LOADER.loaded),
             "plugin_errors": LOADER.errors, "services": list(SERVICES),
-            "credentials": list(CREDENTIALS), "agent_broker": BROKER.status()}
+            "credentials": list(CREDENTIALS), "agent_broker": BROKER.status(),
+            "model_bindings": MODELS.list()["bindings"],
+            "trace_store": traces.enabled(), "eval_store": evals.enabled()}
 
 
 @app.post("/v1/notify")
@@ -992,7 +1166,11 @@ def leetcode_stats(request: Request):
 async def internal_ask(request: Request):
     service_auth(request)
     body = await request.json()
-    answer = await asyncio.to_thread(llm_answer, body.get("text", ""), [])
+    try:
+        answer = await asyncio.to_thread(llm_answer, body.get("text", ""), [])
+    except LLMBudgetError as exc:
+        log.warning("internal ask budget exceeded: %s", exc)
+        answer = exc.user_message
     return {"answer": answer}
 
 
@@ -1038,12 +1216,23 @@ async def channel_inbound(request: Request):
         "user_name": user_name or user_id,
         "role": role,
         "message_id": str(body.get("message_id") or "")[:200],
+        "account_id": str(body.get("account_id") or "")[:200],
         "collector": collector,
     }
     CHANNELS.record(channel_id, "in", platform=platform, chat_id=chat_id,
-                    user_id=user_id, text=text)
+                    user_id=user_id, text=text,
+                    account_id=str(body.get("account_id") or ""))
+    store.state_set(f"channel:{channel_id}:last_target", json.dumps({
+        "chat_id": chat_id, "platform": platform, "user_id": user_id,
+        "account_id": str(body.get("account_id") or ""),
+    }, ensure_ascii=False))
     try:
         await asyncio.to_thread(handle_inbound, text, {}, origin)
+    except LLMBudgetError as exc:
+        log.warning("channel budget exceeded: %s", exc)
+        CHANNELS.record(channel_id, "out", platform=platform, chat_id=chat_id,
+                        user_id=user_id, text="", ok=False, detail="budget_exceeded")
+        return {"reply": exc.user_message}
     except LLMError as exc:
         log.error("channel llm failed: %s", exc)
         CHANNELS.record(channel_id, "out", platform=platform, chat_id=chat_id,
@@ -1060,6 +1249,34 @@ async def channel_inbound(request: Request):
                     user_id=user_id, text=answer)
     return {"reply": answer, "channel": channel_id, "platform": platform,
             "chat_id": chat_id, "role": role}
+
+
+@app.get("/channel/outbound")
+def channel_outbound(request: Request, channel: str = "koishi", limit: int = 20):
+    """Pending messages for a bridge to deliver (channel-token auth)."""
+    channel_cfg, error = CHANNELS.authenticate(
+        channel, request.headers.get("x-channel-token", ""))
+    if channel_cfg is None:
+        raise HTTPException(401 if "令牌" in error else 403, error)
+    return {"channel": channel, "messages": store.list_channel_outbox(channel, limit)}
+
+
+@app.post("/channel/outbound/ack")
+async def channel_outbound_ack(request: Request):
+    """Mark outbound messages as sent (or failed) after the bridge delivers them."""
+    body = await request.json()
+    channel = str(body.get("channel") or "koishi").strip()
+    channel_cfg, error = CHANNELS.authenticate(
+        channel, request.headers.get("x-channel-token", ""))
+    if channel_cfg is None:
+        raise HTTPException(401 if "令牌" in error else 403, error)
+    ids = body.get("ids") if isinstance(body.get("ids"), list) else []
+    ok = bool(body.get("ok", True))
+    updated = store.ack_channel_outbox(channel, ids, ok=ok,
+                                       error=str(body.get("error") or ""))
+    CHANNELS.record(channel, "out", text=f"ack {updated}", ok=ok,
+                    detail=str(body.get("error") or ""))
+    return {"ok": True, "updated": updated}
 
 
 @app.post("/internal/jobs/{job_id}/run")
@@ -1149,6 +1366,7 @@ def settings_overview(request: Request):
         "services": list(SERVICES),
         "tools": TOOLS.names(),
         "credentials": list(CREDENTIALS),
+        "models": MODELS.list(),
         "broker": BROKER.status(),
         "events": store.list_plugin_events(20),
         "logs": LOG_RING.since(0, 80),
@@ -1579,3 +1797,10 @@ def login_page_alias(service: str, token: str = ""):
 @app.post("/agent-login/{service}", response_class=HTMLResponse)
 async def login_submit_alias(request: Request, service: str, token: str = ""):
     return await login_submit(request, service, token)
+
+
+# Unified Authenticator SSO (/sso/*) for the Koishi console and lyph admin.
+sso_routes.register(app, CFG, SETTINGS, _koishi_page)
+
+# Narrow read-only tool bridge for the lyph site agent.
+agent_bridge.register(app)

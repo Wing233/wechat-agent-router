@@ -35,7 +35,7 @@ class ChannelManager:
 
     def record(self, channel_id: str, direction: str, *, platform: str = "",
                chat_id: str = "", user_id: str = "", text: str = "",
-               ok: bool = True, detail: str = "") -> dict:
+               ok: bool = True, detail: str = "", account_id: str = "") -> dict:
         now = time.time()
         with self._lock:
             self._seq += 1
@@ -54,12 +54,16 @@ class ChannelManager:
             self.logs.append(item)
             state = self._state.setdefault(channel_id, {
                 "messages": 0, "last_inbound": None, "last_outbound": None,
-                "last_error": "", "last_user": "",
+                "last_error": "", "last_user": "", "last_chat_id": "",
+                "last_platform": "", "last_account_id": "",
             })
             state["messages"] += 1
             if direction == "in":
                 state["last_inbound"] = int(now)
                 state["last_user"] = user_id
+                state["last_chat_id"] = chat_id
+                state["last_platform"] = platform
+                state["last_account_id"] = account_id
             else:
                 state["last_outbound"] = int(now)
             if not ok:
@@ -72,12 +76,27 @@ class ChannelManager:
         channel = self.get(channel_id) or {}
         return {
             "id": channel_id,
+            "name": channel.get("name") or channel_id,
+            "type": channel.get("type") or "koishi",
             "enabled": bool(channel.get("enabled", True)),
             "messages": state.get("messages", 0),
             "last_inbound": state.get("last_inbound"),
             "last_outbound": state.get("last_outbound"),
             "last_user": state.get("last_user", ""),
+            "last_chat_id": state.get("last_chat_id", ""),
+            "last_platform": state.get("last_platform", ""),
+            "last_account_id": state.get("last_account_id", ""),
             "last_error": state.get("last_error", ""),
+        }
+
+    def target(self, channel_id: str) -> dict:
+        """Best-effort last known destination for a channel."""
+        status = self.status(channel_id)
+        return {
+            "channel": channel_id,
+            "chat_id": status.get("last_chat_id") or "",
+            "platform": status.get("last_platform") or "",
+            "user_id": status.get("last_user") or "",
         }
 
     def status_all(self) -> dict[str, dict]:

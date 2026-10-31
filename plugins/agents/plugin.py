@@ -1,4 +1,11 @@
-"""Agent routing capability: one tool that dispatches to registered project agents."""
+"""Agent routing capability: one tool that dispatches to registered project agents.
+
+Registered agents are configuration, not code. A ``transport: http`` agent such
+as ``lyph`` receives a POST to its ``callback_url`` with an
+``X-Router-Signature`` HMAC; ``transport: poll`` agents pull from the broker.
+The reverse direction (lyph -> router read-only tools) is served by
+``agent_bridge.py`` and never goes through this tool.
+"""
 from __future__ import annotations
 
 
@@ -15,6 +22,8 @@ def apply(ctx) -> None:
         agent = agents.get(args.get("agent_id"))
         if not agent:
             return {"error": "未注册的 Agent"}
+        if agent.get("dispatch") is False:
+            return {"error": "该 Agent 只接入了只读工具桥，暂未开启任务派发"}
         try:
             result = call_agent(agent, {
                 "notification_id": "",
@@ -32,12 +41,14 @@ def apply(ctx) -> None:
 
     ctx.tools.register(
         "send_to_agent",
-        "把用户请求转交给已注册的项目 Agent 处理，例如爬虫、部署。",
+        "把用户请求转交给已注册的项目 Agent 处理，例如 lyph 站点问答、爬虫、部署。",
         _schema({
-            "agent_id": {"type": "string", "enum": sorted(k for k in agents if k != "echo") or ["none"]},
-            "message": {"type": "string"},
-            "engine": {"type": "string", "description": "可选：opencode / codex / claude；不填用本地默认"},
-            "workspace": {"type": "string", "description": "可选：工作区别名或绝对路径；不填用默认工作区"},
+            "agent_id": {"type": "string", "enum": sorted(
+                k for k, item in agents.items()
+                if k != "echo" and item.get("dispatch") is not False) or ["none"]},
+            "message": {"type": "string", "description": "完整问题或任务；HTTP Agent（如 lyph）只接收文本"},
+            "engine": {"type": "string", "description": "可选：opencode / codex / claude；仅本地 poll Agent 使用，HTTP Agent 忽略"},
+            "workspace": {"type": "string", "description": "可选：工作区别名或绝对路径；仅本地 poll Agent 使用"},
         }, ["agent_id", "message"]),
         send_to_agent,
         aliases=("send_to_agent",),
