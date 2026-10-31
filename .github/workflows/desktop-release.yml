@@ -1,0 +1,49 @@
+name: Desktop
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to attach the exe to"
+        required: true
+        default: "v1.1.1"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: desktop/requirements.txt
+
+      - name: Build desktop exe
+        shell: pwsh
+        run: ./desktop/build.ps1
+
+      - name: Verify and checksum
+        shell: pwsh
+        run: |
+          $exe = "desktop/dist/WeChatAgentDesktop.exe"
+          if (!(Test-Path $exe)) { throw "WeChatAgentDesktop.exe was not produced" }
+          Get-Item $exe | Format-List Name,Length,LastWriteTime
+          $hash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  WeChatAgentDesktop.exe" | Set-Content -Encoding ascii "desktop/dist/WeChatAgentDesktop.exe.sha256"
+          Write-Host "SHA256: $hash"
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: |
+            desktop/dist/WeChatAgentDesktop.exe
+            desktop/dist/WeChatAgentDesktop.exe.sha256
+          overwrite_files: true

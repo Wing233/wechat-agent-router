@@ -483,6 +483,10 @@ Even if the Router is compromised, the local agent cannot run commands in arbitr
 
 ## Desktop console
 
+> Windows users can download the latest build:  
+> <https://github.com/Wing233/wechat-agent-router/releases/latest/download/WeChatAgentDesktop.exe>  
+> This URL always points to the latest release; setup notes are on the [LYPH download page](https://github.com/Wing233/lyph).
+
 A Windows-only visual shell for `local-agent`.
 
 ### Run from source

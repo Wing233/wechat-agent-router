@@ -486,6 +486,10 @@ Router 只能传别名；真正的绝对路径只存在于本机配置里。
 
 ## 桌面控制台
 
+> Windows 用户可以直接下载最新版：  
+> <https://github.com/Wing233/wechat-agent-router/releases/latest/download/WeChatAgentDesktop.exe>  
+> 这个地址始终指向最新 Release；安装说明见 [LYPH 下载页](https://github.com/Wing233/lyph)。
+
 桌面控制台是 `local-agent` 的可视化壳，Windows 专用。
 
 ### 源码运行
