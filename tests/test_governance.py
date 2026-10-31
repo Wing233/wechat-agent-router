@@ -78,6 +78,9 @@ def test_approval_reply_is_explicit() -> None:
     assert decision.classification == governance.ACTION_EXPLICIT
     assert decision.rule == "pending_reply"
 
+    guest = classify("APPROVE 7GSJ", role="guest", pending_reply=True)
+    assert guest.classification == governance.READ_ONLY
+
 
 def test_attachment_only_is_read_only() -> None:
     decision = classify("", has_attachments=True)

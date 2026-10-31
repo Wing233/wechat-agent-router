@@ -265,7 +265,7 @@ def classify_inbound(
     raw = (text or "").strip()
     role = str((origin or {}).get("role") or "owner")
 
-    if pending_reply:
+    if pending_reply and role == "owner":
         return Decision(ACTION_EXPLICIT, "审批回复", "pending_reply", True, True)
     if explicit_agent:
         agent_id = explicit_agent[0]
