@@ -607,3 +607,12 @@ class Store:
         counts = {row["classification"]: row["count"] for row in rows}
         return {"days": days, "counts": counts,
                 "total": sum(counts.values())}
+
+    def prune_decisions(self, days: int = 30) -> int:
+        days = max(1, min(int(days or 30), 365))
+        cutoff = datetime.fromtimestamp(
+            time.time() - days * 86400, timezone.utc).isoformat(timespec="seconds")
+        with self._conn() as conn:
+            cursor = conn.execute(
+                "DELETE FROM decisions WHERE created_at < ?", (cutoff,))
+            return int(cursor.rowcount or 0)

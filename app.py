@@ -1106,6 +1106,7 @@ async def maintenance_loop() -> None:
             if time.time() - last_check > 6 * 3600:
                 last_check = time.time()
                 store.cleanup_channel_outbox(7)
+                store.prune_decisions(int(CFG.get("decision_retention_days") or 30))
                 if LEETCODE is not None:
                     await asyncio.to_thread(LEETCODE.get_stats, 5)
         except Exception as exc:

@@ -7,6 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import governance
+from store import Store
 
 
 def classify(text: str, role: str = "owner", **kwargs):
@@ -124,3 +125,15 @@ def test_args_hash_binding() -> None:
     assert governance.args_hash(base) != governance.args_hash({"code": "print(2)"})
     assert governance.args_hash(base) == governance.args_hash(
         {**base, "mandate": "ABCD", "timeout": 30})
+
+
+def test_decision_retention(tmp_path) -> None:
+    store = Store(str(tmp_path / "router.db"))
+    store.init()
+    store.log_decision(text="old message", classification="read_only",
+                       would_accept=True, executed=True)
+    with store._conn() as conn:
+        conn.execute(
+            "UPDATE decisions SET created_at='2000-01-01T00:00:00+00:00'")
+    assert store.prune_decisions(30) == 1
+    assert store.list_decisions() == []
