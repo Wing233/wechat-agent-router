@@ -21,6 +21,7 @@
 - 新增 `insights.py` 异常归因与 `insight_report` / `optimize_suggest` / `optimize_apply`
 - 新增 `docs/capabilities.md`
 - `config.json` 新增 `trace_db`、`eval_db`、`eval_cases`、`model_bindings`、`spend_db`
+- 访客即使开启 `allow_guest_tools`，也会过滤模型、成本、链路、评测和 ops 等站主工具
 
 ## 1.1.1 — 2026-10-30
 
