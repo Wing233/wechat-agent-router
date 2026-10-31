@@ -50,6 +50,10 @@ GUEST_TOOLS = {
     "leetcode__leetcode_stats",
     "demo_time__now",
     "demo_weather__now",
+    "websearch__web_search",
+    "websearch__web_fetch",
+    "websearch__weather",
+    "websearch__calculator",
 }
 
 
@@ -300,11 +304,13 @@ LOADER = PluginLoader(
     jobs=JOBS,
     resources={"site": site, "geo": geo, "store": store, "agents": AGENTS,
                "call_agent": call_agent, "settings": SETTINGS},
-    root_config={"jobs": CFG.get("jobs", {}), "plugins": CFG.get("plugins", {}), "owner": OWNER},
+    root_config={"jobs": CFG.get("jobs", {}), "plugins": CFG.get("plugins", {}), "owner": OWNER,
+                 "websearch": CFG.setdefault("websearch", {"provider": "bing", "default_count": 5})},
     send_fn=send_text,
     services=SERVICES,
     secrets={"credential_key": CFG["credential_key"], "service_token": SERVICE_TOKEN,
              "llm_api_key": CFG["llm"]["api_key"],
+             "web_search_api_key": (CFG.get("websearch") or {}).get("api_key", ""),
              "ops_token": (CFG.get("ops_agent") or {}).get("token", "")},
     login_url_fn=login_url,
     audit_fn=lambda plugin_id, action, detail: store.log_plugin_event(plugin_id, action, detail),
@@ -434,6 +440,7 @@ def build_system_prompt(origin: dict | None = None, role: str = "owner") -> str:
         "## 即时通讯网关职责",
         "你在即时通讯软件里服务站主。回答要简洁、口语化，不要 Markdown 表格。",
         "站点访问、访客、IP 归属地、AI 对话内容必须调用工具查询，绝不能编造数字；查不到就直说。",
+        "涉及实时信息、新闻、价格、政策、人物、产品、网页内容时，先调用 web_search；需要读全文时用 web_fetch；不要凭记忆编造。",
         "力扣/LeetCode/刷题/做题相关的问题调用 leetcode_stats。",
         "用户发图片或文件时，系统会把图片交给视觉模型、把文件文字附在消息里；只根据实际提供的内容回答，不要假装看到了没读到的东西。",
         "用户要求某个项目 Agent 做事时调用 send_to_agent，不要假装已经完成。",
@@ -472,7 +479,7 @@ def build_system_prompt(origin: dict | None = None, role: str = "owner") -> str:
             "",
             "## 只读权限",
             "当前用户是访客或群成员，只读。不能执行文件操作、Agent 任务、定时提醒、配置修改或任何写操作。",
-            "只能回答一般问题，以及公开的站点统计、力扣统计、时间和天气。",
+            "只能回答一般问题，以及公开的站点统计、力扣统计、时间、天气、网页搜索和网页正文抓取。",
         ])
     return "\n".join(lines)
 

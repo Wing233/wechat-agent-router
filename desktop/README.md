@@ -5,7 +5,7 @@
 - 本机 Agent：身份、Agent Key、Router 地址、默认引擎/工作区、超时、启停、取消任务
 - 本地引擎：OpenCode / Codex / Claude Code / 任意命令行程序，支持试跑
 - 本地工作区：路径白名单、目录选择、打开目录
-- 服务器：Agent 注册、插件启停/重载、定时任务、脱敏配置、DeepSeek 余额
+- 服务器：Agent 注册、插件启停/重载、定时任务、脱敏配置、联网搜索、DeepSeek 余额
 - 渠道：QQ / Telegram / Discord 等经 Koishi 接入，统一身份映射、群聊 @、访客只读
 - 本机日志：Agent 轮询、任务执行、配置修改
 
@@ -107,6 +107,19 @@ ssh -N -L 5140:127.0.0.1:5140 root@123.57.153.49
 - 图片/文件双向传输暂未接入 Router
 
 详见 `koishi/README.md`。
+
+## Agent 常用工具
+
+Router 内置了 `websearch` 插件：
+
+- `web_search`：联网搜索，默认 Bing（无需 Key），可切豆包搜索 API
+- `web_fetch`：抓取公开网页正文，带 SSRF 防护
+- `weather`：城市当前天气
+- `calculator`：安全数学表达式计算
+
+访客只读身份也可以使用这些只读工具；`ops`、`admin`、`agents`、`reminders` 仍然只对 Owner 开放。
+
+在服务器配置页「联网搜索」里可以切换提供方、设置默认结果数和豆包 Key。豆包 Key 只写不回显；Key 无效时会自动回退 Bing。
 
 ## 多台电脑
 

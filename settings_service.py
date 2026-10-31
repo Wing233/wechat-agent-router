@@ -33,6 +33,7 @@ class SettingsService:
         self.reload_hub = None
         self.reload_public = None
         self._ensure_channels()
+        self._ensure_websearch()
         self._ensure_koishi_auth()
 
     def attach(self, loader, scheduler, rebuild, refresh, tools=None,
@@ -350,6 +351,30 @@ class SettingsService:
         return view
 
     # ------------------------------------------------------------------
+    # web search
+    # ------------------------------------------------------------------
+    def _ensure_websearch(self) -> None:
+        web = self.config.setdefault("websearch", {})
+        changed = False
+        if "provider" not in web:
+            web["provider"] = "bing"
+            changed = True
+        if "default_count" not in web:
+            web["default_count"] = 5
+            changed = True
+        if "api_key" not in web:
+            web["api_key"] = ""
+            changed = True
+        if changed:
+            self._save()
+
+    def websearch_view(self) -> dict:
+        web = dict(self.config.get("websearch") or {})
+        web["api_key"] = self._mask(web.get("api_key"))
+        web["configured"] = bool((self.config.get("websearch") or {}).get("api_key"))
+        return web
+
+    # ------------------------------------------------------------------
     # Koishi console authenticator gate
     # ------------------------------------------------------------------
     def _ensure_koishi_auth(self) -> None:
@@ -503,6 +528,7 @@ class SettingsService:
             "channels": self.channels_view(),
             "channel_identity": self.channel_identity_view(),
             "koishi_auth": self.koishi_auth_view(),
+            "websearch": self.websearch_view(),
             "disabled_plugins": cfg.get("disabled_plugins") or [],
             "poll_interval": cfg.get("poll_interval"),
             "agent_wait_seconds": cfg.get("agent_wait_seconds", 60),
@@ -535,6 +561,30 @@ class SettingsService:
             self.config["agent_wait_seconds"] = seconds
             self._save()
             return {"key": key, "value": seconds}
+        if key == "websearch.provider":
+            provider = str(value or "bing").lower()
+            if provider not in ("bing", "doubao"):
+                raise ValueError("websearch.provider 只支持 bing 或 doubao")
+            self.config.setdefault("websearch", {})["provider"] = provider
+            self._save()
+            return {"key": key, "value": provider}
+        if key == "websearch.default_count":
+            count = int(value)
+            if count < 1 or count > 10:
+                raise ValueError("websearch.default_count 应在 1–10 之间")
+            self.config.setdefault("websearch", {})["default_count"] = count
+            self._save()
+            return {"key": key, "value": count}
+        if key == "websearch.api_key":
+            text = str(value or "").strip()
+            if not text or "..." in text or text == "***":
+                return {"key": key, "changed": False}
+            self.config.setdefault("websearch", {})["api_key"] = text
+            if self.loader is not None:
+                self.loader.secrets["web_search_api_key"] = text
+            self._save()
+            self.store.log_plugin_event("admin", "config_set", key)
+            return {"key": key, "changed": True}
         if key in ("llm.base_url", "hub.base_url", "public_base_url"):
             text = str(value or "").strip().rstrip("/")
             if not re.match(r"^https?://[^\s]+$", text):

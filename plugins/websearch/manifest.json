@@ -1,0 +1,11 @@
+{
+  "id": "websearch",
+  "name": "联网搜索",
+  "version": "1.0.0",
+  "api_version": "1",
+  "entry": "plugin.py",
+  "capabilities": ["tools"],
+  "permissions": ["net:open.feedcoopapi.com", "net:www.bing.com", "net:wttr.in"],
+  "secrets": ["web_search_api_key"],
+  "description": "网页搜索、网页正文抓取、天气、计算器；支持 Bing 兜底和豆包搜索 API"
+}

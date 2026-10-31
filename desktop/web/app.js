@@ -709,6 +709,7 @@ function renderServerConfigTab(s) {
   const cfg = s.config || {};
   const llm = cfg.llm || {};
   const hub = cfg.hub || {};
+  const web = cfg.websearch || {};
   return `<form data-config-form>
     <div class="grid-2">
       <section class="card"><div class="card-head"><div><h2 class="card-title">模型（LLM）</h2><p class="card-sub">DeepSeek 兼容接口；密钥留空表示不修改。</p></div></div><div class="card-body"><div class="form-grid">
@@ -725,6 +726,13 @@ function renderServerConfigTab(s) {
         <div class="field"><label>Agent 等待（秒）</label><input class="input" type="number" min="5" max="600" name="agent_wait_seconds" value="${esc(cfg.agent_wait_seconds ?? 60)}"></div>
       </div></div></section>
     </div>
+    <section class="card" style="margin-top:16px"><div class="card-head"><div><h2 class="card-title">联网搜索</h2><p class="card-sub">Bing 无需 Key；豆包搜索需要有效的 API Key。Key 无效时自动回退 Bing。</p></div></div><div class="card-body"><div class="form-grid cols-3">
+      <div class="field"><label>搜索提供方</label><select class="select" name="websearch.provider"><option value="bing" ${!web.provider || web.provider === "bing" ? "selected" : ""}>Bing（无需 Key）</option><option value="doubao" ${web.provider === "doubao" ? "selected" : ""}>豆包搜索（需 Key）</option></select></div>
+      <div class="field"><label>默认结果数</label><input class="input" type="number" min="1" max="10" name="websearch.default_count" value="${esc(web.default_count ?? 5)}"></div>
+      <div class="field"><label>豆包 API Key</label><input class="input mono" name="websearch.api_key" value="" placeholder="${esc(web.api_key || "未配置")}" autocomplete="off"><small>只写不回显；留空表示不修改。</small></div>
+    </div>
+    <div class="callout callout-info" style="margin-top:14px">${icon("wifi")} <div><strong>Agent 常用工具</strong><p>已安装：网页搜索、网页正文抓取、天气、计算器。涉及实时信息时，LLM 会先调用 web_search；需要读全文时调用 web_fetch。</p></div></div>
+    </div></section>
     <div class="form-actions"><button class="btn btn-ghost" type="button" data-action="balance">${icon("database")}查询余额</button><button class="btn btn-primary" type="submit">${icon("check")}保存服务器配置</button></div>
   </form>`;
 }
