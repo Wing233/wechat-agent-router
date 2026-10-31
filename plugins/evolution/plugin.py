@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -115,8 +116,10 @@ class Evolution:
 
     def install(self, meta: dict) -> dict:
         pid = str(meta.get("plugin_id") or "")
-        source = Path(str(meta.get("proposal_path") or ""))
-        if not pid or not source.is_dir() or Path("/sandbox") not in source.parents:
+        source = Path(str(meta.get("proposal_path") or "")).resolve(strict=False)
+        if not re.fullmatch(r"[a-z][a-z0-9_-]{1,63}", pid):
+            return {"text": "插件 ID 无效，已取消。", "final": True}
+        if not source.is_dir() or Path("/sandbox").resolve() not in source.parents:
             return {"text": "提案路径无效，已取消。", "final": True}
         target = Path("/app/plugins") / pid
         backup = Path("/sandbox/.backup") / f"{pid}-{int(time.time())}"
@@ -141,7 +144,8 @@ class Evolution:
 
     def handle_reply(self, notification: dict, text: str) -> dict:
         meta = notification.get("meta") or {}
-        if any(word in text.lower() for word in ("approve", "同意", "通过", "安装")):
+        first = text.strip().upper()
+        if first == "APPROVE" or first.startswith("APPROVE "):
             return self.install(meta)
         return {"text": "已取消这次插件安装。", "final": True}
 

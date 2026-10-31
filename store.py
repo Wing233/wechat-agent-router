@@ -242,12 +242,15 @@ class Store:
         item["meta"] = json.loads(item.pop("meta_json") or "{}")
         return item
 
-    def by_code(self, code: str) -> dict | None:
+    def by_code(self, code: str, chat_id: str = "") -> dict | None:
+        sql = "SELECT * FROM notifications WHERE code=? AND status='pending'"
+        params: list = [code.upper()]
+        if chat_id:
+            sql += " AND chat_id=?"
+            params.append(chat_id)
+        sql += " ORDER BY created_at DESC LIMIT 1"
         with self._conn() as conn:
-            row = conn.execute(
-                "SELECT * FROM notifications WHERE code=? AND status='pending' ORDER BY created_at DESC LIMIT 1",
-                (code.upper(),),
-            ).fetchone()
+            row = conn.execute(sql, params).fetchone()
         if not row:
             return None
         item = dict(row)

@@ -107,6 +107,7 @@ class Toolbox:
             columns = {row["name"] for row in conn.execute(
                 "PRAGMA table_info(confirmations)")}
             migrations = {
+                "decided_at": "TEXT NOT NULL DEFAULT ''",
                 "tool": "TEXT NOT NULL DEFAULT ''",
                 "scope_json": "TEXT NOT NULL DEFAULT '{}'",
                 "policy_version": "TEXT NOT NULL DEFAULT ''",
@@ -120,9 +121,14 @@ class Toolbox:
                 "updated_at": "TEXT NOT NULL DEFAULT ''",
             }
             for name, ddl in migrations.items():
-                if name not in columns:
+                if name in columns:
+                    continue
+                try:
                     conn.execute(
                         f"ALTER TABLE confirmations ADD COLUMN {name} {ddl}")
+                except sqlite3.OperationalError as exc:
+                    if "duplicate column name" not in str(exc).lower():
+                        raise
 
     # --- memory / skills ------------------------------------------------
     def memory_search(self, args: dict) -> dict:
@@ -363,22 +369,27 @@ class Toolbox:
         actual = str(actual or "")
         if not approved or not actual:
             return False
-        return (approved == actual
-                or approved.split("__")[-1] == actual.split("__")[-1])
+        # ask_confirmation normalizes aliases to the registered full name.
+        # A mandate that still has a bare name must not match another plugin.
+        return approved == actual
 
     @staticmethod
-    def _path_allowed(scope_path: str, args: dict) -> bool:
-        if not scope_path:
+    def _paths_allowed(scope_paths: list[str], args: dict) -> bool:
+        roots = [Path(item).resolve(strict=False) for item in scope_paths if item]
+        if not roots:
             return True
-        root = Path(scope_path).resolve(strict=False)
         candidates = []
-        for key in ("path", "cwd", "target", "source", "dest", "destination"):
+        for key in ("path", "cwd", "target", "source", "src", "dst",
+                    "dest", "destination"):
             value = args.get(key)
             if isinstance(value, str) and value.strip():
                 candidates.append(Path(value).resolve(strict=False))
         if not candidates:
-            return True
-        return all(item == root or root in item.parents for item in candidates)
+            return False
+        return all(
+            any(item == root or root in item.parents for root in roots)
+            for item in candidates
+        )
 
     def ask_confirmation(self, args: dict) -> dict:
         action = str(args.get("action") or "").strip()[:500]
@@ -386,17 +397,38 @@ class Toolbox:
         if not action:
             return {"error": "action 不能为空"}
         tool = str(args.get("tool") or "").strip()[:120]
-        raw_args = args.get("args") if isinstance(args.get("args"), dict) else {}
+        if tool:
+            tools = getattr(self.ctx, "tools", None)
+            registry = getattr(tools, "registry", None)
+            if registry is not None:
+                canonical = registry.canonical(tool)
+                if canonical not in registry.names():
+                    return {"error": f"未知工具：{tool}"}
+                tool = canonical
+        raw_args = args.get("args")
+        if isinstance(raw_args, str) and raw_args.strip():
+            try:
+                raw_args = json.loads(raw_args)
+            except json.JSONDecodeError:
+                return {"error": "args 必须是 JSON 对象"}
+        if raw_args is None:
+            raw_args = {}
+        if not isinstance(raw_args, dict):
+            return {"error": "args 必须是对象"}
         if raw_args and len(json.dumps(raw_args, ensure_ascii=False, default=str)) > 8192:
             return {"error": "args 太大，无法绑定审批"}
-        ttl_minutes = max(1, min(int(args.get("ttl_minutes") or 30), 10080))
+        if (tool and governance is not None
+                and governance.mandate_required(tool, raw_args)
+                and not raw_args):
+            return {"error": "高危工具的审批必须传 args，不能空白授权"}
+        ttl_minutes = max(1, min(int(args.get("ttl_minutes") or 30), 1440))
         max_uses = max(1, min(int(args.get("max_uses") or 1), 100))
         paths = args.get("paths") if isinstance(args.get("paths"), list) else []
         agent_id = str(args.get("agent_id") or "").strip()[:120]
         scope = {
             "tool": tool,
-            "args_hash": governance.args_hash(raw_args) if governance and raw_args else "",
-            "args_preview": json.dumps(raw_args, ensure_ascii=False, default=str)[:1000],
+            "args_hash": governance.args_hash(raw_args) if governance else "",
+            "args_preview": json.dumps(raw_args, ensure_ascii=False, default=str)[:8192],
             "paths": [str(item)[:500] for item in paths[:10]],
             "agent_id": agent_id,
             "max_uses": max_uses,
@@ -404,6 +436,12 @@ class Toolbox:
         }
         expires_at = (datetime.now(CST) + timedelta(minutes=ttl_minutes)).isoformat(
             timespec="seconds")
+        with self._conn() as conn:
+            pending_count = conn.execute(
+                "SELECT COUNT(*) FROM confirmations "
+                "WHERE status='pending' AND expires_at>?", (_now(),)).fetchone()[0]
+        if pending_count >= 5:
+            return {"error": "待审批数量过多，请先处理现有审批"}
         code = _code()
         for _ in range(30):
             with self._conn() as conn:
@@ -423,12 +461,23 @@ class Toolbox:
                  json.dumps(scope, ensure_ascii=False), self._policy_version(),
                  "", "explicit", expires_at, "", "", max_uses, 0, _now()))
         text = (f"需要确认：{summary or action}\n"
-                f"工具：{tool or '未绑定（不能用于高危工具）'}\n"
-                f"回复 APPROVE {code} 批准，REJECT {code} 取消\n"
-                f"有效期 {ttl_minutes} 分钟，最多执行 {max_uses} 次")
+                f"工具：{tool or '未绑定（不能用于高危工具）'}\n")
+        if raw_args:
+            preview = scope["args_preview"]
+            if len(preview) <= 1200:
+                text += f"参数：{preview}\n"
+            else:
+                text += (f"参数（共 {len(preview)} 字符，显示头尾）：\n"
+                         f"{preview[:800]}\n...（中间省略）...\n{preview[-400:]}\n")
+        if scope["paths"]:
+            text += f"路径：{', '.join(scope['paths'])}\n"
+        if scope["agent_id"]:
+            text += f"Agent：{scope['agent_id']}\n"
+        text += (f"回复 APPROVE {code} 批准，REJECT {code} 取消\n"
+                 f"有效期 {ttl_minutes} 分钟，最多执行 {max_uses} 次")
         self.store.create_notification(
             agent_id="toolbox", chat_id=self.owner, text=text, code=code,
-            expect_reply=True, ttl_seconds=min(ttl_minutes * 60, 86400),
+            expect_reply=True, ttl_seconds=ttl_minutes * 60,
             meta={"action": action, "summary": summary, "tool": tool,
                   "args_hash": scope["args_hash"], "expires_at": expires_at,
                   "max_uses": max_uses, "policy_version": self._policy_version()},
@@ -516,28 +565,40 @@ class Toolbox:
         if approved_policy and approved_policy != self._policy_version():
             return {"error": "策略版本已变化，请重新审批",
                     "status": "policy_changed"}
+        if (governance is not None
+                and governance.mandate_required(tool, args)
+                and not scope.get("args_hash")):
+            return {"error": "审批未绑定参数，不能执行高危工具",
+                    "status": "unbound_args"}
         if scope.get("args_hash") and governance is not None:
             if scope["args_hash"] != governance.args_hash(args):
                 return {"error": "审批参数与本次执行不一致，请重新审批",
                         "status": "args_changed"}
         if scope.get("agent_id") and str(args.get("agent_id") or "") != scope["agent_id"]:
             return {"error": "审批绑定的 Agent 不一致", "status": "agent_changed"}
-        for scope_path in scope.get("paths") or []:
-            if not self._path_allowed(scope_path, args):
-                return {"error": f"审批路径不包含本次操作路径：{scope_path}",
-                        "status": "path_changed"}
+        scope_paths = [str(item) for item in (scope.get("paths") or []) if item]
+        if scope_paths and not self._paths_allowed(scope_paths, args):
+            return {"error": "审批路径不包含本次操作路径",
+                    "status": "path_changed"}
         max_uses = int(row.get("max_uses") or 1)
         uses = int(row.get("uses") or 0)
         if uses >= max_uses:
             return {"error": "审批使用次数已用完", "status": "used"}
         if consume:
-            uses += 1
-            used_at = _now() if uses >= max_uses else ""
-            new_status = "used" if uses >= max_uses else "approved"
             with self._conn() as conn:
-                conn.execute(
-                    "UPDATE confirmations SET uses=?,used_at=?,status=?,updated_at=? "
-                    "WHERE code=?", (uses, used_at, new_status, _now(), code))
+                cursor = conn.execute(
+                    "UPDATE confirmations SET uses=uses+1,"
+                    "used_at=CASE WHEN uses+1>=max_uses THEN ? ELSE '' END,"
+                    "status=CASE WHEN uses+1>=max_uses THEN 'used' ELSE 'approved' END,"
+                    "updated_at=? WHERE code=? AND status='approved' "
+                    "AND revoked_at='' AND used_at='' AND uses<max_uses",
+                    (_now(), _now(), code))
+                if cursor.rowcount != 1:
+                    return {"error": "审批已被并发使用或已失效",
+                            "status": "used"}
+            row = self._mandate_row(code) or row
+            uses = int(row.get("uses") or 0)
+            max_uses = int(row.get("max_uses") or max_uses)
         return {"ok": True, "code": code, "tool": tool, "args": args,
                 "uses": uses, "max_uses": max_uses,
                 "remaining": max(0, max_uses - uses)}
@@ -577,8 +638,9 @@ class Toolbox:
             rows = conn.execute(
                 "SELECT code,action,summary,tool,expires_at,max_uses,uses "
                 "FROM confirmations WHERE status='approved' AND used_at='' "
-                "AND revoked_at='' AND expires_at>? "
-                "ORDER BY decided_at DESC LIMIT ?", (_now(), limit)).fetchall()
+                "AND revoked_at='' AND expires_at>? AND policy_version=? "
+                "AND uses<max_uses ORDER BY decided_at DESC LIMIT ?",
+                (_now(), self._policy_version(), limit)).fetchall()
         items = []
         for row in rows:
             item = dict(row)
@@ -600,14 +662,19 @@ class Toolbox:
             "stats": self.store.decision_stats(days=7),
         }
 
-    def handle_reply(self, notification: dict, text: str) -> dict:
+    def handle_reply(self, notification: dict, text: str,
+                     approved_by: str = "") -> dict:
         code = str(notification.get("code") or "").upper()
-        lowered = (text or "").lower()
-        rejected = any(word in lowered for word in (
-            "reject", "拒绝", "取消", "不要", "不同意", "不批准", "不执行"))
-        approved = (not rejected) and any(word in lowered for word in (
-            "approve", "同意", "批准", "通过", "执行", "可以"))
-        status = "approved" if approved else "rejected"
+        approval = governance.parse_approval(text) if governance is not None else None
+        if approval is None:
+            return {"text": "请回复 APPROVE 码 或 REJECT 码。", "final": True}
+        if any(word in (text or "").lower() for word in (
+                "不要", "别", "先别", "取消", "不执行")):
+            return {"text": "审批文本包含否定词，请只回复 APPROVE 码 或 REJECT 码。",
+                    "final": True}
+        if approval.code != code:
+            return {"text": "确认码不匹配，请重新回复。", "final": True}
+        status = "approved" if approval.approved else "rejected"
         now = _now()
         warning = ""
         with self._conn() as conn:
@@ -620,12 +687,14 @@ class Toolbox:
                 conn.execute(
                     "UPDATE confirmations SET status=?,decided_at=?,approved_by=?,"
                     "expires_at=?,updated_at=? WHERE code=?",
-                    (status, now, self.owner or str(notification.get("chat_id") or ""),
+                    (status, now,
+                     approved_by or self.owner or str(notification.get("chat_id") or ""),
                      expires_at, now, code))
                 scope = json.loads(row["scope_json"] or "{}")
-                if approved and not scope.get("tool"):
+                if approval.approved and not scope.get("tool"):
                     warning = "（这次审批未绑定工具，不能执行高危工具。）"
-        return {"text": ("已批准，可以继续执行。" if approved else "已取消这次操作。") + warning,
+        return {"text": ("已批准，可以继续执行。" if approval.approved
+                         else "已取消这次操作。") + warning,
                 "final": True}
 
     # --- integrations ---------------------------------------------------
@@ -958,7 +1027,7 @@ def apply(ctx) -> None:
             "summary": {"type": "string"},
             "tool": {"type": "string", "description": "将要执行的高危工具名，例如 toolbox__python_repl"},
             "args": {"type": "object", "description": "将要传给该工具的参数（不含 mandate）"},
-            "ttl_minutes": {"type": "integer", "minimum": 1, "maximum": 10080},
+            "ttl_minutes": {"type": "integer", "minimum": 1, "maximum": 1440},
             "max_uses": {"type": "integer", "minimum": 1, "maximum": 100},
             "paths": {"type": "array", "items": {"type": "string"}},
             "agent_id": {"type": "string"},

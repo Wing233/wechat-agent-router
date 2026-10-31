@@ -21,6 +21,21 @@ def test_read_only_queries() -> None:
         "site_report 间隔是不是太长了",
         "你好",
         "谢谢",
+        "部署文档在哪里",
+        "重启之后日志在哪看",
+        "删除操作有日志吗",
+        "改天天气怎么样",
+        "帮我看看这个报错怎么改",
+        "删除操作会不会有风险",
+        "重启和删除哪个更危险",
+        "这个操作执行了会怎样",
+        "别播报了",
+        "先别执行",
+        "不要执行",
+        "比较删除和重启",
+        "分析删除和重启",
+        "列出删除和重启的顺序",
+        "把删除和重启的顺序列出来",
     ):
         decision = classify(text)
         assert decision.classification == governance.READ_ONLY, (text, decision)
@@ -31,9 +46,14 @@ def test_explicit_actions() -> None:
         "帮我重启 router",
         "加个提醒，明天9点",
         "每天早上9点提醒我",
-        "别播报了",
         "把 site_report 的间隔改成 30 分钟",
         "帮我删掉日志",
+        "加几个提醒",
+        "添加几个监控",
+        "把 site_report 的间隔调到 30 分钟",
+        "通知大家明天开会",
+        "把风险日志删掉",
+        "帮我查日志然后删除",
     ):
         decision = classify(text)
         assert decision.classification == governance.ACTION_EXPLICIT, (text, decision)
@@ -45,7 +65,7 @@ def test_inferred_suggestions() -> None:
         "这个功能应该加个提醒",
         "能不能加个提醒",
         "建议加监控",
-        "重启吗",
+        "要不要重启",
     ):
         decision = classify(text)
         assert decision.classification == governance.ACTION_INFERRED, (text, decision)
@@ -60,9 +80,11 @@ def test_guest_action_is_ignored() -> None:
 
 
 def test_guest_read_only_is_allowed() -> None:
-    decision = classify("今天访问量多少", role="guest")
-    assert decision.classification == governance.READ_ONLY
-    assert decision.executed is True
+    for text in ("今天访问量多少", "部署文档在哪里", "删除操作有日志吗",
+                 "帮我看看删除日志", "比较删除和重启"):
+        decision = classify(text, role="guest")
+        assert decision.classification == governance.READ_ONLY, (text, decision)
+        assert decision.executed is True
 
 
 def test_explicit_agent_scope() -> None:
@@ -101,14 +123,27 @@ def test_read_only_tool_policy() -> None:
         "toolbox__python_repl", governance.ACTION_INFERRED, "owner") is False
 
     allowed = governance.read_only_tools(
-        ["site__visit_stats", "toolbox__python_repl", "toolbox__governance_report"])
-    assert allowed == {"site__visit_stats", "toolbox__governance_report"}
+        ["site__visit_stats", "toolbox__python_repl", "toolbox__memory_search"])
+    assert allowed == {"site__visit_stats", "toolbox__memory_search"}
+    assert governance.is_read_only_tool("evil__now") is False
+    assert governance.is_read_only_tool("toolbox__sql_query") is False
+    assert governance.is_read_only_tool("toolbox__governance_report") is False
+    assert governance.is_read_only_tool("toolbox__confirm_action") is False
+    assert governance.is_read_only_tool("trace_get") is False
 
 
 def test_high_risk_detection() -> None:
     assert governance.is_high_risk_tool("toolbox__python_repl") is True
     assert governance.is_high_risk_tool("python_repl") is True
     assert governance.is_high_risk_tool("site__visit_stats") is False
+    assert governance.is_high_risk_tool("agents__send_to_agent") is True
+    assert governance.is_high_risk_tool("admin__set_job_interval") is True
+    assert governance.is_high_risk_tool("toolbox__memory_update") is True
+    assert governance.is_high_risk_tool("toolbox__learn_skill") is True
+    assert governance.is_high_risk_tool("model_add") is True
+    assert governance.is_high_risk_tool("send_to_channel") is True
+    assert governance.is_high_risk_tool("trace_get") is True
+    assert governance.is_high_risk_tool("toolbox__sql_query") is True
     assert governance.mandate_required(
         "toolbox__snapshot_checkpoint", {"action": "list"}) is False
     assert governance.mandate_required(
@@ -117,6 +152,21 @@ def test_high_risk_detection() -> None:
         "toolbox__github_api", {"method": "GET"}) is False
     assert governance.mandate_required(
         "toolbox__github_api", {"method": "POST"}) is True
+
+
+def test_parse_approval_is_strict() -> None:
+    parsed = governance.parse_approval("APPROVE 7GSJ")
+    assert parsed is not None
+    assert parsed.approved is True
+    assert parsed.code == "7GSJ"
+
+    rejected = governance.parse_approval("REJECT 7GSJ")
+    assert rejected is not None
+    assert rejected.approved is False
+
+    assert governance.parse_approval("APPROVE 是什么意思") is None
+    assert governance.parse_approval("先别执行") is None
+    assert governance.parse_approval("7GSJ") is None
 
 
 def test_args_hash_binding() -> None:

@@ -173,15 +173,18 @@ class Ops:
         return "（已同步到 lyph git）"
 
     def handle_reply(self, notification: dict, text: str) -> dict:
-        meta = notification.get("meta") or {}
-        if not any(word in text.lower() for word in ("approve", "同意", "执行", "通过")):
+        meta = dict(notification.get("meta") or {})
+        first = text.strip().upper()
+        if not (first == "APPROVE" or first.startswith("APPROVE ")):
             return {"text": "已取消这次文件操作。", "final": True}
         action = meta.get("action")
-        path = Path(str(meta.get("path") or ""))
         try:
+            path = self._resolve(str(meta.get("path") or ""))
+            if action == "move":
+                meta["dst"] = str(self._resolve(str(meta.get("dst") or "")))
             result = self._apply(str(action), path, meta)
         except Exception as exc:
-            self.store.log_plugin_event("ops", "error", f"{action} {path}: {exc}")
+            self.store.log_plugin_event("ops", "error", f"{action} {meta.get('path')}: {exc}")
             return {"text": f"操作失败：{exc}", "final": True}
         self.store.log_plugin_event("ops", str(action), str(path))
         touched = [path, Path(str(meta.get("dst")))] if action == "move" else [path]

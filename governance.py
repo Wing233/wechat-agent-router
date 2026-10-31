@@ -20,6 +20,31 @@ ACTION_INFERRED = "action_inferred"
 IGNORE = "ignore"
 CLASSIFICATIONS = (READ_ONLY, ACTION_EXPLICIT, ACTION_INFERRED, IGNORE)
 
+APPROVAL_RE = re.compile(
+    r"^\s*(APPROVE|REJECT|同意|拒绝|批准|取消)\s+([A-Z2-9]{4})\b",
+    re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True)
+class Approval:
+    approved: bool
+    code: str
+    word: str
+
+
+def parse_approval(text: str) -> Approval | None:
+    """Strict approval format: APPROVE/REJECT (or Chinese) + 4-char code."""
+    match = APPROVAL_RE.match(text or "")
+    if not match:
+        return None
+    word = match.group(1).upper()
+    return Approval(
+        approved=word in {"APPROVE", "同意", "批准"},
+        code=match.group(2).upper(),
+        word=word,
+    )
+
 # Tools that are safe to expose during a read-only turn. Unknown tools are
 # denied by default so a newly installed plugin cannot silently mutate state.
 READ_ONLY_TOOLS = {
@@ -47,9 +72,6 @@ READ_ONLY_TOOLS = {
     "model_list",
     "model_test",
     "cost_report",
-    "trace_search",
-    "trace_get",
-    "trace_explain",
     "eval_cases",
     "eval_report",
     "eval_drift",
@@ -59,17 +81,13 @@ READ_ONLY_TOOLS = {
     "todo__todo_list",
     "toolbox__memory_search",
     "toolbox__load_skill",
-    "toolbox__sql_query",
     "toolbox__mcp_list_tools",
     "toolbox__browser_fetch_page",
-    "toolbox__confirm_action",
-    "toolbox__governance_report",
     "ops__fs_list",
     "ops__fs_read",
     "ops__list_dir",
     "ops__read_file",
 }
-_READ_ONLY_SUFFIXES = {name.split("__")[-1] for name in READ_ONLY_TOOLS}
 
 # High-risk tools always require a mandate, even when the inbound message was
 # classified as an explicit owner action. The registry enforces this before a
@@ -86,6 +104,8 @@ HIGH_RISK_TOOLS = {
     "toolbox__mcp_call",
     "toolbox__browser_click_fill",
     "toolbox__github_api",
+    "toolbox__memory_update",
+    "toolbox__learn_skill",
     "devtools__execute_bash",
     "devtools__run_command",
     "devtools__http_request",
@@ -97,6 +117,20 @@ HIGH_RISK_TOOLS = {
     "admin__enable_plugin",
     "admin__disable_plugin",
     "admin__reload_plugin",
+    "admin__set_job_interval",
+    "admin__set_job_enabled",
+    "agents__send_to_agent",
+    "model_add",
+    "model_remove",
+    "model_bind",
+    "model_switch_chat",
+    "send_to_channel",
+    "budget_set",
+    "optimize_apply",
+    "trace_search",
+    "trace_get",
+    "trace_explain",
+    "toolbox__sql_query",
 }
 _HIGH_RISK_SUFFIXES = {name.split("__")[-1] for name in HIGH_RISK_TOOLS}
 
@@ -112,15 +146,15 @@ _READ_VERBS = (
 _STRONG_VERBS = (
     "删除", "删掉", "删", "移除", "重启", "部署", "发布", "上线",
     "执行", "运行", "跑", "发送", "发给", "发我", "发到", "写入", "写",
-    "修改", "改", "设置", "设为", "创建", "新建", "生成", "安装", "卸载",
+    "修改", "改", "调到", "调成", "调整为", "设置", "设为", "创建", "新建", "生成", "安装", "卸载",
     "启用", "禁用", "重载", "回滚", "恢复", "上传", "下载", "提交",
     "推送", "合并", "停止", "停", "启动", "清空", "移动", "复制",
     "重命名", "编译", "测试", "抓取", "点击", "填表", "登录", "批准",
     "同意", "拒绝", "撤销", "取消", "保存", "替换", "每天", "每隔",
-    "定时", "提醒我", "通知我",
+    "定时", "提醒我", "通知我", "通知",
 )
 _WEAK_VERBS = (
-    "增加", "优化", "修复", "实现", "支持", "接入", "同步", "备份",
+    "增加", "添加", "优化", "修复", "实现", "支持", "接入", "同步", "备份",
     "监控", "加", "调整", "整理", "清理", "检查", "排查", "处理", "弄", "搞",
 )
 _SUGGESTION_MARKERS = (
@@ -129,7 +163,7 @@ _SUGGESTION_MARKERS = (
     "优化", "修复", "实现", "接入", "同步", "该加",
 )
 _QUESTION_SUGGESTION_MARKERS = (
-    "能不能", "可不可以", "要不要", "是不是", "是否",
+    "能不能", "可不可以", "要不要",
 )
 _ACTION_NOUNS = (
     "功能", "提醒", "定时", "任务", "插件", "接口", "api", "脚本", "配置",
@@ -139,15 +173,37 @@ _ACTION_NOUNS = (
     "计划", "流程", "规则", "权限", "审批", "记忆", "技能", "间隔",
 )
 _QUESTION_MARKERS = (
-    "吗", "呢", "？", "?", "多少", "几", "什么", "谁", "哪", "怎么",
+    "吗", "呢", "？", "?", "多少", "什么", "谁", "哪", "怎么",
     "如何", "为什么", "是否", "有没有", "能不能", "可不可以", "要不要",
-    "是不是",
+    "是不是", "怎么样", "怎样", "哪些", "哪家", "多久", "会不会",
+)
+_READ_INTENT_PREFIXES = (
+    "帮我看看", "帮我查", "帮我查询", "帮我分析", "帮我对比", "帮我比较",
+    "帮我解释", "帮我总结", "看看", "查一下", "查询", "分析一下",
+    "对比一下", "比较一下", "了解一下", "介绍一下", "解释一下", "总结一下",
+    "比较", "对比", "分析", "列出", "排序", "评估", "说明",
+)
+_READ_INTENT_WORDS = (
+    "列出", "排序", "比较", "对比", "分析", "说明", "评估", "解释",
+    "总结", "看看", "查一下", "查询", "了解", "介绍",
+)
+_EXECUTION_PREFIXES = (
+    "执行", "运行", "重启", "删除", "部署", "发送", "发给", "写入",
+    "修改", "创建", "新建", "安装", "卸载", "回滚", "恢复", "提交",
+    "推送", "合并", "发布", "停止", "启动", "跑",
+)
+_EXPLANATION_MARKERS = (
+    "风险", "区别", "差异", "原理", "原因", "怎么", "如何", "为什么",
+    "会不会", "是否", "哪些", "哪家", "多久", "怎样", "怎么样",
+    "比较", "对比", "分析", "顺序", "列出", "排序", "评估", "说明",
 )
 _INTENT_PREFIXES = (
     "帮我", "给我", "替我", "请", "麻烦", "立刻", "马上", "现在", "去",
     "我想", "我要", "我需要", "把",
 )
-_NEGATIVE_PREFIXES = ("别", "不要", "不用", "无需", "不需要")
+_NEGATIVE_PREFIXES = (
+    "别", "不要", "不用", "无需", "不需要", "先别", "暂不", "不能", "不可以",
+)
 
 
 @dataclass(frozen=True)
@@ -226,19 +282,46 @@ def _scores(text: str) -> dict[str, Any]:
 
 def _decide_owner(text: str) -> tuple[str, str, dict[str, Any]]:
     s = _scores(text)
+    lower = text.lower().strip()
     explicit = int(s["explicit"])
     inferred = int(s["inferred"])
     read = int(s["read"])
     question = bool(s["question"])
-    strong = int(s["strong"])
-    suggestion = any(word in text.lower() for word in _SUGGESTION_MARKERS)
-    starts_intent = any(text.lower().startswith(word) for word in _INTENT_PREFIXES)
+    suggestion = any(word in lower for word in _SUGGESTION_MARKERS)
+    starts_read = any(lower.startswith(prefix) for prefix in _READ_INTENT_PREFIXES)
+    starts_intent = any(lower.startswith(prefix) for prefix in _INTENT_PREFIXES)
+    starts_execution = any(lower.startswith(prefix) for prefix in _EXECUTION_PREFIXES)
+    read_intent = any(word in lower for word in _READ_INTENT_WORDS)
+    has_clear_action = lower.startswith("把") and any(
+        verb in lower for verb in _STRONG_VERBS)
 
-    # A question that contains an action verb is not permission to execute it.
-    if question and strong > 0:
-        if explicit >= 7:
-            return ACTION_EXPLICIT, "疑问句但指令很强，按明确动作处理", s
-        return ACTION_INFERRED, "疑问句里的动作请求，只记录不执行", s
+    # A read-then-write request ("查日志然后删除") is an explicit action.
+    if any(word in lower for word in ("然后", "接着", "之后再")) and any(
+            verb in lower for verb in _STRONG_VERBS):
+        return ACTION_EXPLICIT, "连续动作指令", s
+    # "帮我看看/查一下/分析一下..." is a read request even if the sentence
+    # mentions dangerous verbs ("看看删除和重启的风险").
+    if starts_read:
+        return READ_ONLY, "只读查询或一般问答", s
+    if any(lower.startswith(prefix) for prefix in _NEGATIVE_PREFIXES):
+        return READ_ONLY, "否定/取消指令，按只读处理", s
+    # Questions never execute. Only explicit question-suggestions
+    # ("能不能加个提醒") are recorded as inferred.
+    if question:
+        if any(word in lower for word in _QUESTION_SUGGESTION_MARKERS):
+            return ACTION_INFERRED, "疑问式建议，只记录不执行", s
+        if suggestion and any(word in lower for word in _ACTION_NOUNS):
+            return ACTION_INFERRED, "疑问式建议，只记录不执行", s
+        return READ_ONLY, "疑问句按只读处理", s
+    # "比较/分析/列出/排序..." are read-only unless the sentence starts with
+    # an execution verb ("执行删除并列出结果").
+    if read_intent and not starts_execution:
+        return READ_ONLY, "只读分析/比较请求", s
+    # Explanations and risk questions are read-only unless the sentence is
+    # clearly a suggestion ("建议加监控，风险太大") or a direct "把...删掉".
+    if any(word in lower for word in _EXPLANATION_MARKERS) and not suggestion \
+            and not has_clear_action:
+        return READ_ONLY, "解释/风险类问题，按只读处理", s
     if inferred >= 2 and explicit < 5 and (explicit > 0 or suggestion or starts_intent):
         return ACTION_INFERRED, "建议或可能性表达，只记录不执行", s
     if explicit >= 3:
@@ -282,6 +365,12 @@ def classify_inbound(
 
     scores = _scores(raw)
     if role != "owner":
+        lower = raw.lower()
+        if (any(word in lower for word in _QUESTION_MARKERS)
+                or any(lower.startswith(prefix) for prefix in _READ_INTENT_PREFIXES)
+                or any(word in lower for word in _EXPLANATION_MARKERS)):
+            return Decision(READ_ONLY, "访客只读问答", "guest_read", True, True,
+                            scores=scores)
         if int(scores["explicit"]) >= 3 or (
                 int(scores["inferred"]) >= 2 and int(scores["explicit"]) > 0):
             return Decision(IGNORE, "访客不能执行动作", "guest_action",
@@ -301,7 +390,7 @@ def classify_inbound(
 
 
 def is_read_only_tool(name: str) -> bool:
-    return name in READ_ONLY_TOOLS or name.split("__")[-1] in _READ_ONLY_SUFFIXES
+    return name in READ_ONLY_TOOLS
 
 
 def read_only_tools(available: set[str] | list[str] | tuple[str, ...]) -> set[str]:

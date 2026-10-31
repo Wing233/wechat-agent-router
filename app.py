@@ -188,6 +188,7 @@ SERVICE_TOKEN = CFG["service_token"]
 PUBLIC_BASE = CFG["public_base_url"].rstrip("/")
 CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 CODE_RE = re.compile(r"\b([" + CODE_ALPHABET + r"]{4})\b")
+APPROVAL_AGENTS = {"toolbox", "ops", "evolution"}
 
 
 # ---------------------------------------------------------------------------
@@ -544,6 +545,7 @@ def build_system_prompt(origin: dict | None = None, role: str = "owner",
         "涉及实时信息、新闻、价格、政策、人物、产品、网页内容时，先调用 web_search；需要读全文时用 web_fetch；不要凭记忆编造。",
         "涉及用户长期偏好、项目约定或以前解决过的问题时，先调用 memory_search；解决可复用的问题后用 learn_skill 固化。",
         "高危操作必须先调用 ask_human_confirmation，并传 tool（工具名）和 args（将执行参数）；拿到 code 后结束本轮，等主人回复 APPROVE；执行时把 code 作为 mandate 传给高危工具。",
+        "写入长期记忆或技能（memory_update / learn_skill）也属于高危操作，同样要先申请 mandate。",
         "需要跑代码用 python_repl 或 run_sandbox；改代码用 write_patch；回滚用 snapshot_checkpoint。这些工具没有 mandate 会被硬拒绝。",
         "复杂任务可用 delegate_to_subagent 派给已注册 Agent；定时任务用 schedule_cron。",
         "力扣/LeetCode/刷题/做题相关的问题调用 leetcode_stats。",
@@ -618,8 +620,8 @@ def build_system_prompt(origin: dict | None = None, role: str = "owner",
         lines.extend([
             "",
             "## 主人权限（完整）",
-            "对方是主人本人，不需要再确认身份。你能动手的事就直接动手做完，再汇报结果，不要只说做不到。",
-            "- 高危工具（python_repl、run_sandbox、write_patch、snapshot restore、delegate_to_subagent、webhook_post、mcp_call、文件写入/删除、配置修改等）必须带 mandate 审批码；没有审批码会被硬拒绝。",
+            "对方是主人本人，不需要再确认身份。在明确动作轮次，能动手的事就直接动手做完，再汇报结果，不要只说做不到。",
+            "- 高危工具（python_repl、run_sandbox、write_patch、snapshot restore、delegate_to_subagent、webhook_post、mcp_call、文件写入/删除、配置修改、记忆/技能写入、模型/渠道/预算变更、trace 读取等）必须带 mandate 审批码；没有审批码会被硬拒绝。",
             "- 服务器命令：run_command 可以在容器里执行 shell，用于装依赖、跑测试、git、看日志、处理文件；一次一条，别执行破坏性命令。",
             "- 文件：fs_list / fs_read / fs_write / fs_replace / fs_delete / fs_move 可读写 /app、/lyph-src、/workspace，默认立即生效。",
             "- 网络：web_search 搜实时信息，web_fetch 读网页正文，http_request 调任意公开 API。",
@@ -751,36 +753,62 @@ def match_quote(quoted: str, pending: list[dict]) -> dict | None:
 
 def match_pending(text: str, chat_id: str, quote: dict | None = None) -> dict | str | None:
     pending = store.active_pending(chat_id)
-    match = CODE_RE.search(text.upper())
+    approval = governance.parse_approval(text)
+
+    def _check(item: dict):
+        if item.get("agent_id") in APPROVAL_AGENTS:
+            if approval is None:
+                if str(item.get("code") or "").upper() in (text or "").upper():
+                    return "NEED_APPROVAL"
+                return None
+            if approval.code != str(item.get("code") or "").upper():
+                return "INVALID_CODE"
+        return item
+
+    if approval is not None:
+        found = store.by_code(approval.code, chat_id)
+        if not found:
+            return "INVALID_CODE"
+        return _check(found)
+
+    match = CODE_RE.search((text or "").upper())
     if match:
-        found = store.by_code(match.group(1))
+        found = store.by_code(match.group(1), chat_id)
         if found:
-            return found
+            return _check(found)
+
     quoted = str((quote or {}).get("text") or (quote or {}).get("title") or "").strip()
     if quote is not None:
         qmatch = CODE_RE.search(quoted.upper())
         if qmatch:
-            found = store.by_code(qmatch.group(1))
+            found = store.by_code(qmatch.group(1), chat_id)
             if found:
-                return found
+                return _check(found)
         # A quoted message is an explicit target. If it is not one of the
         # pending notifications, treat this as a normal chat message.
         found = match_quote(quoted, pending)
         if found:
-            return found
+            return _check(found)
         return None
     if len(pending) == 1:
-        return pending[0]
+        return _check(pending[0])
     if len(pending) > 1:
         short = text.strip().lower()
         if short in {"好了", "已登录", "完成", "ok", "好", "可以了", "登录好了"}:
             newest = pending[0]
-            try:
-                age = time.time() - datetime.fromisoformat(newest["created_at"]).timestamp()
-            except Exception:
-                age = 9999
-            if age < 600:
-                return newest
+            if newest.get("agent_id") not in APPROVAL_AGENTS:
+                try:
+                    age = time.time() - datetime.fromisoformat(newest["created_at"]).timestamp()
+                except Exception:
+                    age = 9999
+                if age < 600:
+                    return newest
+        code_match = CODE_RE.search((text or "").upper())
+        known_code = bool(code_match and any(
+            str(item.get("code") or "").upper() == code_match.group(1)
+            for item in pending))
+        if approval is None and not known_code:
+            return None
         lines = ["现在有多个待回复，请带上编号回我："]
         for item in pending[:5]:
             lines.append(f"- {item['code']}：{item['agent_id']}，{item['text'][:40]}")
@@ -789,12 +817,32 @@ def match_pending(text: str, chat_id: str, quote: dict | None = None) -> dict | 
     return None
 
 
-def handle_reply(notification: dict, text: str) -> None:
+def handle_reply(notification: dict, text: str, approved_by: str = "") -> None:
     agent = AGENTS.get(notification["agent_id"])
+    approval = governance.parse_approval(text)
+    strict = notification["agent_id"] in APPROVAL_AGENTS
+    if strict:
+        if approval is None:
+            send_text("请回复 APPROVE 码 或 REJECT 码。")
+            return
+        if any(word in text.lower() for word in (
+                "不要", "别", "先别", "取消", "不执行")):
+            send_text("审批文本包含否定词，请只回复 APPROVE 码 或 REJECT 码。")
+            return
+        if approval.code != str(notification.get("code") or "").upper():
+            send_text("确认码不匹配，请重新回复。")
+            return
+        text_for_handler = "APPROVE" if approval.approved else "REJECT"
+    else:
+        text_for_handler = text
+    if (notification["agent_id"] in {"evolution", "ops", "toolbox"}
+            and not SERVICES.get(notification["agent_id"])):
+        send_text("确认服务暂时不可用，请稍后再试。")
+        return
     store.mark_replied(notification["id"], text)
     if notification["agent_id"] == "evolution" and SERVICES.get("evolution"):
         try:
-            result = SERVICES["evolution"].handle_reply(notification, text)
+            result = SERVICES["evolution"].handle_reply(notification, text_for_handler)
             send_agent_result(result)
             store.set_status(notification["id"], "answered")
         except Exception as exc:
@@ -803,7 +851,7 @@ def handle_reply(notification: dict, text: str) -> None:
         return
     if notification["agent_id"] == "ops" and SERVICES.get("ops"):
         try:
-            result = SERVICES["ops"].handle_reply(notification, text)
+            result = SERVICES["ops"].handle_reply(notification, text_for_handler)
             send_agent_result(result)
             store.set_status(notification["id"], "answered")
         except Exception as exc:
@@ -812,7 +860,8 @@ def handle_reply(notification: dict, text: str) -> None:
         return
     if notification["agent_id"] == "toolbox" and SERVICES.get("toolbox"):
         try:
-            result = SERVICES["toolbox"].handle_reply(notification, text)
+            result = SERVICES["toolbox"].handle_reply(
+                notification, text, approved_by=approved_by)
             send_agent_result(result)
             store.set_status(notification["id"], "answered")
         except Exception as exc:
@@ -937,7 +986,7 @@ def _handle_inbound_impl(text: str, message: dict, origin: dict | None = None) -
         return
 
     explicit = parse_explicit_agent(text) if not has_attachments else None
-    explicit_reply = bool(re.search(r"\b(APPROVE|REJECT)\b", text.upper()))
+    explicit_reply = bool(governance.parse_approval(text))
     decision = governance.classify_inbound(
         text, origin,
         has_attachments=has_attachments,
@@ -1001,15 +1050,6 @@ def _handle_inbound_impl(text: str, message: dict, origin: dict | None = None) -
             send_text(f"已经收到，但 {agent.get('name', agent_id)} 暂时没有响应。")
         return
 
-    if not has_attachments and (origin is None or (role == "owner" and explicit_reply)):
-        pending = match_pending(text, OWNER, quote)
-        if pending == "ASKED":
-            return
-        if isinstance(pending, dict):
-            store.log_route(session_id, text, "pending", pending["code"])
-            handle_reply(pending, text)
-            return
-
     if decision.classification == governance.IGNORE:
         if role != "owner":
             answer = "访客只能查询公开信息，不能执行操作。"
@@ -1026,6 +1066,43 @@ def _handle_inbound_impl(text: str, message: dict, origin: dict | None = None) -
         store.add_message(session_id, "assistant", answer)
         send_text(answer)
         return
+
+    if not has_attachments and (origin is None or (role == "owner" and explicit_reply)):
+        pending = match_pending(text, OWNER, quote)
+        if pending == "ASKED":
+            return
+        if pending == "NEED_APPROVAL":
+            send_text("这是审批操作，请回复 APPROVE 码 或 REJECT 码。")
+            return
+        if pending == "INVALID_CODE":
+            send_text("确认码不存在或已过期，请检查后重试。")
+            return
+        if isinstance(pending, dict):
+            store.log_route(session_id, text, "pending", pending["code"])
+            approval = governance.parse_approval(text)
+            handle_reply(
+                pending, text,
+                approved_by=str((origin or {}).get("user_id") or OWNER),
+            )
+            if approval is not None:
+                try:
+                    store.log_decision(
+                        trace_id=trace_id,
+                        role=role,
+                        chat_id=str((origin or {}).get("chat_id") or OWNER),
+                        text=text,
+                        classification=governance.ACTION_EXPLICIT,
+                        would_accept=True,
+                        executed=True,
+                        reason=("审批已批准" if approval.approved else "审批已拒绝"),
+                        rule="approval_processed",
+                        meta={"code": pending.get("code"),
+                              "agent_id": pending.get("agent_id"),
+                              "approved": approval.approved},
+                    )
+                except Exception as exc:
+                    log.warning("approval decision log failed: %s", exc)
+            return
 
     if decision.classification == governance.READ_ONLY:
         allowed = governance.read_only_tools(TOOLS.names())

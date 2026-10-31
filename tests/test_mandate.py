@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -12,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import governance
+from registry import ToolRegistry
 
 _SPEC = importlib.util.spec_from_file_location(
     "toolbox_plugin_for_tests", ROOT / "plugins" / "toolbox" / "plugin.py")
@@ -125,6 +127,79 @@ def test_require_mandate_rejects_wrong_args(toolbox) -> None:
     assert changed["status"] == "args_changed"
 
 
+def test_high_risk_requires_args(toolbox) -> None:
+    service, _ = toolbox
+    result = service.ask_confirmation({
+        "action": "运行 Python",
+        "tool": "toolbox__python_repl",
+    })
+    assert "args" in result["error"]
+
+
+def test_high_risk_accepts_json_string_args(toolbox) -> None:
+    service, _ = toolbox
+    result = service.ask_confirmation({
+        "action": "运行 Python",
+        "tool": "toolbox__python_repl",
+        "args": '{"code": "print(1)"}',
+    })
+    assert result["pending"] is True
+    approve(service, result["code"])
+    used = service.require_mandate(
+        "toolbox__python_repl", {"code": "print(1)", "mandate": result["code"]})
+    assert used["ok"] is True
+
+
+def test_handle_reply_is_strict(toolbox) -> None:
+    service, _ = toolbox
+    result = ask(service)
+
+    response = service.handle_reply({"code": result["code"]}, "执行这个会怎样")
+    assert "APPROVE" in response["text"]
+    assert service.confirm_action({"code": result["code"]})["status"] == "pending"
+
+    response = service.handle_reply({"code": result["code"]}, "APPROVE ZZZZ")
+    assert "不匹配" in response["text"]
+    assert service.confirm_action({"code": result["code"]})["status"] == "pending"
+
+    response = service.handle_reply(
+        {"code": result["code"]}, f"APPROVE {result['code']} 但不要执行")
+    assert "否定词" in response["text"]
+    assert service.confirm_action({"code": result["code"]})["status"] == "pending"
+
+    approve(service, result["code"])
+    assert service.confirm_action({"code": result["code"]})["approved"] is True
+
+
+def test_path_scope_helper(toolbox) -> None:
+    service, _ = toolbox
+    assert service._paths_allowed(["/workspace"], {"cwd": "/workspace/x"}) is True
+    assert service._paths_allowed(["/workspace"], {"cwd": "/app"}) is False
+    assert service._paths_allowed(["/workspace"], {}) is False
+
+
+def test_concurrent_use_is_atomic(toolbox) -> None:
+    import threading
+
+    service, _ = toolbox
+    result = ask(service)
+    approve(service, result["code"])
+    results = []
+
+    def worker() -> None:
+        results.append(service.require_mandate(
+            "toolbox__python_repl",
+            {"code": "print(1)", "mandate": result["code"]},
+        ))
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert sum(1 for item in results if item.get("ok")) == 1
+
+
 def test_require_mandate_rejects_wrong_tool(toolbox) -> None:
     service, _ = toolbox
     result = ask(service)
@@ -133,6 +208,27 @@ def test_require_mandate_rejects_wrong_tool(toolbox) -> None:
     changed = service.require_mandate(
         "toolbox__run_sandbox", {"command": "ls", "mandate": result["code"]})
     assert changed["status"] == "tool_changed"
+
+    assert service._tool_matches("toolbox__python_repl", "toolbox__python_repl") is True
+    assert service._tool_matches(
+        "toolbox__python_repl", "devtools__python_repl") is False
+    assert service._tool_matches("python_repl", "toolbox__python_repl") is False
+
+
+def test_approval_message_shows_args(toolbox) -> None:
+    service, store = toolbox
+    ask(service, args={"code": "print('visible-args')"})
+    text = store.notifications[-1]["text"]
+    assert "visible-args" in text
+
+
+def test_long_args_preview_shows_tail(toolbox) -> None:
+    service, store = toolbox
+    payload = "A" * 1500 + "TAIL_PAYLOAD"
+    ask(service, args={"code": payload})
+    text = store.notifications[-1]["text"]
+    assert "TAIL_PAYLOAD" in text
+    assert "中间省略" in text
 
 
 def test_expired_mandate(toolbox) -> None:
@@ -236,3 +332,55 @@ def test_confirm_action_checks_binding(toolbox) -> None:
     })
     assert checked["approved"] is False
     assert checked["binding"]["status"] == "tool_changed"
+
+
+def test_migrates_baseline_schema(tmp_path: Path) -> None:
+    db = tmp_path / "toolbox.db"
+    conn = sqlite3.connect(db)
+    conn.executescript("""
+    CREATE TABLE confirmations(
+      code TEXT PRIMARY KEY,
+      action TEXT NOT NULL,
+      summary TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'pending',
+      created_at TEXT NOT NULL
+    );
+    """)
+    conn.commit()
+    conn.close()
+
+    store = FakeStore()
+    service = Toolbox(FakeCtx(store, db))
+    try:
+        result = ask(service)
+        approve(service, result["code"])
+        used = service.require_mandate(
+            "toolbox__python_repl",
+            {"code": "print(1)", "mandate": result["code"]},
+        )
+        assert used["ok"] is True
+    finally:
+        governance.set_mandate_store(None)
+
+
+def test_canonicalizes_bare_tool_name(tmp_path: Path) -> None:
+    registry = ToolRegistry()
+    registry.register(
+        "toolbox__python_repl", "run python",
+        {"type": "object", "properties": {"code": {"type": "string"}}},
+        lambda args: {"ok": True},
+        aliases=("python_repl",),
+    )
+    store = FakeStore()
+    ctx = FakeCtx(store, tmp_path / "toolbox.db")
+    ctx.tools = type("FakeTools", (), {"registry": registry})()
+    service = Toolbox(ctx)
+    try:
+        result = service.ask_confirmation({
+            "action": "运行 Python",
+            "tool": "python_repl",
+            "args": {"code": "print(1)"},
+        })
+        assert result["tool"] == "toolbox__python_repl"
+    finally:
+        governance.set_mandate_store(None)

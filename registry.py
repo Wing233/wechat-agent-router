@@ -90,12 +90,12 @@ class ToolRegistry:
         tool = self._tools.get(name)
         if not tool:
             return {"error": f"unknown tool: {name}"}
-        arguments = dict(arguments or {})
+        arguments = dict(arguments) if isinstance(arguments, dict) else {}
         try:
             import governance
             checked = governance.check_mandate(name, arguments)
-        except ImportError:  # pragma: no cover - governance is optional in tests
-            checked = None
+        except ImportError:  # pragma: no cover - governance is required in production
+            return {"error": "审批模块不可用，已拒绝执行"}
         except Exception as exc:
             log.warning("tool %s mandate check failed: %s", name, exc)
             return {"error": f"审批校验失败，已拒绝执行：{exc}"}
