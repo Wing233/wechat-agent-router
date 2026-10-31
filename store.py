@@ -1,6 +1,7 @@
 """SQLite state for the WeChat agent router."""
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import time
@@ -121,6 +122,24 @@ CREATE TABLE IF NOT EXISTS plugin_events (
   detail TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS decisions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  trace_id TEXT NOT NULL DEFAULT '',
+  role TEXT NOT NULL DEFAULT '',
+  chat_id TEXT NOT NULL DEFAULT '',
+  text_hash TEXT NOT NULL DEFAULT '',
+  text_preview TEXT NOT NULL DEFAULT '',
+  classification TEXT NOT NULL,
+  would_accept INTEGER NOT NULL DEFAULT 0,
+  executed INTEGER NOT NULL DEFAULT 0,
+  reason TEXT NOT NULL DEFAULT '',
+  rule TEXT NOT NULL DEFAULT '',
+  meta_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS decisions_created ON decisions(created_at);
+CREATE INDEX IF NOT EXISTS decisions_class ON decisions(classification, created_at);
 """
 
 
@@ -515,3 +534,76 @@ class Store:
                 "SELECT * FROM plugin_events ORDER BY id DESC LIMIT ?", (limit,)
             ).fetchall()
         return [dict(row) for row in rows]
+
+    # --- inbound gate audit --------------------------------------------
+    def log_decision(
+        self,
+        *,
+        trace_id: str = "",
+        role: str = "",
+        chat_id: str = "",
+        text: str = "",
+        classification: str = "",
+        would_accept: bool = False,
+        executed: bool = False,
+        reason: str = "",
+        rule: str = "",
+        meta: dict | None = None,
+    ) -> int:
+        digest = hashlib.sha256((text or "").encode("utf-8")).hexdigest()
+        with self._conn() as conn:
+            cursor = conn.execute(
+                """INSERT INTO decisions
+                   (trace_id,role,chat_id,text_hash,text_preview,classification,
+                    would_accept,executed,reason,rule,meta_json,created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    trace_id,
+                    role,
+                    chat_id,
+                    digest,
+                    (text or "")[:240],
+                    classification,
+                    1 if would_accept else 0,
+                    1 if executed else 0,
+                    reason[:500],
+                    rule[:120],
+                    json.dumps(meta or {}, ensure_ascii=False, default=str),
+                    now_iso(),
+                ),
+            )
+            return int(cursor.lastrowid or 0)
+
+    def list_decisions(self, limit: int = 50, classification: str = "") -> list[dict]:
+        limit = max(1, min(int(limit or 50), 200))
+        with self._conn() as conn:
+            if classification:
+                rows = conn.execute(
+                    "SELECT * FROM decisions WHERE classification=? "
+                    "ORDER BY id DESC LIMIT ?", (classification, limit)
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM decisions ORDER BY id DESC LIMIT ?", (limit,)
+                ).fetchall()
+        items = []
+        for row in rows:
+            item = dict(row)
+            item["meta"] = json.loads(item.pop("meta_json") or "{}")
+            item["would_accept"] = bool(item["would_accept"])
+            item["executed"] = bool(item["executed"])
+            items.append(item)
+        return items
+
+    def decision_stats(self, days: int = 7) -> dict:
+        days = max(1, min(int(days or 7), 90))
+        since = time.time() - days * 86400
+        since_iso = datetime.fromtimestamp(since, timezone.utc).isoformat(timespec="seconds")
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT classification,COUNT(*) AS count FROM decisions "
+                "WHERE created_at>=? GROUP BY classification", (since_iso,)
+            ).fetchall()
+        counts = {row["classification"]: row["count"] for row in rows}
+        return {"days": days, "counts": counts,
+                "total": sum(counts.values())}

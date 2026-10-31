@@ -32,6 +32,7 @@ from channels import ChannelManager
 from data import CST, SiteData
 import evals
 from geo import Geo
+import governance
 from hub import Hub, HubError, parse_quote, parse_text
 from imagegen import ImageGen
 import koishi_auth as ka
@@ -531,7 +532,8 @@ TOOLS.register(
 )
 
 
-def build_system_prompt(origin: dict | None = None, role: str = "owner") -> str:
+def build_system_prompt(origin: dict | None = None, role: str = "owner",
+                        classification: str = "") -> str:
     lines = [
         CFG["llm"].get("system_prompt", ""),
         "",
@@ -540,8 +542,8 @@ def build_system_prompt(origin: dict | None = None, role: str = "owner") -> str:
         "站点访问、访客、IP 归属地、AI 对话内容必须调用工具查询，绝不能编造数字；查不到就直说。",
         "涉及实时信息、新闻、价格、政策、人物、产品、网页内容时，先调用 web_search；需要读全文时用 web_fetch；不要凭记忆编造。",
         "涉及用户长期偏好、项目约定或以前解决过的问题时，先调用 memory_search；解决可复用的问题后用 learn_skill 固化。",
-        "高危操作先调用 ask_human_confirmation，等主人回复 APPROVE 并用 confirm_action 确认后再执行。",
-        "需要跑代码用 python_repl 或 run_sandbox；改代码用 write_patch；回滚用 snapshot_checkpoint。",
+        "高危操作必须先调用 ask_human_confirmation，并传 tool（工具名）和 args（将执行参数）；拿到 code 后结束本轮，等主人回复 APPROVE；执行时把 code 作为 mandate 传给高危工具。",
+        "需要跑代码用 python_repl 或 run_sandbox；改代码用 write_patch；回滚用 snapshot_checkpoint。这些工具没有 mandate 会被硬拒绝。",
         "复杂任务可用 delegate_to_subagent 派给已注册 Agent；定时任务用 schedule_cron。",
         "力扣/LeetCode/刷题/做题相关的问题调用 leetcode_stats。",
         "用户发图片或文件时，系统会把图片交给视觉模型、把文件文字附在消息里；只根据实际提供的内容回答，不要假装看到了没读到的东西。",
@@ -575,6 +577,35 @@ def build_system_prompt(origin: dict | None = None, role: str = "owner") -> str:
             f"身份：{'主人' if role == 'owner' else '访客'}",
             "你的回复会自动发回当前渠道，不要假设用户在微信里。",
         ])
+    if classification == governance.READ_ONLY:
+        lines.extend([
+            "",
+            "## 本轮准入：只读",
+            "本轮是只读问答。只能调用只读工具；不要调用执行、写入、删除、发送、配置、审批类工具。",
+            "如果主人实际想让你动手，告诉主人用明确指令重新发起，例如“执行：重启 router”。",
+        ])
+    elif classification == governance.ACTION_EXPLICIT:
+        lines.extend([
+            "",
+            "## 本轮准入：明确动作",
+            "本轮是主人明确动作请求。可以调用工具；高危工具必须带 mandate 审批码。",
+        ])
+    if role == "owner" and SERVICES.get("toolbox"):
+        try:
+            approved = SERVICES["toolbox"].recent_approved(limit=3)
+        except Exception:
+            approved = []
+        if approved:
+            lines.extend([
+                "",
+                "## 已批准的审批码",
+                "这些审批码已由主人批准，可在对应高危工具中作为 mandate 使用；过期、撤销或用完即失效。",
+            ])
+            for item in approved:
+                lines.append(
+                    f"- {item.get('code', '')}：{item.get('tool') or item.get('action') or ''}，"
+                    f"剩余 {item.get('remaining', 1)} 次，{item.get('expires_at', '')} 到期"
+                )
     if role != "owner":
         lines.extend([
             "",
@@ -587,6 +618,7 @@ def build_system_prompt(origin: dict | None = None, role: str = "owner") -> str:
             "",
             "## 主人权限（完整）",
             "对方是主人本人，不需要再确认身份。你能动手的事就直接动手做完，再汇报结果，不要只说做不到。",
+            "- 高危工具（python_repl、run_sandbox、write_patch、snapshot restore、delegate_to_subagent、webhook_post、mcp_call、文件写入/删除、配置修改等）必须带 mandate 审批码；没有审批码会被硬拒绝。",
             "- 服务器命令：run_command 可以在容器里执行 shell，用于装依赖、跑测试、git、看日志、处理文件；一次一条，别执行破坏性命令。",
             "- 文件：fs_list / fs_read / fs_write / fs_replace / fs_delete / fs_move 可读写 /app、/lyph-src、/workspace，默认立即生效。",
             "- 网络：web_search 搜实时信息，web_fetch 读网页正文，http_request 调任意公开 API。",
@@ -601,11 +633,16 @@ def build_system_prompt(origin: dict | None = None, role: str = "owner") -> str:
 SYSTEM_PROMPT = build_system_prompt()
 
 
+_DEFAULT_ALLOWED = object()
+
+
 def llm_answer(text: str, history: list[dict], origin: dict | None = None,
-               role: str = "owner") -> str:
+               role: str = "owner", classification: str = "",
+               allowed=_DEFAULT_ALLOWED) -> str:
     trace_id = trace_ctx.get_trace_id()
-    messages = [{"role": "system", "content": build_system_prompt(origin, role)}]
-    allowed = None if role == "owner" else GUEST_TOOLS
+    if allowed is _DEFAULT_ALLOWED:
+        allowed = None if role == "owner" else GUEST_TOOLS
+    messages = [{"role": "system", "content": build_system_prompt(origin, role, classification)}]
     for item in history:
         if item["role"] in ("user", "assistant"):
             messages.append({"role": item["role"], "content": item["content"]})
@@ -637,15 +674,19 @@ def llm_answer(text: str, history: list[dict], origin: dict | None = None,
             log.info("llm round %s tool=%s args=%s", round_no, name,
                      json.dumps(args, ensure_ascii=False)[:300])
             tool_started = time.perf_counter()
-            if allowed is not None and name not in allowed:
+            canonical = TOOLS.canonical(name)
+            if allowed is not None and canonical not in allowed:
                 result = {"error": "当前会话是只读模式，不能调用这个工具"}
+            elif classification and not governance.tool_allowed(
+                    canonical, classification, role, allowed):
+                result = {"error": f"本轮准入（{classification}）不允许调用 {canonical}"}
             else:
                 result = TOOLS.execute(name, args)
             traces.span(
                 trace_id, "tool", name,
                 status="error" if isinstance(result, dict) and result.get("error") else "ok",
                 latency_ms=int((time.perf_counter() - tool_started) * 1000),
-                detail={"args": args, "result": result},
+                detail={"args": args, "result": result, "classification": classification},
             )
             seen[signature] = result
             tool_trace.append({"name": name, "args": args, "result": result})
@@ -797,7 +838,9 @@ def handle_reply(notification: dict, text: str) -> None:
 
 
 def answer_with_attachments(text: str, history: list[dict], bundle: dict,
-                            origin: dict | None = None, role: str = "owner") -> str:
+                            origin: dict | None = None, role: str = "owner",
+                            classification: str = "",
+                            allowed=_DEFAULT_ALLOWED) -> str:
     notes = list(bundle.get("notes") or [])
     errors = list(bundle.get("errors") or [])
     if errors:
@@ -814,11 +857,13 @@ def answer_with_attachments(text: str, history: list[dict], bundle: dict,
                     "附件内容：\n" + "\n\n".join(notes)]
         if text:
             combined.append("用户问题：" + text)
-        return llm_answer("\n\n".join(combined), history, origin, role)
+        return llm_answer("\n\n".join(combined), history, origin, role,
+                          classification=classification, allowed=allowed)
     prompt = text or "请查看我发的附件。"
     if notes:
         prompt += "\n\n[附件内容]\n" + "\n\n".join(notes)
-    return llm_answer(prompt, history, origin, role)
+    return llm_answer(prompt, history, origin, role,
+                      classification=classification, allowed=allowed)
 
 
 def _handle_inbound(text: str, message: dict, origin: dict | None = None) -> None:
@@ -891,6 +936,42 @@ def _handle_inbound_impl(text: str, message: dict, origin: dict | None = None) -
         return
 
     explicit = parse_explicit_agent(text) if not has_attachments else None
+    explicit_reply = bool(re.search(r"\b(APPROVE|REJECT)\b", text.upper()))
+    decision = governance.classify_inbound(
+        text, origin,
+        has_attachments=has_attachments,
+        explicit_agent=explicit,
+        pending_reply=explicit_reply,
+    )
+    trace_id = trace_ctx.get_trace_id()
+    try:
+        store.log_decision(
+            trace_id=trace_id,
+            role=role,
+            chat_id=str((origin or {}).get("chat_id") or OWNER),
+            text=text or display,
+            classification=decision.classification,
+            would_accept=decision.would_accept,
+            executed=decision.executed,
+            reason=decision.reason,
+            rule=decision.rule,
+            meta={
+                "chat_type": chat_type,
+                "explicit_agent": decision.explicit_agent,
+                "has_attachments": has_attachments,
+                "scores": decision.scores,
+                "source": str((origin or {}).get("platform")
+                              or (origin or {}).get("channel") or "wechat"),
+            },
+        )
+    except Exception as exc:
+        log.warning("decision log failed: %s", exc)
+    traces.span(trace_id, "gate", decision.classification,
+                detail={"reason": decision.reason, "rule": decision.rule,
+                        "would_accept": decision.would_accept,
+                        "executed": decision.executed,
+                        "scores": decision.scores})
+
     if explicit:
         if role != "owner":
             send_text("只有主人可以派 Agent 任务。")
@@ -919,7 +1000,6 @@ def _handle_inbound_impl(text: str, message: dict, origin: dict | None = None) -
             send_text(f"已经收到，但 {agent.get('name', agent_id)} 暂时没有响应。")
         return
 
-    explicit_reply = bool(re.search(r"\b(APPROVE|REJECT)\b", text.upper()))
     if not has_attachments and (origin is None or (role == "owner" and explicit_reply)):
         pending = match_pending(text, OWNER, quote)
         if pending == "ASKED":
@@ -929,8 +1009,36 @@ def _handle_inbound_impl(text: str, message: dict, origin: dict | None = None) -
             handle_reply(pending, text)
             return
 
+    if decision.classification == governance.IGNORE:
+        if role != "owner":
+            answer = "访客只能查询公开信息，不能执行操作。"
+        else:
+            answer = "这条我先不处理。需要我动手的话，直接说“执行：…”"
+        store.log_route(session_id, display, "gate", decision.classification)
+        store.add_message(session_id, "assistant", answer)
+        send_text(answer)
+        return
+
+    if decision.classification == governance.ACTION_INFERRED:
+        answer = "我先记下了，不执行。要做的话直接说“执行：…”"
+        store.log_route(session_id, display, "gate", decision.classification)
+        store.add_message(session_id, "assistant", answer)
+        send_text(answer)
+        return
+
+    if decision.classification == governance.READ_ONLY:
+        allowed = governance.read_only_tools(TOOLS.names())
+        if role != "owner":
+            allowed = set(GUEST_TOOLS)
+    else:
+        allowed = None if role == "owner" else set(GUEST_TOOLS)
+
     try:
-        answer = answer_with_attachments(text, history, bundle, origin, role)
+        answer = answer_with_attachments(
+            text, history, bundle, origin, role,
+            classification=decision.classification,
+            allowed=allowed,
+        )
     except AttachmentError as exc:
         log.error("attachment vision failed: %s", exc)
         traces.mark_failed("attachment_error", str(exc))
@@ -944,7 +1052,8 @@ def _handle_inbound_impl(text: str, message: dict, origin: dict | None = None) -
         traces.mark_failed("llm_error", str(exc))
         answer = "AI 暂时不可用，稍后我再试。"
     store.log_route(session_id, display, "llm",
-                    "attachment" if has_attachments else ("guest" if role != "owner" else ""))
+                    decision.classification
+                    + (" attachment" if has_attachments else ""))
     store.add_message(session_id, "assistant", answer)
     send_text(answer)
 
