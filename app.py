@@ -124,6 +124,7 @@ except Exception as exc:
     log.warning("eval store unavailable: %s", exc)
 
 store = Store(CFG["db"])
+store.init()
 hub = Hub(BASE, CFG["hub"]["channel_key"], OWNER)
 geo = Geo(CFG["geo"]["vendor_dir"], CFG["geo"]["v4"], CFG["geo"].get("v6", ""))
 site = SiteData(
