@@ -177,6 +177,26 @@ WantedBy=multi-user.target
 
 注意：`app.py` 默认使用 `/app`、`/data`、`/workspace` 路径；非容器部署需要自己准备这些目录或用 bind mount。
 
+## 桌面端发布
+
+桌面端由 `.github/workflows/desktop-release.yml` 在 Windows runner 上构建：
+
+```text
+push v* tag
+  → PyInstaller build
+  → WeChatAgentDesktop.exe
+  → WeChatAgentDesktop.exe.sha256
+  → 上传到同一个 Release
+```
+
+固定下载地址（始终指向最新非预发布 Release）：
+
+```text
+https://github.com/Wing233/wechat-agent-router/releases/latest/download/WeChatAgentDesktop.exe
+```
+
+不要使用带版本号的 URL；只要每次 Release 都上传**同名**资产，这个地址就会自动指向最新版。
+
 ## 监控
 
 - `GET /health`：进程、插件、任务、Agent 在线状态
