@@ -112,14 +112,21 @@ ssh -N -L 5140:127.0.0.1:5140 root@123.57.153.49
 
 Router 内置了 `websearch` 插件：
 
-- `web_search`：联网搜索，默认 Bing（无需 Key），可切豆包搜索 API
+- `web_search`：联网搜索，默认豆包搜索 API，失败自动回退 Bing
 - `web_fetch`：抓取公开网页正文，带 SSRF 防护
 - `weather`：城市当前天气
 - `calculator`：安全数学表达式计算
 
-访客只读身份也可以使用这些只读工具；`ops`、`admin`、`agents`、`reminders` 仍然只对 Owner 开放。
+Owner 额外有 `devtools` 插件：
 
-在服务器配置页「联网搜索」里可以切换提供方、设置默认结果数和豆包 Key。豆包 Key 只写不回显；Key 无效时会自动回退 Bing。
+- `run_command`：在服务器容器内执行 shell（装依赖、跑测试、git、看日志）
+- `http_request`：直接调用任意公开 HTTP API
+
+Owner 的 `fs_write` / `fs_replace` / `fs_delete` / `fs_move` 默认直接生效，不再走微信审批；想恢复审批，在 `config.json` 里把 `plugins.ops.auto_approve` 设为 `false`。
+
+访客只读身份可以使用搜索、抓取、天气、计算器、站点统计、力扣统计这些只读工具；`ops`、`devtools`、`admin`、`agents`、`reminders` 仍然只对 Owner 开放。
+
+在服务器配置页「联网搜索」里可以切换豆包/Bing、设置默认结果数和豆包 Key。豆包 Key 只写不回显；Key 无效时会自动回退 Bing。
 
 ## 多台电脑
 

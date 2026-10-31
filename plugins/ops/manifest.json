@@ -6,5 +6,5 @@
   "entry": "plugin.py",
   "capabilities": ["tools", "service"],
   "permissions": ["db:router", "send:wechat"],
-  "description": "受限的服务器文件读取/编辑，写操作需微信审批"
+  "description": "受限的服务器文件读取/编辑；默认直接执行，可通过 plugins.ops.auto_approve=false 恢复审批"
 }

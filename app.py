@@ -455,7 +455,6 @@ def build_system_prompt(origin: dict | None = None, role: str = "owner") -> str:
         "用户要求查看/修改服务器文件时调用 ops 的 fs_list / fs_read / fs_write / fs_replace / fs_delete / fs_move；写或删会发微信审批。允许的根目录：/app、/lyph-src、/app/plugins、/workspace。",
         "用户要求把服务器上的图片、视频或文件发到微信时调用 send_media；路径只允许 /workspace 或 /data/images。",
         "用户让你画图、生成图片、画自画像时调用 generate_image，不要用 ASCII、HTML 或代码块糊弄；prompt 用详细中文描述，生成后会自动发到微信。",
-        "代码检查任务：只读目标插件的 plugin.py、adapter.py、manifest.json，最多读 3 个文件；不要列 /app 或 /lyph-src 根目录；拿到 job 定义和 adapter 逻辑后立即回答。",
         "可用 Agent：",
     ]
     for agent in AGENTS.values():
@@ -481,6 +480,17 @@ def build_system_prompt(origin: dict | None = None, role: str = "owner") -> str:
             "当前用户是访客或群成员，只读。不能执行文件操作、Agent 任务、定时提醒、配置修改或任何写操作。",
             "只能回答一般问题，以及公开的站点统计、力扣统计、时间、天气、网页搜索和网页正文抓取。",
         ])
+    else:
+        lines.extend([
+            "",
+            "## 主人权限（完整）",
+            "对方是主人本人，不需要再确认身份。你能动手的事就直接动手做完，再汇报结果，不要只说做不到。",
+            "- 服务器命令：run_command 可以在容器里执行 shell，用于装依赖、跑测试、git、看日志、处理文件；一次一条，别执行破坏性命令。",
+            "- 文件：fs_list / fs_read / fs_write / fs_replace / fs_delete / fs_move 可读写 /app、/lyph-src、/workspace，默认立即生效。",
+            "- 网络：web_search 搜实时信息，web_fetch 读网页正文，http_request 调任意公开 API。",
+            "- 本机或长任务：send_to_agent 派给已注册的项目 Agent（例如 pc-home）。",
+            "如果确实缺少必要信息或工具，说明缺什么、你试过什么，不要用“我做不到”敷衍。",
+        ])
     return "\n".join(lines)
 
 
@@ -497,7 +507,7 @@ def llm_answer(text: str, history: list[dict], origin: dict | None = None,
     messages.append({"role": "user", "content": text})
     tool_trace: list[dict] = []
     seen: dict[str, dict] = {}
-    for round_no in range(6):
+    for round_no in range(10):
         message = llm.complete(messages, TOOLS.definitions(allowed))
         calls = message.get("tool_calls") or []
         if not calls:
@@ -744,12 +754,13 @@ def _handle_inbound(text: str, message: dict, origin: dict | None = None) -> Non
             send_text(f"已经收到，但 {agent.get('name', agent_id)} 暂时没有响应。")
         return
 
-    if not has_attachments and origin is None:
+    explicit_reply = bool(re.search(r"\b(APPROVE|REJECT)\b", text.upper()))
+    if not has_attachments and (origin is None or (role == "owner" and explicit_reply)):
         pending = match_pending(text, OWNER, quote)
         if pending == "ASKED":
             return
         if isinstance(pending, dict):
-            store.log_route(OWNER, text, "pending", pending["code"])
+            store.log_route(session_id, text, "pending", pending["code"])
             handle_reply(pending, text)
             return
 

@@ -26,6 +26,10 @@ class Ops:
         self.ctx = ctx
         self.store = ctx.resource("store")
         self.owner = ctx.root_config.get("owner", "")
+        # Owner accounts are already authenticated by user id, so the extra
+        # WeChat approval round-trip is off by default. Set
+        # plugins.ops.auto_approve=false to bring the approval flow back.
+        self.auto_approve = bool(ctx.config.get("auto_approve", True))
 
     # ------------------------------------------------------------------
     def _resolve(self, raw: str) -> Path:
@@ -64,7 +68,37 @@ class Ops:
         return {"path": str(path), "content": path.read_text(encoding="utf-8", errors="replace"),
                 "truncated": False}
 
+    def _apply(self, action: str, path: Path, meta: dict) -> str:
+        if action == "write":
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(str(meta.get("content") or ""), encoding="utf-8")
+            return f"已写入 {path}"
+        if action == "replace":
+            path.write_text(str(meta.get("content") or ""), encoding="utf-8")
+            return f"已修改 {path}"
+        if action == "delete":
+            if path.is_dir():
+                path.rmdir()
+            else:
+                path.unlink()
+            return f"已删除 {path}"
+        if action == "move":
+            target = str(meta.get("dst") or "")
+            shutil.move(str(path), target)
+            return f"已移动 {path} → {target}"
+        raise OpsError("未知的文件操作")
+
     def _propose(self, action: str, path: Path, summary: str, **meta) -> dict:
+        if self.auto_approve:
+            try:
+                detail = self._apply(action, path, meta)
+            except Exception as exc:
+                self.store.log_plugin_event("ops", "error", f"{action} {path}: {exc}")
+                raise OpsError(f"执行失败：{exc}") from exc
+            self.store.log_plugin_event("ops", action, str(path))
+            touched = [path, Path(str(meta.get("dst")))] if action == "move" else [path]
+            note = self._git_sync(touched)
+            return {"ok": True, "applied": True, "path": str(path), "detail": detail + note}
         code = _code()
         payload = {"action": action, "path": str(path), **meta}
         notification = self.store.create_notification(
@@ -145,28 +179,11 @@ class Ops:
         action = meta.get("action")
         path = Path(str(meta.get("path") or ""))
         try:
-            if action == "write":
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(str(meta.get("content") or ""), encoding="utf-8")
-                result = f"已写入 {path}"
-            elif action == "replace":
-                path.write_text(str(meta.get("content") or ""), encoding="utf-8")
-                result = f"已修改 {path}"
-            elif action == "delete":
-                if path.is_dir():
-                    path.rmdir()
-                else:
-                    path.unlink()
-                result = f"已删除 {path}"
-            elif action == "move":
-                shutil.move(str(path), str(meta.get("dst") or ""))
-                result = f"已移动 {path} → {meta.get('dst')}"
-            else:
-                return {"text": "未知操作，已取消。", "final": True}
+            result = self._apply(str(action), path, meta)
         except Exception as exc:
             self.store.log_plugin_event("ops", "error", f"{action} {path}: {exc}")
             return {"text": f"操作失败：{exc}", "final": True}
-        self.store.log_plugin_event("ops", action, str(path))
+        self.store.log_plugin_event("ops", str(action), str(path))
         touched = [path, Path(str(meta.get("dst")))] if action == "move" else [path]
         note = self._git_sync(touched)
         return {"text": f"✅ {result}{note}", "final": True}
@@ -205,14 +222,14 @@ def apply(ctx) -> None:
     )
     ctx.tools.register(
         "fs_write",
-        "写入服务器文件（最大 64KB），会先发微信审批。允许的根：/app、/lyph-src、/app/plugins、/workspace。",
+        "写入服务器文件（最大 64KB），默认直接生效。允许的根：/app、/lyph-src、/app/plugins、/workspace。",
         _schema({"path": {"type": "string"}, "content": {"type": "string"}}, ["path", "content"]),
         _guard(lambda a: service.write(a.get("path", ""), a.get("content", ""))),
         aliases=("fs_write",),
     )
     ctx.tools.register(
         "fs_replace",
-        "在服务器文件中替换一段文本（必须恰好出现 1 次），会先发微信审批。",
+        "在服务器文件中替换一段文本（必须恰好出现 1 次），默认直接生效。",
         _schema({"path": {"type": "string"}, "old": {"type": "string"}, "new": {"type": "string"}},
                 ["path", "old", "new"]),
         _guard(lambda a: service.replace(a.get("path", ""), a.get("old", ""), a.get("new", ""))),
@@ -220,14 +237,14 @@ def apply(ctx) -> None:
     )
     ctx.tools.register(
         "fs_delete",
-        "删除服务器文件或空目录，会先发微信审批。",
+        "删除服务器文件或空目录，默认直接生效。",
         _schema({"path": {"type": "string"}}, ["path"]),
         _guard(lambda a: service.delete(a.get("path", ""))),
         aliases=("fs_delete",),
     )
     ctx.tools.register(
         "fs_move",
-        "移动服务器文件，会先发微信审批。",
+        "移动服务器文件，默认直接生效。",
         _schema({"src": {"type": "string"}, "dst": {"type": "string"}}, ["src", "dst"]),
         _guard(lambda a: service.move(a.get("src", ""), a.get("dst", ""))),
         aliases=("fs_move",),

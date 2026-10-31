@@ -1,0 +1,10 @@
+{
+  "id": "devtools",
+  "name": "开发工具",
+  "version": "1.0.0",
+  "api_version": "1",
+  "entry": "plugin.py",
+  "capabilities": ["tools"],
+  "permissions": ["db:router"],
+  "description": "Owner 专用：在容器内执行 shell 命令、调用任意公开 HTTP API"
+}

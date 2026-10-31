@@ -731,7 +731,7 @@ function renderServerConfigTab(s) {
       <div class="field"><label>默认结果数</label><input class="input" type="number" min="1" max="10" name="websearch.default_count" value="${esc(web.default_count ?? 5)}"></div>
       <div class="field"><label>豆包 API Key</label><input class="input mono" name="websearch.api_key" value="" placeholder="${esc(web.api_key || "未配置")}" autocomplete="off"><small>只写不回显；留空表示不修改。</small></div>
     </div>
-    <div class="callout callout-info" style="margin-top:14px">${icon("wifi")} <div><strong>Agent 常用工具</strong><p>已安装：网页搜索、网页正文抓取、天气、计算器。涉及实时信息时，LLM 会先调用 web_search；需要读全文时调用 web_fetch。</p></div></div>
+    <div class="callout callout-info" style="margin-top:14px">${icon("wifi")} <div><strong>Agent 常用工具</strong><p>已安装：网页搜索、网页正文抓取、天气、计算器，以及 Owner 专用的服务器命令执行和 HTTP API 调用。文件写入默认直接生效。</p></div></div>
     </div></section>
     <div class="form-actions"><button class="btn btn-ghost" type="button" data-action="balance">${icon("database")}查询余额</button><button class="btn btn-primary" type="submit">${icon("check")}保存服务器配置</button></div>
   </form>`;
