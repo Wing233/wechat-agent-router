@@ -5,7 +5,7 @@
 微桥分为三层：
 
 ```text
-接入层   OpeniLink Hub  ←→  Router  ←→  微信
+接入层   OpeniLink Hub / Koishi  ←→  Channel Adapter  ←→  WeChat / QQ
 路由层   Router（FastAPI + SQLite）
 执行层   插件 / 本机 Agent / 外部 API
 ```
@@ -41,7 +41,8 @@ Router 是唯一有状态的服务。桌面端和本机 Agent 都是客户端。
 |---|---|
 | `notifications` | 通知/审批：id、code、agent_id、status、meta、TTL、回复 |
 | `messages` | 对话历史：chat_id、role、content |
-| `outbox` | 发送失败重试 |
+| `outbox` | 微信发送失败重试 |
+| `channel_outbound` | 其他渠道出站队列：租约、重试、确认 |
 | `state` | KV：游标、last_message_id、todo 等 |
 | `credentials` | 加密凭据：service、account、secret_json、status |
 | `routing_log` | 消息路由审计 |
@@ -50,6 +51,38 @@ Router 是唯一有状态的服务。桌面端和本机 Agent 都是客户端。
 | `plugin_events` | 插件加载/卸载/操作审计 |
 
 SQLite 使用 WAL + `busy_timeout=10000`，单进程写入。
+
+## 多渠道消息层
+
+`channels.py` 定义三个核心对象：
+
+| 对象 | 作用 |
+|---|---|
+| `Endpoint` | 具体会话：`wechat:owner`、`qq:group:123456`、`qq:private:789` |
+| `Principal` | 发起人：`owner` 或 `guest:<channel>:<id>` |
+| `Envelope` | 归一化消息：channel、endpoint、sender、text、attachments、raw |
+
+微信由 `poll_once` 直接构造 Envelope；其他渠道通过
+`POST /v1/channels/inbound` 进入。Router 处理时用 contextvar 记录当前
+endpoint 和 principal：
+
+```text
+handle_inbound(envelope)
+  → CURRENT_ENDPOINT = envelope.endpoint_id
+  → CURRENT_PRINCIPAL = envelope.principal_id
+  → 回复 / 提醒 / 审批默认回到来源会话
+```
+
+非微信渠道的回复写入 `channel_outbound`，由适配器租约式拉取并 ack。租约机制保证
+适配器崩溃后消息能重新投递，而不是丢失。
+
+站主与访客的边界：
+
+- 只有站主能回复审批通知、触发本机 Agent
+- 访客默认只能聊天，不能调用工具
+- `channels.<id>.allow_guest_tools` / `allow_guest_agents` 可显式放开
+
+详见 [多渠道接入](channels.md)。
 
 ## 入站优先级
 

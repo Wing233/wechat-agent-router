@@ -42,9 +42,11 @@ def _local(iso: str | None) -> str:
 
 
 class ReminderEngine:
-    def __init__(self, store, send_text, min_interval_minutes: int = 1, max_active: int = 100):
+    def __init__(self, store, send_text, min_interval_minutes: int = 1, max_active: int = 100,
+                 send_to=None):
         self.store = store
         self.send_text = send_text
+        self.send_to = send_to
         self.min_interval = max(1, min_interval_minutes)
         self.max_active = max(1, max_active)
 
@@ -156,7 +158,11 @@ class ReminderEngine:
                 continue
             status = "sent"
             try:
-                ok = self.send_text(f"⏰ 提醒：{reminder['text']}")
+                target = str(reminder.get("chat_id") or "")
+                if self.send_to and target:
+                    ok = self.send_to(target, f"⏰ 提醒：{reminder['text']}")
+                else:
+                    ok = self.send_text(f"⏰ 提醒：{reminder['text']}")
                 if not ok:
                     status = "queued"
             except Exception as exc:

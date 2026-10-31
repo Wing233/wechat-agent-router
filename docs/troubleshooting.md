@@ -172,6 +172,38 @@ python local-agent/agent.py --config local-agent/config.json
 - 命中了禁止目录
 - 文件超过 64 KB
 
+## QQ / 多渠道
+
+### `channel qq is not configured`
+
+`config.json` 里没有 `channels.qq`，或键名和适配器发送的 `channel` 不一致。
+
+### 入站 401
+
+- 签名不是对**原始 body** 计算
+- 适配器和 Router 的 `channels.qq.secret` 不一致
+- 反向代理改写了 body
+
+### 收不到 QQ 回复
+
+```text
+1. Router 日志是否显示 inbound accepted
+2. GET /v1/channels/outbound 是否有 pending
+3. 适配器是否在轮询、bot 是否在线
+4. 发送成功后是否 ack
+```
+
+### 重复回复
+
+- 多个适配器实例轮询同一个 `channel`
+- 发送成功后没有 ack
+- 租约 60 秒过期后重新投递
+
+### 访客不能执行工具
+
+这是默认行为：非 `owner_ids` 用户只能聊天。需要放开时配置
+`allow_guest_tools` / `allow_guest_agents`，并确认群成员可信。
+
 ## 桌面端
 
 ### 打不开窗口

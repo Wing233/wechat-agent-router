@@ -4,6 +4,24 @@
     "channel_key": "REPLACE_WITH_HUB_CHANNEL_KEY",
     "owner_id": "REPLACE_WITH_WECHAT_OWNER_ID"
   },
+  "channels": {
+    "qq": {
+      "adapter": "koishi",
+      "secret": "REPLACE_WITH_RANDOM_SECRET",
+      "owner_ids": ["REPLACE_WITH_QQ_OWNER_ID"],
+      "allow_guest_tools": false,
+      "allow_guest_agents": false
+    }
+  },
+  "endpoints": {
+    "qq:group:REPLACE_WITH_QQ_GROUP_ID": {
+      "channel": "qq",
+      "kind": "group",
+      "label": "QQ 测试群",
+      "conversation_id": "REPLACE_WITH_QQ_GROUP_ID",
+      "capabilities": ["text", "image", "file", "quote"]
+    }
+  },
   "db": "/data/router.db",
   "data_dir": "/data",
   "public_base_url": "https://router.example.com",

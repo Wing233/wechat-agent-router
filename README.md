@@ -79,6 +79,25 @@
 - 需要“先审批再执行”的文件修改、插件安装
 - 多台电脑、多个 Agent 统一管理
 
+### 不只微信
+
+Router 内部按 `channel + endpoint + principal` 路由，微信只是内置入口：
+
+```text
+微信 / QQ / 未来入口
+        ↓
+  Channel Adapter
+        ↓
+Envelope（来源、发起人、目标）
+        ↓
+      Router
+        ↓
+Outbox（回到来源或指定会话）
+```
+
+QQ 通过 `examples/koishi-bridge` 接入，不需要公网端口；协议与配置见
+[docs/channels.md](docs/channels.md)。
+
 ---
 
 ## 为什么做微桥
@@ -109,6 +128,7 @@
 **微信与消息**
 
 - 文本对话、引用回复、4 位审批码
+- 微信 / QQ（Koishi）多入口，回复默认回到来源会话
 - 图片理解（视觉模型）
 - 文件读取：txt / md / csv / json / pdf / docx
 - 图片、视频、文件出站发送
@@ -306,8 +326,10 @@ stateDiagram-v2
 
 | 工具 | 说明 |
 |---|---|
-| `send_media` | 把 `/workspace` 或 `/data/images` 下的图片、视频、文件发到微信 |
+| `send_media` | 把 `/workspace` 或 `/data/images` 下的图片、视频、文件发到当前会话 |
 | `generate_image` | 调 SiliconFlow Kolors 生成图片并发送 |
+| `list_channels` | 查看微信 / QQ 等已接入入口 |
+| `send_to_channel` | 站主把文字发到指定入口（QQ 群、微信等） |
 
 > `leetcode` 和 `evolution` 在示例配置里默认禁用：一个涉及第三方平台 ToS，一个能生成并安装代码。请阅读 [安全模型](#安全模型) 后再启用。
 

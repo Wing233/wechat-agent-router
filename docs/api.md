@@ -28,6 +28,57 @@ X-Agent-Key: <agents[].api_key>
 X-Service-Token: <service_token>
 ```
 
+### 渠道适配器
+
+```http
+# 入站
+X-Router-Signature: <hex HMAC-SHA256(channels.<id>.secret, raw_body)>
+
+# 出站轮询 / ack
+X-Channel-Secret: <channels.<id>.secret>
+```
+
+## Channel API
+
+### POST /v1/channels/inbound
+
+接收 QQ / 其他适配器的归一化消息，异步处理并立即返回。
+
+```bash
+curl -X POST http://127.0.0.1:9900/v1/channels/inbound \
+  -H "X-Router-Signature: $SIG" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "channel": "qq",
+    "adapter": "koishi",
+    "endpoint_id": "qq:group:123456",
+    "conversation_type": "group",
+    "sender_id": "789",
+    "sender_name": "小明",
+    "text": "今天花了多少钱"
+  }'
+```
+
+```json
+{"ok": true, "accepted": true, "endpoint_id": "qq:group:123456", "principal_id": "guest:qq:789"}
+```
+
+### GET /v1/channels/outbound
+
+租约式拉取待发送消息。
+
+```http
+GET /v1/channels/outbound?channel=qq&limit=20
+```
+
+### POST /v1/channels/outbound/ack
+
+```json
+{"channel": "qq", "ids": [12, 13]}
+```
+
+完整字段和适配器实现见 [多渠道接入](channels.md)。
+
 ## Agent API
 
 ### POST /v1/notify

@@ -9,7 +9,20 @@ def _schema(properties: dict, required: list[str] | None = None) -> dict:
 
 
 def apply(ctx) -> None:
-    engine = ReminderEngine(ctx.resource("store"), ctx.send)
+    def scope() -> str:
+        try:
+            current = ctx.resource("current_endpoint")()
+        except Exception:
+            current = ""
+        owner = ctx.config.get("owner") or ""
+        owner = owner or ctx.root_config.get("owner") or ""
+        return current or owner
+
+    try:
+        send_to = ctx.resource("send_text_to")
+    except Exception:
+        send_to = None
+    engine = ReminderEngine(ctx.resource("store"), ctx.send, send_to=send_to)
     ctx.provide("reminders", engine)
 
     ctx.tools.register(
@@ -25,7 +38,7 @@ def apply(ctx) -> None:
             "end_at": {"type": "string", "description": "可选，重复提醒的结束时间，ISO"},
         }, ["text", "schedule_type"]),
         lambda a: engine.create(
-            chat_id=ctx.config.get("owner") or ctx.root_config.get("owner") or "",
+            chat_id=scope(),
             text=a.get("text", ""), schedule_type=a.get("schedule_type", "once"),
             at=a.get("at", ""), interval_minutes=int(a.get("interval_minutes") or 0),
             cron=a.get("cron", ""), max_occurrences=a.get("max_occurrences"),
@@ -37,28 +50,28 @@ def apply(ctx) -> None:
         "list_reminders",
         "查看当前还未完成的提醒（active/paused）。",
         _schema({}),
-        lambda a: {"items": engine.list(ctx.config.get("owner") or ctx.root_config.get("owner") or "")},
+        lambda a: {"items": engine.list(scope())},
         aliases=("list_reminders",),
     )
     ctx.tools.register(
         "cancel_reminder",
         "按提醒 id 或文本关键词取消提醒；如果有多个匹配会返回候选，需要再问用户。",
         _schema({"key": {"type": "string", "description": "提醒 id 或文本关键词"}}, ["key"]),
-        lambda a: engine.cancel(ctx.config.get("owner") or ctx.root_config.get("owner") or "", a.get("key", "")),
+        lambda a: engine.cancel(scope(), a.get("key", "")),
         aliases=("cancel_reminder",),
     )
     ctx.tools.register(
         "pause_reminder",
         "暂停一条提醒；key 是提醒 id 或文本关键词。",
         _schema({"key": {"type": "string"}}, ["key"]),
-        lambda a: engine.pause(ctx.config.get("owner") or ctx.root_config.get("owner") or "", a.get("key", "")),
+        lambda a: engine.pause(scope(), a.get("key", "")),
         aliases=("pause_reminder",),
     )
     ctx.tools.register(
         "resume_reminder",
         "恢复一条暂停的提醒；key 是提醒 id 或文本关键词。",
         _schema({"key": {"type": "string"}}, ["key"]),
-        lambda a: engine.resume(ctx.config.get("owner") or ctx.root_config.get("owner") or "", a.get("key", "")),
+        lambda a: engine.resume(scope(), a.get("key", "")),
         aliases=("resume_reminder",),
     )
     ctx.tools.register(
@@ -66,7 +79,7 @@ def apply(ctx) -> None:
         "把某条提醒推迟 N 分钟；key 是提醒 id 或文本关键词。",
         _schema({"key": {"type": "string"}, "minutes": {"type": "integer", "minimum": 1, "maximum": 1440}},
                 ["key", "minutes"]),
-        lambda a: engine.snooze(ctx.config.get("owner") or ctx.root_config.get("owner") or "",
+        lambda a: engine.snooze(scope(),
                                 a.get("key", ""), int(a.get("minutes") or 10)),
         aliases=("snooze_reminder",),
     )

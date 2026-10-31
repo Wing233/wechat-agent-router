@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -85,9 +86,10 @@ class Job:
 class JobScheduler:
     """Interval jobs with persisted next-run timestamps; missed windows are skipped, not replayed."""
 
-    def __init__(self, store, jobs: list[Job]):
+    def __init__(self, store, jobs: list[Job], job_context: Callable[[Job], Any] | None = None):
         self.store = store
         self.jobs = {job.id: job for job in jobs if job.enabled}
+        self.job_context = job_context or (lambda job: nullcontext())
 
     def _key(self, job: Job, suffix: str) -> str:
         return f"job:{job.id}:{suffix}"
@@ -115,13 +117,14 @@ class JobScheduler:
 
     def run(self, job: Job) -> dict:
         started = time.time()
-        try:
-            result = job.handler()
-            status = "ok" if result is not None else "empty"
-        except Exception as exc:
-            log.exception("job %s failed", job.id)
-            result = {"error": str(exc)[:500]}
-            status = "error"
+        with self.job_context(job):
+            try:
+                result = job.handler()
+                status = "ok" if result is not None else "empty"
+            except Exception as exc:
+                log.exception("job %s failed", job.id)
+                result = {"error": str(exc)[:500]}
+                status = "error"
         self.store.state_set(self._key(job, "last_run"), str(int(started)))
         self.store.state_set(self._key(job, "last_status"), status)
         return {"id": job.id, "status": status, "result": result, "seconds": round(time.time() - started, 2)}

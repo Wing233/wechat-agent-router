@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextvars
 import hashlib
 import hmac
 import html
@@ -15,7 +16,7 @@ import time
 import urllib.request
 import uuid
 from collections import deque
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import parse_qs
@@ -25,6 +26,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 from agent_broker import BROKER
+from channels import ChannelRegistry, DEFAULT_ENDPOINT, Envelope
 from attachments import AttachmentError, Attachments
 from timeutil import CST
 from hub import Hub, HubError, parse_quote, parse_text
@@ -98,6 +100,9 @@ if _missing:
 
 BASE = CFG["hub"]["base_url"]
 OWNER = CFG["hub"]["owner_id"]
+CHANNELS = ChannelRegistry(CFG, OWNER)
+CURRENT_ENDPOINT = contextvars.ContextVar("current_endpoint", default=DEFAULT_ENDPOINT)
+CURRENT_PRINCIPAL = contextvars.ContextVar("current_principal", default="owner")
 DATA_DIR = Path(CFG.get("data_dir", "/data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 IMAGE_DIR = DATA_DIR / "images"
@@ -182,8 +187,11 @@ def service_auth(request: Request) -> None:
 
 def send_payload(payload: dict) -> bool:
     try:
-        if payload.get("kind") == "image":
+        kind = payload.get("kind")
+        if kind == "image":
             hub.send_image(payload["path"], payload.get("text", ""), payload.get("recipient"))
+        elif kind == "file":
+            hub.send_file(payload["path"], payload.get("text", ""), payload.get("recipient"))
         else:
             hub.send_text(payload.get("text", ""), payload.get("recipient"))
         return True
@@ -199,8 +207,43 @@ def send_payload(payload: dict) -> bool:
         return False
 
 
+def endpoint_ref(value: str) -> str:
+    """Map legacy chat ids (WeChat owner id) onto the default endpoint."""
+    value = str(value or "").strip()
+    if not value:
+        return DEFAULT_ENDPOINT
+    if value in CHANNELS.endpoints:
+        return value
+    if ":" in value:
+        return value
+    return DEFAULT_ENDPOINT
+
+
+def send_to_endpoint(endpoint_id: str, payload: dict) -> bool:
+    endpoint_id = endpoint_ref(endpoint_id)
+    if endpoint_id in CHANNELS.endpoints:
+        endpoint = CHANNELS.endpoints[endpoint_id]
+    else:
+        channel = endpoint_id.split(":", 1)[0]
+        parts = endpoint_id.split(":")
+        kind = "group" if len(parts) > 1 and parts[1] in {"group", "guild", "channel"} else "private"
+        endpoint = CHANNELS.ensure_endpoint(
+            channel, endpoint_id, "group" if kind == "group" else "private"
+        )
+    if endpoint.channel == "wechat":
+        return send_payload({**payload, "recipient": endpoint.conversation_id or OWNER})
+    store.enqueue_channel_outbound(
+        endpoint.id, endpoint.channel, {**payload, "endpoint_id": endpoint.id, "channel": endpoint.channel}
+    )
+    return True
+
+
+def send_text_to(endpoint_id: str, text: str) -> bool:
+    return send_to_endpoint(endpoint_id, {"kind": "text", "text": text})
+
+
 def send_text(text: str) -> bool:
-    return send_payload({"kind": "text", "text": text, "recipient": OWNER})
+    return send_to_endpoint(CURRENT_ENDPOINT.get(), {"kind": "text", "text": text})
 
 
 def flush_outbox() -> None:
@@ -209,6 +252,8 @@ def flush_outbox() -> None:
         try:
             if payload.get("kind") == "image":
                 hub.send_image(payload["path"], payload.get("text", ""), payload.get("recipient"))
+            elif payload.get("kind") == "file":
+                hub.send_file(payload["path"], payload.get("text", ""), payload.get("recipient"))
             else:
                 hub.send_text(payload.get("text", ""), payload.get("recipient"))
             store.drop_outbox(item["id"])
@@ -266,7 +311,8 @@ def agent_auth(request: Request) -> dict:
     raise HTTPException(401, "invalid agent key")
 
 
-def send_agent_result(result: dict) -> None:
+def send_agent_result(result: dict, endpoint_id: str | None = None) -> None:
+    endpoint_id = endpoint_id or CURRENT_ENDPOINT.get()
     text = (result.get("text") or "").strip()
     image = result.get("image_base64")
     if image:
@@ -274,11 +320,13 @@ def send_agent_result(result: dict) -> None:
             raw = base64.b64decode(image.split(",")[-1])
             path = IMAGE_DIR / f"{uuid.uuid4().hex}.png"
             path.write_bytes(raw)
-            send_payload({"kind": "image", "path": str(path), "text": text or "请查看图片", "recipient": OWNER})
+            send_to_endpoint(endpoint_id, {
+                "kind": "image", "path": str(path), "text": text or "请查看图片"
+            })
             return
         except Exception:
             pass
-    send_text(text or "已收到你的回复，正在处理。")
+    send_to_endpoint(endpoint_id, {"kind": "text", "text": text or "已收到你的回复，正在处理。"})
 
 
 # ---------------------------------------------------------------------------
@@ -293,7 +341,12 @@ LOADER = PluginLoader(
     tools=TOOLS,
     jobs=JOBS,
     resources={"store": store, "agents": AGENTS,
-               "call_agent": call_agent, "settings": SETTINGS},
+               "call_agent": call_agent, "settings": SETTINGS,
+               "channels": CHANNELS,
+               "send_to_endpoint": send_to_endpoint,
+               "send_text_to": send_text_to,
+               "current_endpoint": lambda: CURRENT_ENDPOINT.get(),
+               "current_principal": lambda: CURRENT_PRINCIPAL.get()},
     root_config={"jobs": CFG.get("jobs", {}), "plugins": CFG.get("plugins", {}),
                  "owner": OWNER, "disabled_plugins": CFG.get("disabled_plugins", [])},
     send_fn=send_text,
@@ -315,9 +368,25 @@ def refresh_services() -> None:
                    if key.startswith("credential:")}
 
 
+def job_target(job) -> str:
+    conf = (CFG.get("jobs") or {}).get(job.id) or {}
+    return str(conf.get("target_endpoint") or DEFAULT_ENDPOINT)
+
+
+@contextmanager
+def job_context(job):
+    endpoint_token = CURRENT_ENDPOINT.set(job_target(job))
+    principal_token = CURRENT_PRINCIPAL.set("owner")
+    try:
+        yield
+    finally:
+        CURRENT_ENDPOINT.reset(endpoint_token)
+        CURRENT_PRINCIPAL.reset(principal_token)
+
+
 def rebuild_scheduler() -> None:
     global SCHEDULER
-    SCHEDULER = JobScheduler(store, JOBS)
+    SCHEDULER = JobScheduler(store, JOBS, job_context=job_context)
     SETTINGS.scheduler = SCHEDULER
 
 
@@ -377,7 +446,9 @@ def send_media_tool(args: dict) -> dict:
     if size > 32 * 1024 * 1024:
         return {"error": f"文件过大：{size} 字节（上限 32MB）"}
     try:
-        hub.send_file(str(path), str(args.get("caption") or ""))
+        send_to_endpoint(CURRENT_ENDPOINT.get(), {
+            "kind": "file", "path": str(path), "text": str(args.get("caption") or ""),
+        })
     except Exception as exc:
         return {"error": f"发送失败：{exc}"}
     return {"ok": True, "path": str(path), "size": size}
@@ -385,7 +456,7 @@ def send_media_tool(args: dict) -> dict:
 
 TOOLS.register(
     "send_media",
-    "把服务器上的图片、视频或文件发到微信。路径必须在 /workspace 或 /data/images 下，单文件不超过 32MB。",
+    "把服务器上的图片、视频或文件发到当前会话。路径必须在 /workspace 或 /data/images 下，单文件不超过 32MB。",
     {"type": "object", "properties": {
         "path": {"type": "string", "description": "服务器绝对路径"},
         "caption": {"type": "string", "description": "可选说明文字"},
@@ -403,7 +474,9 @@ def generate_image_tool(args: dict) -> dict:
         return {"error": "还没有配置生图 API"}
     try:
         path = IMAGEGEN.generate_to_file(prompt, GENERATED_DIR, args.get("size"))
-        hub.send_file(str(path), str(args.get("caption") or "画好了"))
+        send_to_endpoint(CURRENT_ENDPOINT.get(), {
+            "kind": "file", "path": str(path), "text": str(args.get("caption") or "画好了"),
+        })
     except Exception as exc:
         return {"error": f"生图失败：{exc}"}
     return {"ok": True, "path": str(path), "prompt": prompt[:200]}
@@ -411,7 +484,7 @@ def generate_image_tool(args: dict) -> dict:
 
 TOOLS.register(
     "generate_image",
-    "根据文字描述生成图片并发到微信（SiliconFlow Kolors）。用户让你画图、画自画像、生成插画时使用。",
+    "根据文字描述生成图片并发到当前会话（SiliconFlow Kolors）。用户让你画图、画自画像、生成插画时使用。",
     {"type": "object", "properties": {
         "prompt": {"type": "string", "description": "详细的中文画面描述"},
         "size": {"type": "string", "description": "可选尺寸，如 1024x1024、960x1280、768x1024"},
@@ -422,16 +495,86 @@ TOOLS.register(
 )
 
 
+def endpoint_view(endpoint) -> dict:
+    return endpoint.to_dict()
+
+
+def resolve_endpoint(value: str) -> dict:
+    raw = (value or "").strip()
+    if not raw:
+        return {"error": "缺少 endpoint"}
+    exact = CHANNELS.endpoint(raw)
+    if exact:
+        return {"endpoint": exact}
+    lowered = raw.lower()
+    endpoints = list(CHANNELS.endpoints.values())
+    hits = [item for item in endpoints
+            if item.id.lower() == lowered or item.label.lower() == lowered]
+    if not hits:
+        hits = [item for item in endpoints if lowered in item.label.lower()]
+    if len(hits) == 1:
+        return {"endpoint": hits[0]}
+    if hits:
+        return {"error": "匹配到多个入口，请说得更具体",
+                "candidates": [{"id": item.id, "label": item.label} for item in hits[:10]]}
+    return {"error": f"没有找到入口：{raw}",
+            "available": [{"id": item.id, "label": item.label} for item in endpoints[:20]]}
+
+
+def list_channels_tool(_args: dict) -> dict:
+    if CURRENT_PRINCIPAL.get() != "owner":
+        return {"error": "只有站主可以查看入口列表"}
+    return {"items": [endpoint_view(item) for item in CHANNELS.endpoints.values()]}
+
+
+def send_to_channel_tool(args: dict) -> dict:
+    if CURRENT_PRINCIPAL.get() != "owner":
+        return {"error": "只有站主可以跨入口发送"}
+    text = str(args.get("text") or "").strip()
+    if not text:
+        return {"error": "缺少 text"}
+    resolved = resolve_endpoint(str(args.get("endpoint") or ""))
+    if "error" in resolved:
+        return resolved
+    endpoint = resolved["endpoint"]
+    ok = send_to_endpoint(endpoint.id, {"kind": "text", "text": text[:4000]})
+    return {"ok": ok, "endpoint_id": endpoint.id, "label": endpoint.label,
+            "queued": endpoint.channel != "wechat"}
+
+
+TOOLS.register(
+    "list_channels",
+    "查看已接入的入口和 endpoint id（微信、QQ 群、QQ 私聊等）。",
+    {"type": "object", "properties": {}},
+    list_channels_tool,
+    aliases=("list_endpoints",),
+)
+
+TOOLS.register(
+    "send_to_channel",
+    "把一条文字发到指定入口。endpoint 可以是 endpoint id 或配置里的名称，例如 qq:group:123456 或“QQ 测试群”。只有站主可用。",
+    {"type": "object", "properties": {
+        "endpoint": {"type": "string", "description": "endpoint id 或入口名称"},
+        "text": {"type": "string", "description": "要发送的文字"},
+    }, "required": ["endpoint", "text"]},
+    send_to_channel_tool,
+    aliases=("send_to_endpoint",),
+)
+
+
 def build_system_prompt() -> str:
     lines = [
         CFG["llm"].get("system_prompt", ""),
         "",
-        "## 微信网关职责",
-        "你在微信里服务站主。回答要简洁、口语化，不要 Markdown 表格。",
+        "## 消息网关职责",
+        "你通过微信、QQ 等入口服务站主。回答要简洁、口语化，不要 Markdown 表格。",
+        "群聊里可能有访客。只有站主能修改配置、调用本机 Agent 或批准高风险操作；访客只能聊普通问题。",
         "业务数据、统计数字必须调用工具查询，绝不能编造；查不到就直说。",
         "力扣/LeetCode/刷题/做题相关的问题调用 leetcode_stats。",
         "用户发图片或文件时，系统会把图片交给视觉模型、把文件文字附在消息里；只根据实际提供的内容回答，不要假装看到了没读到的东西。",
         "用户要求某个项目 Agent 做事时调用 send_to_agent，不要假装已经完成。",
+        "用户说“发到QQ/微信/某个群”时，先调用 list_channels 确认入口，再调用 send_to_channel；不要猜 endpoint。",
+        "结果默认回到当前会话；只有用户明确要求时才跨入口发送。",
         "用户消息以 @AgentID 开头时，系统会直接路由到该 Agent，不经过你；你可以按普通对话理解。",
         "如果用户是在回复某条待处理通知，系统会先做匹配；你不需要猜。",
         "不确定用户指哪个 Agent 时，先反问一句。",
@@ -440,9 +583,9 @@ def build_system_prompt() -> str:
         "查看、取消、暂停、推迟提醒用对应工具；取消时如果返回 need_choice，先让用户从候选里选。",
         "用户要求给 bot 增加新的 HTTP API 功能时调用 propose_plugin；必须提供真实 API 地址、方法、参数，不能编造。",
         "用户问定时任务多久一次、下次什么时候、修改播报间隔、启停插件时，调用 admin 的 list_jobs / get_job / set_job_interval / set_job_enabled / list_plugins 等工具，不要猜。",
-        "用户要求查看/修改服务器文件时调用 ops 的 fs_list / fs_read / fs_write / fs_replace / fs_delete / fs_move；写或删会发微信审批。允许的根目录：/app、/app/plugins、/workspace。",
-        "用户要求把服务器上的图片、视频或文件发到微信时调用 send_media；路径只允许 /workspace 或 /data/images。",
-        "用户让你画图、生成图片、画自画像时调用 generate_image，不要用 ASCII、HTML 或代码块糊弄；prompt 用详细中文描述，生成后会自动发到微信。",
+        "用户要求查看/修改服务器文件时调用 ops 的 fs_list / fs_read / fs_write / fs_replace / fs_delete / fs_move；写或删会发审批。允许的根目录：/app、/app/plugins、/workspace。",
+        "用户要求把服务器上的图片、视频或文件发到当前会话时调用 send_media；路径只允许 /workspace 或 /data/images。",
+        "用户让你画图、生成图片、画自画像时调用 generate_image，不要用 ASCII、HTML 或代码块糊弄；prompt 用详细中文描述，生成后会自动发到当前会话。",
         "代码检查任务：只读目标插件的 plugin.py、adapter.py、manifest.json，最多读 3 个文件；不要列 /app 根目录；拿到 job 定义和 adapter 逻辑后立即回答。",
         "可用 Agent：",
     ]
@@ -458,7 +601,7 @@ def build_system_prompt() -> str:
 SYSTEM_PROMPT = build_system_prompt()
 
 
-def llm_answer(text: str, history: list[dict]) -> str:
+def llm_answer(text: str, history: list[dict], allow_tools: bool = True) -> str:
     messages = [{"role": "system", "content": build_system_prompt()}]
     for item in history:
         if item["role"] in ("user", "assistant"):
@@ -466,8 +609,9 @@ def llm_answer(text: str, history: list[dict]) -> str:
     messages.append({"role": "user", "content": text})
     tool_trace: list[dict] = []
     seen: dict[str, dict] = {}
+    tool_defs = TOOLS.definitions() if allow_tools else None
     for round_no in range(6):
-        message = llm.complete(messages, TOOLS.definitions())
+        message = llm.complete(messages, tool_defs)
         calls = message.get("tool_calls") or []
         if not calls:
             return (message.get("content") or "").strip() or "我在，但这次没想出怎么回答。"
@@ -618,7 +762,7 @@ def handle_reply(notification: dict, text: str) -> None:
             "agent_id": agent["id"],
             "reply": text,
             "meta": notification.get("meta") or {},
-            "chat_id": OWNER,
+            "chat_id": CURRENT_ENDPOINT.get(),
         })
         send_agent_result(result)
         if result.get("final", True):
@@ -628,7 +772,8 @@ def handle_reply(notification: dict, text: str) -> None:
         send_text(f"已收到，但 {agent.get('name', agent['id'])} 暂时没有响应，稍后我会再试。")
 
 
-def answer_with_attachments(text: str, history: list[dict], bundle: dict) -> str:
+def answer_with_attachments(text: str, history: list[dict], bundle: dict,
+                            allow_tools: bool = True) -> str:
     notes = list(bundle.get("notes") or [])
     errors = list(bundle.get("errors") or [])
     if errors:
@@ -645,43 +790,100 @@ def answer_with_attachments(text: str, history: list[dict], bundle: dict) -> str
                     "附件内容：\n" + "\n\n".join(notes)]
         if text:
             combined.append("用户问题：" + text)
-        return llm_answer("\n\n".join(combined), history)
+        return llm_answer("\n\n".join(combined), history, allow_tools=allow_tools)
     prompt = text or "请查看我发的附件。"
     if notes:
         prompt += "\n\n[附件内容]\n" + "\n\n".join(notes)
-    return llm_answer(prompt, history)
+    return llm_answer(prompt, history, allow_tools=allow_tools)
 
 
-def handle_inbound(text: str, message: dict) -> None:
-    text = (text or "").strip()
-    quote = parse_quote(message)
+def history_key(endpoint_id: str) -> str:
+    """Keep the legacy WeChat key so existing conversations survive the refactor."""
+    return OWNER if endpoint_id == DEFAULT_ENDPOINT else endpoint_id
+
+
+def quote_for(envelope: Envelope) -> dict | None:
+    if envelope.channel == "wechat":
+        return parse_quote(envelope.raw or {})
+    raw = envelope.raw or {}
+    quote = raw.get("quote") or raw.get("reply") or raw.get("ref_msg")
+    if not isinstance(quote, dict):
+        return None
+    item = quote.get("item") if isinstance(quote.get("item"), dict) else quote
+    return {
+        "title": str(quote.get("title") or ""),
+        "type": str(item.get("type") or ""),
+        "text": str(item.get("text") or item.get("content") or ""),
+    }
+
+
+def attachment_bundle(envelope: Envelope) -> dict:
+    if envelope.channel == "wechat":
+        try:
+            return ATTACHMENTS.collect(envelope.raw or {})
+        except Exception as exc:
+            log.warning("attachment collect failed: %s", exc)
+            return {"items": 0, "images": [], "notes": [], "errors": [str(exc)], "saved": []}
+    notes: list[str] = []
+    for item in envelope.attachments:
+        if not isinstance(item, dict):
+            continue
+        kind = item.get("type") or "file"
+        name = item.get("name") or item.get("filename") or ""
+        url = item.get("url") or item.get("path") or ""
+        notes.append(f"[{kind}] {name} {url}".strip())
+    return {"items": len(notes), "images": [], "notes": notes, "errors": [], "saved": []}
+
+
+def handle_inbound(envelope: Envelope) -> None:
+    endpoint = CHANNELS.endpoint(envelope.endpoint_id) or CHANNELS.ensure_endpoint(
+        envelope.channel, envelope.endpoint_id, envelope.conversation_type
+    )
+    endpoint_token = CURRENT_ENDPOINT.set(endpoint.id)
+    principal_token = CURRENT_PRINCIPAL.set(envelope.principal_id or "owner")
     try:
-        bundle = ATTACHMENTS.collect(message)
-    except Exception as exc:
-        log.warning("attachment collect failed: %s", exc)
-        bundle = {"items": 0, "images": [], "notes": [], "errors": [str(exc)], "saved": []}
+        _handle_inbound(envelope, endpoint)
+    finally:
+        CURRENT_ENDPOINT.reset(endpoint_token)
+        CURRENT_PRINCIPAL.reset(principal_token)
+
+
+def _handle_inbound(envelope: Envelope, endpoint) -> None:
+    text = (envelope.text or "").strip()
+    principal = CHANNELS.principal(envelope.principal_id)
+    is_owner = bool(principal and principal.owner)
+    key = history_key(endpoint.id)
+    quote = quote_for(envelope)
+    bundle = attachment_bundle(envelope)
     has_attachments = bool(bundle.get("items"))
     if not text and not has_attachments:
         send_text("暂不支持这种消息类型，发文字给我吧。")
         return
-    history = store.recent_messages(OWNER, 10)
+    history = store.recent_messages(key, 10)
     display = text or ("[图片]" if bundle.get("images") else "[附件]")
-    store.add_message(OWNER, "user", display)
+    store.add_message(key, "user", display)
     flush_outbox()
-    if text in {"力扣登录", "更新力扣", "绑定力扣", "leetcode登录"}:
+    # Approval / login notifications are owner-only. Guests must never be able
+    # to answer someone else's pending notification by guessing a code.
+    if is_owner and text in {"力扣登录", "更新力扣", "绑定力扣", "leetcode登录"}:
         if LEETCODE is not None:
             LEETCODE.notify_login("missing", force=True)
         return
-    if not has_attachments:
+    if not has_attachments and is_owner:
         pending = match_pending(text, OWNER, quote)
         if pending == "ASKED":
             return
         if isinstance(pending, dict):
-            store.log_route(OWNER, text, "pending", pending["code"])
+            store.log_route(key, text, "pending", pending["code"])
             handle_reply(pending, text)
             return
+    if not has_attachments:
         explicit = parse_explicit_agent(text)
         if explicit:
+            if not (is_owner or CHANNELS.allow_guest_agents(envelope.channel)):
+                store.log_route(key, text, "denied", "guest agent")
+                send_text("只有站主可以把任务转给本机 Agent。")
+                return
             agent_id, task_text = explicit
             agent = AGENTS.get(agent_id)
             if agent is None or agent_id == "echo":
@@ -695,25 +897,29 @@ def handle_inbound(text: str, message: dict) -> None:
                     "notification_id": "",
                     "agent_id": agent_id,
                     "reply": task_text,
-                    "meta": {"kind": "task", "explicit": True},
-                    "chat_id": OWNER,
+                    "meta": {"kind": "task", "explicit": True,
+                             "origin_endpoint": endpoint.id, "principal": envelope.principal_id},
+                    "chat_id": endpoint.id,
                 })
-                send_agent_result(result)
-                store.log_route(OWNER, text, "agent", agent_id)
+                send_agent_result(result, endpoint.id)
+                store.log_route(key, text, "agent", agent_id)
             except Exception as exc:
                 log.warning("explicit agent call failed: %s", exc)
                 send_text(f"已经收到，但 {agent.get('name', agent_id)} 暂时没有响应。")
             return
+    allow_tools = is_owner or CHANNELS.allow_guest_tools(envelope.channel)
     try:
-        answer = answer_with_attachments(text, history, bundle)
+        answer = answer_with_attachments(text, history, bundle, allow_tools=allow_tools)
     except AttachmentError as exc:
         log.error("attachment vision failed: %s", exc)
         answer = f"附件收到了，但识图失败：{exc}"
     except LLMError as exc:
         log.error("llm failed: %s", exc)
         answer = "AI 暂时不可用，稍后我再试。"
-    store.log_route(OWNER, display, "llm", "attachment" if has_attachments else "")
-    store.add_message(OWNER, "assistant", answer)
+    detail = "attachment" if has_attachments else ""
+    detail = f"{endpoint.id}|{envelope.principal_id}|{detail}"
+    store.log_route(key, display, "llm", detail)
+    store.add_message(key, "assistant", answer)
     send_text(answer)
 
 
@@ -732,7 +938,8 @@ def poll_once(last_id: int) -> int:
             continue
         if message.get("from_user_id") != OWNER:
             continue
-        handle_inbound(parse_text(message), message)
+        envelope = CHANNELS.wechat_envelope(message, OWNER, parse_text(message))
+        handle_inbound(envelope)
     return last_id
 
 
@@ -794,6 +1001,7 @@ class NotifyIn(BaseModel):
     ttl_seconds: int = Field(default=900, ge=60, le=86400)
     meta: dict = Field(default_factory=dict)
     thread_id: str | None = None
+    endpoint_id: str = ""
 
 
 @asynccontextmanager
@@ -841,8 +1049,10 @@ def notify(body: NotifyIn, request: Request):
         image_path = str(path)
 
     code = new_code() if body.expect_reply else ""
+    target = endpoint_ref(body.endpoint_id)
+    notification_chat = OWNER if target == DEFAULT_ENDPOINT else target
     notification = store.create_notification(
-        agent_id=agent["id"], chat_id=OWNER, text=text, code=code,
+        agent_id=agent["id"], chat_id=notification_chat, text=text, code=code,
         expect_reply=body.expect_reply, ttl_seconds=body.ttl_seconds,
         image_path=image_path, meta=body.meta, thread_id=body.thread_id,
     )
@@ -853,10 +1063,11 @@ def notify(body: NotifyIn, request: Request):
     else:
         main_text = f"{header}{text}" if text else f"{header}请查看图片。"
     if image_path:
-        send_payload({"kind": "image", "path": image_path, "text": f"{header}请查看图片", "recipient": OWNER})
-        ok = send_text(main_text)
+        send_to_endpoint(target, {"kind": "image", "path": image_path,
+                                  "text": f"{header}请查看图片"})
+        ok = send_to_endpoint(target, {"kind": "text", "text": main_text})
     else:
-        ok = send_text(main_text)
+        ok = send_to_endpoint(target, {"kind": "text", "text": main_text})
     return {"id": notification["id"], "code": code, "status": "sent" if ok else "queued"}
 
 
@@ -897,6 +1108,79 @@ async def agent_result(request: Request):
         raise HTTPException(400, "task_id required")
     ok = BROKER.complete(task_id, bool(body.get("ok")), str(body.get("text") or ""))
     return {"ok": ok}
+
+
+# ---------------------------------------------------------------------------
+# channel adapters (QQ/Koishi today, anything else later)
+# ---------------------------------------------------------------------------
+def channel_secret(channel: str) -> str:
+    conf = CHANNELS.channel(channel)
+    secret = str(conf.get("secret") or "")
+    if not secret:
+        raise HTTPException(503, f"channel {channel or '?'} is not configured")
+    return secret
+
+
+def channel_token_auth(request: Request, channel: str) -> None:
+    secret = channel_secret(channel)
+    token = request.headers.get("x-channel-secret", "")
+    if not hmac.compare_digest(token, secret):
+        raise HTTPException(401, "invalid channel secret")
+
+
+async def _run_inbound(envelope: Envelope) -> None:
+    try:
+        await asyncio.to_thread(handle_inbound, envelope)
+    except Exception:
+        log.exception("inbound handling failed for %s", envelope.endpoint_id)
+
+
+@app.post("/v1/channels/inbound", status_code=202)
+async def channel_inbound(request: Request):
+    raw = await request.body()
+    try:
+        body = json.loads(raw.decode("utf-8") or "{}")
+    except Exception:
+        raise HTTPException(400, "invalid json")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "invalid json")
+    channel = str(body.get("channel") or "")
+    if not channel:
+        raise HTTPException(400, "channel required")
+    if not str(body.get("sender_id") or "").strip():
+        raise HTTPException(400, "sender_id required")
+    secret = channel_secret(channel)
+    signature = request.headers.get("x-router-signature", "")
+    expected = hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest()
+    if not signature or not hmac.compare_digest(signature, expected):
+        raise HTTPException(401, "invalid signature")
+    envelope = CHANNELS.envelope(body)
+    if not envelope.text and not envelope.attachments:
+        raise HTTPException(400, "text or attachments required")
+    asyncio.create_task(_run_inbound(envelope))
+    return {
+        "ok": True,
+        "accepted": True,
+        "endpoint_id": envelope.endpoint_id,
+        "principal_id": envelope.principal_id,
+    }
+
+
+@app.get("/v1/channels/outbound")
+def channel_outbound(request: Request, channel: str = "", endpoint_id: str = "",
+                     limit: int = 20):
+    channel_token_auth(request, channel)
+    batch = max(1, min(int(limit or 20), 100))
+    return {"channel": channel, "items": store.lease_channel_outbound(channel, endpoint_id, batch)}
+
+
+@app.post("/v1/channels/outbound/ack")
+async def channel_outbound_ack(request: Request):
+    body = await request.json()
+    channel = str(body.get("channel") or "")
+    channel_token_auth(request, channel)
+    ids = [int(item) for item in (body.get("ids") or []) if str(item).isdigit()]
+    return {"ok": True, "acked": store.ack_channel_outbound(ids, channel)}
 
 
 @app.post("/v1/notify/{nid}/cancel")

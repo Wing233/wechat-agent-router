@@ -44,6 +44,20 @@ CREATE TABLE IF NOT EXISTS outbox (
   tries INTEGER NOT NULL DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS channel_outbound (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  endpoint_id TEXT NOT NULL,
+  channel TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  tries INTEGER NOT NULL DEFAULT 0,
+  lease_until TEXT,
+  created_at TEXT NOT NULL,
+  delivered_at TEXT
+);
+CREATE INDEX IF NOT EXISTS channel_outbound_poll
+  ON channel_outbound(channel, status, lease_until, id);
+
 CREATE TABLE IF NOT EXISTS state (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -280,6 +294,72 @@ class Store:
     def bump_outbox(self, oid: int) -> None:
         with self._conn() as conn:
             conn.execute("UPDATE outbox SET tries=tries+1 WHERE id=?", (oid,))
+
+    # --- channel outbound ---------------------------------------------
+    def enqueue_channel_outbound(self, endpoint_id: str, channel: str, payload: dict) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT INTO channel_outbound(endpoint_id,channel,payload_json,status,created_at)
+                   VALUES(?,?,?,'pending',?)""",
+                (endpoint_id, channel, json.dumps(payload, ensure_ascii=False), now_iso()),
+            )
+
+    def lease_channel_outbound(self, channel: str, endpoint_id: str = "",
+                               limit: int = 20, lease_seconds: int = 60) -> list[dict]:
+        now = now_iso()
+        lease = datetime.fromtimestamp(time.time() + lease_seconds, timezone.utc).isoformat(timespec="seconds")
+        with self._conn() as conn:
+            if endpoint_id:
+                rows = conn.execute(
+                    """SELECT id,endpoint_id,channel,payload_json,tries FROM channel_outbound
+                       WHERE channel=? AND endpoint_id=? AND status IN ('pending','leased')
+                         AND (lease_until IS NULL OR lease_until<?)
+                       ORDER BY id LIMIT ?""",
+                    (channel, endpoint_id, now, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """SELECT id,endpoint_id,channel,payload_json,tries FROM channel_outbound
+                       WHERE channel=? AND status IN ('pending','leased')
+                         AND (lease_until IS NULL OR lease_until<?)
+                       ORDER BY id LIMIT ?""",
+                    (channel, now, limit),
+                ).fetchall()
+            ids = [row["id"] for row in rows]
+            if ids:
+                placeholders = ",".join("?" for _ in ids)
+                conn.execute(
+                    f"UPDATE channel_outbound SET status='leased',lease_until=?,tries=tries+1 "
+                    f"WHERE id IN ({placeholders})",
+                    (lease, *ids),
+                )
+        return [
+            {
+                "id": row["id"],
+                "endpoint_id": row["endpoint_id"],
+                "channel": row["channel"],
+                "payload": json.loads(row["payload_json"]),
+                "tries": row["tries"],
+            }
+            for row in rows
+        ]
+
+    def ack_channel_outbound(self, ids: list[int], channel: str = "") -> int:
+        ids = [int(item) for item in ids if str(item).isdigit()]
+        if not ids:
+            return 0
+        placeholders = ",".join("?" for _ in ids)
+        sql = (
+            f"UPDATE channel_outbound SET status='delivered',delivered_at=?,lease_until=NULL "
+            f"WHERE id IN ({placeholders})"
+        )
+        params: list = [now_iso(), *ids]
+        if channel:
+            sql += " AND channel=?"
+            params.append(channel)
+        with self._conn() as conn:
+            cur = conn.execute(sql, params)
+            return cur.rowcount
 
     # --- credentials ---------------------------------------------------
     def get_credential(self, service: str) -> dict | None:

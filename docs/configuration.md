@@ -34,6 +34,48 @@ python -c "import secrets; print('pc_' + secrets.token_hex(20))"
 | `channel_key` | string | ✅ | Hub 频道 key |
 | `owner_id` | string | ✅ | 你的微信 owner id |
 
+### channels
+
+多渠道入口的共享密钥和权限。没有这段配置时只有微信可用。
+
+```json
+{
+  "qq": {
+    "adapter": "koishi",
+    "secret": "随机长字符串",
+    "owner_ids": ["你的 QQ 号"],
+    "allow_guest_tools": false,
+    "allow_guest_agents": false
+  }
+}
+```
+
+| 字段 | 默认 | 说明 |
+|---|---|---|
+| `adapter` | — | 适配器名，仅作标识 |
+| `secret` | — | 入站 HMAC / 出站轮询共享密钥 |
+| `owner_ids` | `[]` | 该渠道中视为站主的用户 ID |
+| `allow_guest_tools` | `false` | 是否允许非站主触发工具 |
+| `allow_guest_agents` | `false` | 是否允许非站主驱动本机 Agent |
+
+### endpoints
+
+给常用会话起可读名字，不是白名单；未登记会话会自动发现。
+
+```json
+{
+  "qq:group:123456": {
+    "channel": "qq",
+    "kind": "group",
+    "label": "QQ 测试群",
+    "conversation_id": "123456",
+    "capabilities": ["text", "image", "file", "quote"]
+  }
+}
+```
+
+完整协议见 [多渠道接入](channels.md)。
+
 ### 根字段
 
 | 字段 | 默认 | 说明 |
@@ -111,7 +153,8 @@ python -c "import secrets; print('pc_' + secrets.token_hex(20))"
     "enabled": true,
     "interval_minutes": 240,
     "window_minutes": 0,
-    "skip_empty": false
+    "skip_empty": false,
+    "target_endpoint": "qq:group:123456"
   }
 },
 "plugins": {},
@@ -119,6 +162,7 @@ python -c "import secrets; print('pc_' + secrets.token_hex(20))"
 ```
 
 - `jobs.<id>.interval_minutes` 可由 `admin__set_job_interval` 修改
+- `jobs.<id>.target_endpoint` 指定任务通知发到哪个会话；默认 `wechat:owner`
 - `plugins.<id>` 是插件自己的配置
 - `disabled_plugins` 在加载前过滤
 

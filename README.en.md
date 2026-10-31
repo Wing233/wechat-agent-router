@@ -78,6 +78,25 @@ Typical use cases:
 - Require human approval before file changes or plugin installation
 - Manage multiple computers and agents from one place
 
+### More than WeChat
+
+The Router routes by `channel + endpoint + principal`; WeChat is just the built-in adapter:
+
+```text
+WeChat / QQ / future channels
+        ↓
+  Channel Adapter
+        ↓
+Envelope (origin, sender, target)
+        ↓
+      Router
+        ↓
+Outbox (reply to origin or an explicit endpoint)
+```
+
+QQ connects through `examples/koishi-bridge` without opening an inbound port. See
+[docs/channels.md](docs/channels.md).
+
 ---
 
 ## Why

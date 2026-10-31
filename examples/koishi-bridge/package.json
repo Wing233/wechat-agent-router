@@ -1,0 +1,16 @@
+{
+  "name": "koishi-plugin-router-bridge",
+  "version": "0.1.0",
+  "description": "Koishi bridge for WeChat Agent Router",
+  "main": "index.js",
+  "license": "MIT",
+  "keywords": [
+    "koishi",
+    "koishi-plugin",
+    "qq",
+    "wechat-agent-router"
+  ],
+  "peerDependencies": {
+    "koishi": "^4.17.0"
+  }
+}

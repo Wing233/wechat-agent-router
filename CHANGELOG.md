@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+多渠道消息层。
+
+- 新增 `channels.py`：`Endpoint`、`Principal`、`Envelope`
+- 新增 `POST /v1/channels/inbound`（HMAC 签名）
+- 新增 `/v1/channels/outbound` 租约式出站与 ack
+- 微信仍走内置 poll，行为不变；回复、提醒默认回到来源会话
+- 非站主默认只能聊天，不能调用工具或驱动本机 Agent
+- 定时任务支持 `target_endpoint`
+- 新增 `examples/koishi-bridge`（QQ）
+- 新增 `docs/channels.md`
+
 ## 1.1.1 — 2026-10-30
 
 文档与分发更新，无破坏性代码改动。

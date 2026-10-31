@@ -37,6 +37,20 @@ Router  ──  认证、路由、工具、审批
 | 内部 API | `service_token` | 桌面端、插件、管理 |
 | 登录链接 | HMAC + `login_token_secret` | TTL 1800 秒 |
 | 微信 owner | `hub.owner_id` | 只处理 owner 消息 |
+| 渠道入站 | HMAC + `channels.<id>.secret` | QQ/Koishi 等适配器 |
+| 渠道出站 | `X-Channel-Secret` | 轮询与 ack |
+
+## 站主与访客
+
+多渠道接入后，`owner` 不再等同于“微信 owner id”：
+
+- `channels.<id>.owner_ids` 里的用户 ID 映射为 `principal=owner`
+- 其他用户是 `guest:<channel>:<id>`
+- 非站主默认不能调用工具、不能驱动本机 Agent、不能回复审批通知
+- 审批码和登录通知只发给站主
+
+渠道 `secret` 等同于该渠道的完全信任凭证：拿到它就能伪造任意 `sender_id`。它只应
+发给受控的适配器进程，不要写进前端、仓库或群聊。
 
 启动时拒绝空值/`REPLACE`，避免示例配置直接上线。
 
