@@ -167,6 +167,17 @@ plugins/<id>/plugin.py
 - 401 只记日志，不重试
 - 图片/文件通过 Hub multipart 发送
 
+## 可观测性与成本
+
+- `trace_ctx` 用 contextvar 把 12 位 trace id 注入日志、LLM 调用和工具调用。
+- `traces.db` 存请求级 trace 和 span；默认保留 30 天，启动时清理。
+- `spend.db` 存每次模型调用的 token、成本和 trace id；按 Asia/Shanghai 自然日聚合。
+- `evals.db` 存评测 run 与逐用例结果；`eval_cases.json` 存用例。
+- `models.py` 把 `model_bindings` 解析成有序 provider 列表，失败自动 fallback。
+- `insights.py` 只做确定性归因和建议，不额外调用模型。
+
+这些能力都通过自然语言工具暴露，没有独立管理页。详见 [capabilities.md](capabilities.md)。
+
 ## 媒体
 
 - 入站媒体：`media.encrypt_query_param` + `media.aes_key` → Hub `/api/v1/channels/media` 代理下载

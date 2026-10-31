@@ -40,6 +40,7 @@ File changes require an approval code. Images are understood directly. Drawings 
 - [Architecture](#architecture)
 - [Message flow](#message-flow)
 - [Built-in plugins](#built-in-plugins)
+- [Natural-language operations](#natural-language-operations)
 - [Quick start](#quick-start)
 - [Local agent](#local-agent)
 - [Desktop console](#desktop-console)
@@ -330,6 +331,66 @@ Core tools:
 > `leetcode` and `evolution` are disabled in the example config: one involves third-party platform ToS, the other can generate and install code. Read the [security model](#security-model) before enabling them.
 
 ---
+
+## Natural-language operations
+
+There is no admin page for model, cost, trace or eval management. Everything is a normal tool the owner can call from any connected chat.
+
+| Goal | Say this | Tool |
+|---|---|---|
+| Inspect models | “What model are we using?” | `model_list` |
+| Add a free model | “Add a free model at …, key …” | `model_add` |
+| Switch the chat model | “Switch chat to xxx” | `model_switch_chat` |
+| Save on low-risk work | “Try the free model first for low-risk roles” | `model_bind` |
+| Inspect spend | “How much did we spend this month?” | `cost_report` |
+| Cap guest cost | “Limit guests to 1 per day” | `budget_set` |
+| Debug one message | “Why did that QQ message fail?” | `trace_search` + `trace_explain` |
+| Health overview | “How are we doing today?” | `insight_report` |
+| Run evals | “Run the eval suite” | `eval_run` |
+| Detect regressions | “Is the model getting worse?” | `eval_drift` |
+| Find optimizations | “Where can we save or stabilize?” | `optimize_suggest` |
+| Apply a suggestion | “Apply the first suggestion” | `optimize_apply` |
+
+### Model roles and free-first fallback
+
+`model_bindings` maps a purpose to an ordered model list:
+
+```json
+{
+  "chat": ["deepseek-chat"],
+  "vision": ["qwen-vl", "deepseek-chat"],
+  "control": ["free-model", "deepseek-chat"],
+  "job.default": ["free-model", "deepseek-chat"],
+  "plugin.default": ["free-model", "deepseek-chat"]
+}
+```
+
+The first healthy model wins; later entries are fallbacks. Free models can serve `control`, `job.*` and `plugin.*` without making the bot brittle.
+
+### Full-chain traces
+
+Every inbound message gets a 12-character trace id. The trace stores source, conversation, user, principal, model calls, tool calls, latency, tokens, cost and the final reply. Log lines carry the same id, so container logs are grep-able.
+
+`trace_explain` classifies failures deterministically: budget, 401/403, 429, timeout, 5xx, network, tool error, empty reply, slow request. It does not ask a model to guess.
+
+### Cost, evals and drift
+
+- Every model call is written to `data/spend.db` and aggregated by Asia/Shanghai day, role and model.
+- `cost_report` breaks spend down; `budget_set` sets a daily cap (0 means unlimited). Budgets are checked before the call.
+- The default eval suite has eight deterministic cases (math, translation, JSON, refusal, date, units, concision, one-sentence constraint). `eval_run` stores score, per-case output, latency and cost; `eval_drift` compares recent runs with a baseline window.
+- Drift status: `drifting` (drop ≥ 10), `watch` (5–10), `improving` (gain ≥ 10), `insufficient` (not enough runs).
+
+### Cross-endpoint delivery
+
+`send_to_channel` delivers to another endpoint:
+
+```text
+Send this to the QQ group: the site report is ready
+```
+
+`send_to_channel` takes an explicit `endpoint` such as `qq:group:123456`. The Router writes to `channel_outbound`; the bridge polls, sends, then acks. Delivery is at-least-once, so a crash between send and ack may duplicate a notification.
+
+See [docs/capabilities.md](docs/capabilities.md) for the full reference, data files, security boundaries and limitations.
 
 ## Quick start
 

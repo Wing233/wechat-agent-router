@@ -54,6 +54,15 @@ Router  ──  认证、路由、工具、审批
 
 启动时拒绝空值/`REPLACE`，避免示例配置直接上线。
 
+## 自然语言运维的边界
+
+- `model_*`、`cost_report`、`budget_set`、`trace_*`、`eval_*`、`optimize_*` 都不在访客白名单里，只有站主可调用。
+- `model_list` / `config_get` 只返回脱敏 key；trace、spend、eval 不记录 API key。
+- `model_add` 更新已有模型时，传 `***` 或带 `...` 的 key 会保留原 key。
+- `send_to_channel` 只能发到已配置且启用的入口，或固定发站主的微信；不能指定任意 URL。
+- 预算在模型调用前检查，超限不会产生费用。
+- 轨迹默认保留 30 天，可通过 `trace_retention_days` 调整。
+
 ## 审批
 
 写文件、删除、移动、安装插件都走通知审批：

@@ -89,6 +89,10 @@ python -c "import secrets; print('pc_' + secrets.token_hex(20))"
 | `login_token_secret` | — | 登录 HMAC |
 | `service_token` | — | 内部 API 令牌 |
 | `agent_wait_seconds` | `60` | Agent 同步等待 |
+| `trace_db` | `/data/traces.db` | 请求轨迹库 |
+| `trace_retention_days` | `30` | 轨迹保留天数 |
+| `eval_db` | `/data/evals.db` | 评测历史库 |
+| `eval_cases` | `/data/eval_cases.json` | 评测用例 |
 
 ### llm
 
@@ -97,7 +101,12 @@ python -c "import secrets; print('pc_' + secrets.token_hex(20))"
   "base_url": "https://api.deepseek.com",
   "api_key": "...",
   "model": "deepseek-chat",
-  "system_prompt": "你叫微桥，说话简洁。"
+  "system_prompt": "你叫微桥，说话简洁。",
+  "input_price_per_m": 2.0,
+  "output_price_per_m": 8.0,
+  "daily_budget_owner": 0,
+  "daily_budget_guest": 0,
+  "spend_db": "/data/spend.db"
 }
 ```
 
@@ -105,6 +114,26 @@ python -c "import secrets; print('pc_' + secrets.token_hex(20))"
 - 支持 tools 的模型才能使用完整工具链
 - 支持 vision 的模型才能直接理解入站图片
 - `system_prompt` 会拼在默认 system prompt 前面
+- `daily_budget_*` 为 0 表示不限；预算在调用前检查
+- `input_price_per_m` / `output_price_per_m` 只在 litellm 价格表缺失时用于估算
+
+### model_bindings
+
+`model_bindings` 把用途映射到有序模型 ID 列表；模型本身由 `models` 数组保存（首次启动会从 `llm` 自动生成）。
+
+```json
+{
+  "chat": ["deepseek-chat"],
+  "vision": ["qwen-vl", "deepseek-chat"],
+  "judge": ["deepseek-chat"],
+  "control": ["free-model", "deepseek-chat"],
+  "job.default": ["free-model", "deepseek-chat"],
+  "plugin.default": ["free-model", "deepseek-chat"],
+  "embedding": []
+}
+```
+
+列表按顺序尝试，失败自动 fallback。`job.<id>` / `plugin.<id>` 会先找精确角色，再找 `job.default` / `plugin.default`，最后回退到 `chat`。日常切换用自然语言工具即可，不需要手改。详见 [capabilities.md](capabilities.md)。
 
 ### attachments
 

@@ -24,6 +24,10 @@
   },
   "db": "/data/router.db",
   "data_dir": "/data",
+  "trace_db": "/data/traces.db",
+  "trace_retention_days": 30,
+  "eval_db": "/data/evals.db",
+  "eval_cases": "/data/eval_cases.json",
   "public_base_url": "https://router.example.com",
   "poll_interval": 2,
   "initial_last_id": 0,
@@ -34,7 +38,21 @@
     "base_url": "https://api.deepseek.com",
     "api_key": "REPLACE_WITH_DEEPSEEK_API_KEY",
     "model": "deepseek-chat",
-    "system_prompt": ""
+    "system_prompt": "",
+    "input_price_per_m": 2.0,
+    "output_price_per_m": 8.0,
+    "daily_budget_owner": 0,
+    "daily_budget_guest": 0,
+    "spend_db": "/data/spend.db"
+  },
+  "model_bindings": {
+    "chat": ["deepseek-chat"],
+    "vision": ["deepseek-chat"],
+    "judge": ["deepseek-chat"],
+    "control": ["deepseek-chat"],
+    "job.default": ["deepseek-chat"],
+    "plugin.default": ["deepseek-chat"],
+    "embedding": []
   },
   "attachments": {
     "enabled": true,

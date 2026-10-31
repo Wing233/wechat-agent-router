@@ -28,14 +28,19 @@ from pydantic import BaseModel, Field
 from agent_broker import BROKER
 from channels import ChannelRegistry, DEFAULT_ENDPOINT, Envelope
 from attachments import AttachmentError, Attachments
+import capabilities
 from timeutil import CST
+import evals
 from hub import Hub, HubError, parse_quote, parse_text
 from imagegen import ImageGen
-from llm import LLM, LLMError
+from llm import LLM, LLMBudgetError, LLMError
+import models
 from plugin_loader import PluginError, PluginLoader
 from registry import JobScheduler, ToolRegistry
 from settings_service import SettingsService
 from store import Store, now_iso
+import traces
+import trace_ctx
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("router")
@@ -73,6 +78,7 @@ class RingLogHandler(logging.Handler):
 LOG_RING = RingLogHandler()
 LOG_RING.setFormatter(logging.Formatter("%(message)s"))
 logging.getLogger().addHandler(LOG_RING)
+trace_ctx.install_logging()
 
 CONFIG_PATH = os.environ.get("ROUTER_CONFIG", "/app/config.json")
 with open(CONFIG_PATH, "r", encoding="utf-8") as fh:
@@ -108,10 +114,47 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 IMAGE_DIR = DATA_DIR / "images"
 IMAGE_DIR.mkdir(parents=True, exist_ok=True)
 
+TRACE_DB = str(CFG.get("trace_db") or (DATA_DIR / "traces.db"))
+EVAL_DB = str(CFG.get("eval_db") or (DATA_DIR / "evals.db"))
+EVAL_CASES = str(CFG.get("eval_cases") or (DATA_DIR / "eval_cases.json"))
+try:
+    traces.configure(TRACE_DB)
+    traces.prune(int(CFG.get("trace_retention_days") or 30))
+except Exception as exc:
+    log.warning("trace store unavailable: %s", exc)
+try:
+    evals.configure(EVAL_DB, EVAL_CASES)
+except Exception as exc:
+    log.warning("eval store unavailable: %s", exc)
+
 store = Store(CFG["db"])
 store.init()
 hub = Hub(BASE, CFG["hub"]["channel_key"], OWNER)
-llm = LLM(CFG["llm"]["base_url"], CFG["llm"]["api_key"], CFG["llm"]["model"])
+
+
+def _llm_options() -> dict:
+    cfg = CFG.get("llm") or {}
+    budgets = {
+        str(key)[len("daily_budget_"):]: float(value or 0)
+        for key, value in cfg.items()
+        if str(key).startswith("daily_budget_")
+    }
+    budgets.setdefault("owner", float(cfg.get("daily_budget_owner") or 0))
+    budgets.setdefault("guest", float(cfg.get("daily_budget_guest") or 0))
+    return {
+        "timeout": int(cfg.get("timeout") or 90),
+        "fallback_base_url": str(cfg.get("fallback_base_url") or ""),
+        "fallback_api_key": str(cfg.get("fallback_api_key") or ""),
+        "fallback_model": str(cfg.get("fallback_model") or ""),
+        "input_price_per_m": float(cfg.get("input_price_per_m") or 0),
+        "output_price_per_m": float(cfg.get("output_price_per_m") or 0),
+        "spend_db": str(cfg.get("spend_db") or (DATA_DIR / "spend.db")),
+        "budgets": budgets,
+    }
+
+
+llm = LLM(CFG["llm"]["base_url"], CFG["llm"]["api_key"], CFG["llm"]["model"],
+          **_llm_options())
 ATTACH_CFG = CFG.get("attachments") or {}
 ATTACHMENTS = Attachments(
     hub, llm,
@@ -140,6 +183,22 @@ SERVICE_TOKEN = CFG["service_token"]
 PUBLIC_BASE = CFG["public_base_url"].rstrip("/")
 CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 CODE_RE = re.compile(r"\b([" + CODE_ALPHABET + r"]{4})\b")
+
+OWNER_ONLY_PREFIXES = ("model_", "cost_", "budget_", "trace_", "eval_",
+                       "optimize_", "insight_")
+OWNER_ONLY_NAMES = {
+    "list_channels", "send_to_channel", "send_to_agent", "config_get",
+    "config_set", "list_jobs", "get_job", "set_job_interval",
+    "set_job_enabled", "list_plugins", "list_tools", "api_balance",
+    "reload_plugin", "enable_plugin", "disable_plugin", "fs_list", "fs_read",
+    "fs_write", "fs_replace", "fs_delete", "fs_move", "run_command",
+    "http_request", "send_media", "generate_image", "propose_plugin",
+}
+
+
+def owner_only_tool(name: str) -> bool:
+    base = str(name or "").split("__", 1)[-1]
+    return base in OWNER_ONLY_NAMES or base.startswith(OWNER_ONLY_PREFIXES)
 
 
 # ---------------------------------------------------------------------------
@@ -243,6 +302,7 @@ def send_text_to(endpoint_id: str, text: str) -> bool:
 
 
 def send_text(text: str) -> bool:
+    traces.note_output(str(text))
     return send_to_endpoint(CURRENT_ENDPOINT.get(), {"kind": "text", "text": text})
 
 
@@ -276,6 +336,29 @@ def new_code() -> str:
 
 
 def call_agent(agent: dict, payload: dict, timeout: int = 20) -> dict:
+    started = time.perf_counter()
+    trace_id = trace_ctx.get_trace_id()
+    try:
+        result = _call_agent_impl(agent, payload, timeout)
+        traces.span(
+            trace_id, "agent", str(agent.get("id") or ""), status="ok",
+            latency_ms=int((time.perf_counter() - started) * 1000),
+            detail={"transport": agent.get("transport") or "http",
+                    "task_id": result.get("task_id") if isinstance(result, dict) else None,
+                    "final": result.get("final") if isinstance(result, dict) else None},
+        )
+        return result
+    except Exception as exc:
+        traces.span(
+            trace_id, "agent", str(agent.get("id") or ""), status="error",
+            latency_ms=int((time.perf_counter() - started) * 1000),
+            detail={"transport": agent.get("transport") or "http",
+                    "error": str(exc)[:400]},
+        )
+        raise
+
+
+def _call_agent_impl(agent: dict, payload: dict, timeout: int = 20) -> dict:
     if agent.get("transport") == "poll":
         wait_seconds = int(CFG.get("agent_wait_seconds", 60))
         result, task_id, done = BROKER.enqueue(agent["id"], {
@@ -336,6 +419,9 @@ TOOLS = ToolRegistry()
 JOBS: list = []
 SERVICES: dict = {}
 SETTINGS = SettingsService(CFG, store, CONFIG_PATH)
+MODELS = models.ModelCatalog(CFG, save_fn=SETTINGS.save)
+SETTINGS.catalog = MODELS
+llm.configure(provider_resolver=MODELS.resolve)
 LOADER = PluginLoader(
     plugins_dir=Path("/app/plugins"),
     tools=TOOLS,
@@ -411,9 +497,13 @@ def reload_agents() -> None:
 
 def reload_llm() -> None:
     cfg = CFG.get("llm") or {}
-    llm.endpoint = str(cfg.get("base_url") or "").rstrip("/") + "/chat/completions"
-    llm.api_key = str(cfg.get("api_key") or "")
-    llm.model = str(cfg.get("model") or "")
+    llm.configure(
+        base_url=str(cfg.get("base_url") or ""),
+        api_key=str(cfg.get("api_key") or ""),
+        model=str(cfg.get("model") or ""),
+        **_llm_options(),
+        provider_resolver=MODELS.resolve,
+    )
 
 
 def reload_hub() -> None:
@@ -430,6 +520,19 @@ def reload_public() -> None:
 SETTINGS.attach(LOADER, SCHEDULER, rebuild_scheduler, refresh_services, TOOLS,
                 reload_agents=reload_agents, reload_llm=reload_llm,
                 reload_hub=reload_hub, reload_public=reload_public)
+
+CAPS = capabilities.CapabilityService(
+    TOOLS,
+    settings=SETTINGS,
+    catalog=MODELS,
+    llm=llm,
+    spend_path=llm.spend_db or str(DATA_DIR / "spend.db"),
+    reload_llm=reload_llm,
+    trace_path=TRACE_DB,
+    eval_db=EVAL_DB,
+    with_channels=False,
+)
+CAPS.register()
 
 
 def send_media_tool(args: dict) -> dict:
@@ -575,6 +678,7 @@ def build_system_prompt() -> str:
         "用户要求某个项目 Agent 做事时调用 send_to_agent，不要假装已经完成。",
         "用户说“发到QQ/微信/某个群”时，先调用 list_channels 确认入口，再调用 send_to_channel；不要猜 endpoint。",
         "结果默认回到当前会话；只有用户明确要求时才跨入口发送。",
+        "模型与运维：model_list / model_add / model_bind / model_switch_chat / cost_report / budget_set / trace_search / trace_explain / insight_report / eval_run / eval_drift / optimize_suggest / optimize_apply。只在站主明确要求时改模型或预算；不要擅自执行 optimize_apply。",
         "用户消息以 @AgentID 开头时，系统会直接路由到该 Agent，不经过你；你可以按普通对话理解。",
         "如果用户是在回复某条待处理通知，系统会先做匹配；你不需要猜。",
         "不确定用户指哪个 Agent 时，先反问一句。",
@@ -602,6 +706,8 @@ SYSTEM_PROMPT = build_system_prompt()
 
 
 def llm_answer(text: str, history: list[dict], allow_tools: bool = True) -> str:
+    trace_id = trace_ctx.get_trace_id()
+    role = trace_ctx.get_role()
     messages = [{"role": "system", "content": build_system_prompt()}]
     for item in history:
         if item["role"] in ("user", "assistant"):
@@ -609,9 +715,16 @@ def llm_answer(text: str, history: list[dict], allow_tools: bool = True) -> str:
     messages.append({"role": "user", "content": text})
     tool_trace: list[dict] = []
     seen: dict[str, dict] = {}
-    tool_defs = TOOLS.definitions() if allow_tools else None
+    is_owner = CURRENT_PRINCIPAL.get() == "owner"
+    if allow_tools and is_owner:
+        tool_defs = TOOLS.definitions()
+    elif allow_tools:
+        allowed = {name for name in TOOLS.names() if not owner_only_tool(name)}
+        tool_defs = TOOLS.definitions(allowed)
+    else:
+        tool_defs = None
     for round_no in range(6):
-        message = llm.complete(messages, tool_defs)
+        message = llm.complete(messages, tool_defs, role=role, trace_id=trace_id)
         calls = message.get("tool_calls") or []
         if not calls:
             return (message.get("content") or "").strip() or "我在，但这次没想出怎么回答。"
@@ -626,12 +739,21 @@ def llm_answer(text: str, history: list[dict], allow_tools: bool = True) -> str:
             signature = name + "|" + json.dumps(args, ensure_ascii=False, sort_keys=True, default=str)
             if signature in seen:
                 log.info("llm repeated tool call: %s", signature[:300])
+                traces.span(trace_id, "tool", name, status="error",
+                            detail={"args": args, "error": "repeated call"})
                 previous = json.dumps(seen[signature], ensure_ascii=False, default=str)[:2000]
                 return f"我重复调用了 {name}，先停一下。上一次结果是：\n{previous}\n你想继续查哪一部分？"
             seen[signature] = {"pending": True}
             log.info("llm round %s tool=%s args=%s", round_no, name,
                      json.dumps(args, ensure_ascii=False)[:300])
+            tool_started = time.perf_counter()
             result = TOOLS.execute(name, args)
+            traces.span(
+                trace_id, "tool", name,
+                status="error" if isinstance(result, dict) and result.get("error") else "ok",
+                latency_ms=int((time.perf_counter() - tool_started) * 1000),
+                detail={"args": args, "result": result},
+            )
             seen[signature] = result
             tool_trace.append({"name": name, "args": args, "result": result})
             log.info("llm tool result %s: %s", name, str(result)[:300])
@@ -641,7 +763,7 @@ def llm_answer(text: str, history: list[dict], allow_tools: bool = True) -> str:
         try:
             messages.append({"role": "user",
                              "content": "请基于以上工具结果直接回答，不要再调用工具；信息不足就说明缺什么。"})
-            final = llm.complete(messages, None)
+            final = llm.complete(messages, None, role=role, trace_id=trace_id)
             content = (final.get("content") or "").strip()
             if content:
                 return content
@@ -839,10 +961,44 @@ def handle_inbound(envelope: Envelope) -> None:
     endpoint = CHANNELS.endpoint(envelope.endpoint_id) or CHANNELS.ensure_endpoint(
         envelope.channel, envelope.endpoint_id, envelope.conversation_type
     )
+    principal = CHANNELS.principal(envelope.principal_id)
+    role = "owner" if (principal and principal.owner) else "guest"
     endpoint_token = CURRENT_ENDPOINT.set(endpoint.id)
     principal_token = CURRENT_PRINCIPAL.set(envelope.principal_id or "owner")
     try:
-        _handle_inbound(envelope, endpoint)
+        with trace_ctx.request(role=role) as trace_id:
+            token = traces.begin_capture()
+            started = time.perf_counter()
+            traces.start(
+                trace_id,
+                source=envelope.channel,
+                role=role,
+                session=endpoint.id,
+                channel=envelope.channel,
+                user_id=envelope.sender_id or envelope.principal_id,
+                input=envelope.text,
+                meta={"adapter": envelope.adapter,
+                      "conversation_type": envelope.conversation_type,
+                      "message_id": envelope.message_id},
+            )
+            status = "ok"
+            error = ""
+            try:
+                _handle_inbound(envelope, endpoint)
+            except Exception as exc:
+                status = "error"
+                error = str(exc)[:2000]
+                traces.span(trace_id, "inbound", "handler", status="error",
+                            latency_ms=int((time.perf_counter() - started) * 1000),
+                            detail=error)
+                raise
+            finally:
+                output = traces.end_capture(token)
+                failure = traces.take_failure()
+                if failure:
+                    status, error = failure
+                traces.finish(trace_id, status=status, error=error, output=output,
+                              latency_ms=int((time.perf_counter() - started) * 1000))
     finally:
         CURRENT_ENDPOINT.reset(endpoint_token)
         CURRENT_PRINCIPAL.reset(principal_token)
@@ -905,6 +1061,7 @@ def _handle_inbound(envelope: Envelope, endpoint) -> None:
                 store.log_route(key, text, "agent", agent_id)
             except Exception as exc:
                 log.warning("explicit agent call failed: %s", exc)
+                traces.mark_failed("agent_error", str(exc))
                 send_text(f"已经收到，但 {agent.get('name', agent_id)} 暂时没有响应。")
             return
     allow_tools = is_owner or CHANNELS.allow_guest_tools(envelope.channel)
@@ -912,9 +1069,15 @@ def _handle_inbound(envelope: Envelope, endpoint) -> None:
         answer = answer_with_attachments(text, history, bundle, allow_tools=allow_tools)
     except AttachmentError as exc:
         log.error("attachment vision failed: %s", exc)
+        traces.mark_failed("attachment_error", str(exc))
         answer = f"附件收到了，但识图失败：{exc}"
+    except LLMBudgetError as exc:
+        log.warning("llm budget exceeded: %s", exc)
+        traces.mark_failed("budget_exceeded", str(exc))
+        answer = exc.user_message
     except LLMError as exc:
         log.error("llm failed: %s", exc)
+        traces.mark_failed("llm_error", str(exc))
         answer = "AI 暂时不可用，稍后我再试。"
     detail = "attachment" if has_attachments else ""
     detail = f"{endpoint.id}|{envelope.principal_id}|{detail}"
@@ -1029,7 +1192,9 @@ def health():
     return {"ok": True, "time": now_iso(), "agents": list(AGENTS), "tools": TOOLS.names(),
             "jobs": list(SCHEDULER.jobs), "plugins": list(LOADER.loaded),
             "plugin_errors": LOADER.errors, "services": list(SERVICES),
-            "credentials": list(CREDENTIALS), "agent_broker": BROKER.status()}
+            "credentials": list(CREDENTIALS), "agent_broker": BROKER.status(),
+            "model_bindings": MODELS.list()["bindings"],
+            "trace_store": traces.enabled(), "eval_store": evals.enabled()}
 
 
 @app.post("/v1/notify")

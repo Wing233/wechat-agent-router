@@ -13,6 +13,15 @@
 - 新增 `examples/koishi-bridge`（QQ）
 - 新增 `docs/channels.md`
 
+自然语言运维：
+- 新增 `models.py` 模型目录与 `model_bindings` 角色绑定，支持免费模型优先、失败 fallback
+- 新增 `spend.py` 成本账本与 `cost_report` / `budget_set`
+- 新增 `traces.py` 请求级全链路追踪与 `trace_search` / `trace_get` / `trace_explain`
+- 新增 `evals.py` 确定性评测、`eval_run` / `eval_report` / `eval_drift`
+- 新增 `insights.py` 异常归因与 `insight_report` / `optimize_suggest` / `optimize_apply`
+- 新增 `docs/capabilities.md`
+- `config.json` 新增 `trace_db`、`eval_db`、`eval_cases`、`model_bindings`、`spend_db`
+
 ## 1.1.1 — 2026-10-30
 
 文档与分发更新，无破坏性代码改动。

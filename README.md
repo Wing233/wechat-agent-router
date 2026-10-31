@@ -40,6 +40,7 @@
 - [架构](#架构)
 - [消息是怎么流转的](#消息是怎么流转的)
 - [内置插件](#内置插件)
+- [自然语言运维](#自然语言运维)
 - [5 分钟跑起来](#5-分钟跑起来)
 - [本机 Agent](#本机-agent)
 - [桌面控制台](#桌面控制台)
@@ -334,6 +335,80 @@ stateDiagram-v2
 > `leetcode` 和 `evolution` 在示例配置里默认禁用：一个涉及第三方平台 ToS，一个能生成并安装代码。请阅读 [安全模型](#安全模型) 后再启用。
 
 ---
+
+## 自然语言运维
+
+这些运维能力不做传统管理页。模型、成本、链路、评测和优化都是普通工具，站主在微信、QQ 或任意已接入入口说一句话即可。
+
+| 你想做什么 | 直接说 | 工具 |
+|---|---|---|
+| 看当前模型 | “现在用的什么模型？” | `model_list` |
+| 加一个免费模型 | “加一个免费模型，地址是 …，key 是 …” | `model_add` |
+| 切换主模型 | “把 chat 切到 xxx” | `model_switch_chat` |
+| 低风险任务省钱 | “低风险角色先用免费模型，失败再用主模型” | `model_bind` |
+| 看花费 | “这个月花了多少？” | `cost_report` |
+| 限制访客成本 | “访客每天最多花 1 块” | `budget_set` |
+| 查某条消息 | “刚才 QQ 那条为什么失败？” | `trace_search` + `trace_explain` |
+| 看整体健康 | “今天整体怎么样？” | `insight_report` |
+| 跑质量评测 | “跑一下评测” | `eval_run` |
+| 判断模型退化 | “最近模型是不是变差了？” | `eval_drift` |
+| 做配置优化 | “帮我看看哪里还能省/哪里不稳” | `optimize_suggest` |
+| 执行优化建议 | “按第一条建议改” | `optimize_apply` |
+
+### 模型角色与免费优先
+
+`config.json` 的 `model_bindings` 把用途映射到模型列表：
+
+```json
+{
+  "chat": ["deepseek-chat"],
+  "vision": ["qwen-vl", "deepseek-chat"],
+  "control": ["free-model", "deepseek-chat"],
+  "job.default": ["free-model", "deepseek-chat"],
+  "plugin.default": ["free-model", "deepseek-chat"]
+}
+```
+
+列表按顺序尝试：免费模型失败会自动落到后面的付费模型。`job.*` 和 `plugin.*` 会先找精确角色，再找 `job.default` / `plugin.default`，最后回退到 `chat`。
+
+### 全链路追踪
+
+每条入站消息生成 12 位 trace id，记录来源、会话、用户、身份、模型调用、工具调用、耗时、token、成本和最终回复。日志行也带同一个 trace id，可以直接 grep：
+
+```bash
+docker logs wechat-agent-router 2>&1 | grep 4f6456aee642
+```
+
+`trace_explain` 给出确定性归因：预算、401/403、429、超时、5xx、网络、工具错误、空回复、慢请求等。它不会让模型猜。
+
+### 成本与预算
+
+- 每次模型调用写入 `data/spend.db`，按 Asia/Shanghai 自然日统计。
+- `cost_report` 按天、角色、模型拆分；`budget_set` 设置每日上限，0 表示不限。
+- 预算在调用前检查，超限直接返回中文提示，不会产生额外费用。
+
+### 质量评测与漂移
+
+默认 8 条评测用例覆盖算术、翻译、JSON、拒答、日期、单位、简洁性和单句约束。`eval_run` 记录分数、逐用例结果、延迟和成本；`eval_drift` 把最近几次 run 与 baseline 比较：
+
+- 下降 ≥ 10 分：`drifting`
+- 下降 5–10 分：`watch`
+- 上升 ≥ 10 分：`improving`
+- 数据不足：`insufficient`
+
+评测只测“不调用工具时的基础质量”，不是 MMLU，也不替代真实业务回归；它的价值是低成本、可重复、能看出换模型后的明显退化。
+
+### 跨入口投递
+
+`send_to_channel` 把结果发到别的入口：
+
+```text
+把这条发到 QQ 群：今晚的站点报告已经生成
+```
+
+`send_to_channel` 用 `endpoint` 指定目标（例如 `qq:group:123456`）。Router 写入 `channel_outbound`，桥接端轮询、发送、再 ack；语义是“至少一次”，通知类消息可接受偶发重复。微信仍走 Hub，普通回复自动回到来源会话。
+
+完整说明、数据文件、安全边界和已知限制见 [docs/capabilities.md](docs/capabilities.md)。
 
 ## 5 分钟跑起来
 
