@@ -56,7 +56,7 @@ Router  ──  认证、路由、工具、审批
 
 ## 自然语言运维的边界
 
-- `model_*`、`cost_report`、`budget_set`、`trace_*`、`eval_*`、`optimize_*` 都不在访客白名单里，只有站主可调用。
+- `model_*`、`cost_report`、`budget_set`、`trace_*`、`eval_*`、`optimize_*` 都会被 `owner_only_tool` 过滤，只有站主可调用。
 - `model_list` / `config_get` 只返回脱敏 key；trace、spend、eval 不记录 API key。
 - `model_add` 更新已有模型时，传 `***` 或带 `...` 的 key 会保留原 key。
 - `send_to_channel` 只能发到已配置且启用的入口，或固定发站主的微信；不能指定任意 URL。
