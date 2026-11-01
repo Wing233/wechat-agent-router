@@ -36,6 +36,8 @@ try:
 except ImportError:  # pragma: no cover - keeps the plugin importable standalone
     governance = None
 
+from executor_client import ExecutorClient
+
 CST = timezone.utc
 MAX_OUTPUT = 8000
 MAX_PATCH = 64 * 1024
@@ -83,6 +85,7 @@ class Toolbox:
         self._init_db()
         if governance is not None:
             governance.set_mandate_store(self)
+        self.executor = ExecutorClient(ctx)
 
     def _conn(self):
         conn = sqlite3.connect(self.db_path, timeout=10)
@@ -195,6 +198,11 @@ class Toolbox:
         if not code.strip():
             return {"error": "code 不能为空"}
         timeout = max(3, min(int(args.get("timeout") or 30), 120))
+        if self.executor.enabled:
+            try:
+                return self.executor.python(code, timeout)
+            except Exception as exc:
+                return {"error": f"隔离执行器不可用：{exc}"}
         cwd = Path("/workspace")
         if not cwd.is_dir():
             cwd = Path("/tmp")
@@ -215,6 +223,11 @@ class Toolbox:
         if not command:
             return {"error": "command 不能为空"}
         timeout = max(3, min(int(args.get("timeout") or 60), 120))
+        if self.executor.enabled:
+            try:
+                return self.executor.shell(command, timeout, sandbox=True)
+            except Exception as exc:
+                return {"error": f"隔离执行器不可用：{exc}"}
         base = Path("/workspace")
         if not base.is_dir():
             base = Path("/tmp")

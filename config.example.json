@@ -29,6 +29,11 @@
     "github_token": "",
     "slack_webhook": ""
   },
+  "executor": {
+    "mode": "host",
+    "url": "http://executor:9800",
+    "token": "REPLACE_EXECUTOR_TOKEN"
+  },
   "geo": {
     "vendor_dir": "/app/vendor",
     "v4": "/geodb/ip2region_v4.xdb",
