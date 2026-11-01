@@ -147,7 +147,9 @@ def build_digest_text(items: list[dict], overview: str, date: str) -> str:
             f"{item.get('language') or '未知语言'}{suffix}")
         description = str(item.get("description") or "").strip()
         if description:
-            lines.append(f"   {description[:180]}")
+            if len(description) > 180:
+                description = description[:177].rstrip() + "..."
+            lines.append(f"   {description}")
         if item.get("today_stars"):
             lines.append(f"   今日 +{format_stars(item.get('today_stars'))}")
     lines.extend(["", "回复“评估 1”或“评估 owner/repo”让我深入分析；回复“看 1,3”也可以。"])
@@ -264,6 +266,19 @@ class TrendingService:
                 items = self._search_fallback()
             except Exception as exc:
                 self.ctx.log.warning("github trending fallback failed: %s", exc)
+        elif len(items) < self.count:
+            try:
+                extra = self._search_fallback()
+                known = {str(item.get("repo") or "").lower() for item in items}
+                for item in extra:
+                    repo = normalize_repo(str(item.get("repo") or ""))
+                    if repo and repo.lower() not in known:
+                        items.append(item)
+                        known.add(repo.lower())
+                    if len(items) >= self.count:
+                        break
+            except Exception as exc:
+                self.ctx.log.warning("github trending fill fallback failed: %s", exc)
         deduped: list[dict] = []
         seen: set[str] = set()
         for item in items:
