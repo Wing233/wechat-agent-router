@@ -23,6 +23,13 @@ Agent（本机 local-agent / lyph / 其他 HTTP Agent）
 
 ## 首次使用主路径
 
+### 0. 前置
+
+- Docker / Docker Compose。
+- 一个 OpenILink Hub（或兼容的消息 Hub），Router 通过它收发微信消息。
+- `lyph-api:0.1.0` 基础镜像；`Dockerfile` 以它为 `FROM`。
+- 如果还没有 `openilink-hub_default` / `lyph_private` 网络，先启动对应服务，或从 `docker-compose.yml` 删掉暂时不用的 external network。
+
 ### 1. 准备配置
 
 ```bash
