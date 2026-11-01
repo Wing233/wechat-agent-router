@@ -152,6 +152,13 @@ Router 会先落库入站消息，再创建 Agent 任务；Agent 领取后执行
 ## 测试
 
 ```bash
+bash scripts/ci.sh
+```
+
+它等价于：
+
+```bash
+python -m py_compile app.py agent_broker.py executor_client.py executor/server.py governance.py registry.py store.py
 python -m pytest -q tests
 ```
 
