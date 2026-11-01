@@ -32,6 +32,7 @@ from channels import ChannelManager
 from data import CST, SiteData
 import evals
 from geo import Geo
+import help_center
 from hub import Hub, HubError, parse_quote, parse_text
 from imagegen import ImageGen
 import koishi_auth as ka
@@ -61,6 +62,7 @@ GUEST_TOOLS = {
     "websearch__web_fetch",
     "websearch__weather",
     "websearch__calculator",
+    "show_help",
 }
 
 
@@ -472,6 +474,33 @@ CAPS = capabilities.CapabilityService(
 CAPS.register()
 
 
+def show_help_tool(args: dict) -> dict:
+    origin = ORIGIN.get() or {}
+    role = str(origin.get("role") or trace_ctx.get_role() or "owner")
+    return {
+        "role": role,
+        "text": help_center.build_help(
+            role=role,
+            channel=str(origin.get("platform") or origin.get("channel") or "微信"),
+            endpoint=str(origin.get("chat_id") or ""),
+            chat_type=str(origin.get("chat_type") or ""),
+            tool_names=TOOLS.names(),
+            agents=AGENTS,
+            plugins=LOADER.loaded.keys(),
+            model_bindings=MODELS.list().get("bindings") or {},
+        ),
+    }
+
+
+TOOLS.register(
+    "show_help",
+    "当用户问 help、你能做什么、有哪些功能、怎么用时，返回完整能力清单和示例。不要凭空列能力。",
+    {"type": "object", "properties": {}},
+    show_help_tool,
+    aliases=("help", "capabilities"),
+)
+
+
 def send_media_tool(args: dict) -> dict:
     raw = str(args.get("path") or "").strip()
     if not raw:
@@ -591,6 +620,7 @@ def build_system_prompt(origin: dict | None = None, role: str = "owner") -> str:
             "- 文件：fs_list / fs_read / fs_write / fs_replace / fs_delete / fs_move 可读写 /app、/lyph-src、/workspace，默认立即生效。",
             "- 网络：web_search 搜实时信息，web_fetch 读网页正文，http_request 调任意公开 API。",
             "- 入口：list_channels 查看微信/QQ 等已接入入口；send_to_channel 把消息发到指定入口，不传 chat_id 时发到该入口最近活跃会话。",
+            "- 用户问“你能做什么 / help / 有哪些功能 / 怎么用”时调用 show_help，不要凭空列能力。",
             "- 模型与成本：model_list / model_add / model_bind / model_switch_chat / model_test 管理模型；cost_report / budget_set 看花费和预算；trace_search / trace_get / trace_explain 查链路；eval_run / eval_drift 看质量；insight_report / optimize_suggest / optimize_apply 做诊断和优化。",
             "- 本机或长任务：send_to_agent 派给已注册的项目 Agent（例如 pc-home）。",
             "如果确实缺少必要信息或工具，说明缺什么、你试过什么，不要用“我做不到”敷衍。",
@@ -884,6 +914,13 @@ def _handle_inbound_impl(text: str, message: dict, origin: dict | None = None) -
     display = text or ("[图片]" if bundle.get("images") else "[附件]")
     store.add_message(session_id, "user", display)
     flush_outbox()
+
+    if help_center.is_help_request(text):
+        answer = str(show_help_tool({}).get("text") or "")
+        store.log_route(session_id, display, "help")
+        store.add_message(session_id, "assistant", answer)
+        send_text(answer)
+        return
 
     if origin is None and text in {"力扣登录", "更新力扣", "绑定力扣", "leetcode登录"}:
         if LEETCODE is not None:
