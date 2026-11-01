@@ -81,7 +81,7 @@ DEFAULT_CONFIG = {
             "exclude_projects": ["scratch", "data", "backups",
                                   "agent-router-merge", "agent-router-session",
                                   "agent-router-task-state", "agent-router-trending",
-                                  "agent-router-media"],
+                                  "agent-router-media", "agent-router-worklog"],
         },
         "codex": {"enabled": True, "root": str(Path.home() / ".codex" / "sessions")},
         "workbuddy": {"enabled": False},
