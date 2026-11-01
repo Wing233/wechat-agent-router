@@ -16,6 +16,8 @@ import subprocess
 import urllib.parse
 import urllib.request
 
+from executor_client import ExecutorClient
+
 DEFAULT_CWD = "/app"
 ALLOWED_CWD = ("/app", "/lyph-src", "/workspace", "/data", "/lyph-data", "/tmp")
 MAX_OUTPUT = 8000
@@ -75,6 +77,7 @@ class _SafeRedirect(urllib.request.HTTPRedirectHandler):
 
 def apply(ctx) -> None:
     store = ctx.resource("store")
+    executor = ExecutorClient(ctx)
 
     def run_command(args: dict) -> dict:
         command = str(args.get("command") or "").strip()
@@ -85,6 +88,21 @@ def apply(ctx) -> None:
         for pattern in DENY_PATTERNS:
             if re.search(pattern, command, re.IGNORECASE):
                 return {"error": "这条命令会破坏运行环境，已拒绝。需要重建容器请手动操作。"}
+        if executor.enabled:
+            cwd = str(args.get("cwd") or "/workspace").strip()
+            if not (cwd == "/workspace" or cwd.startswith("/workspace/")):
+                return {"error": "隔离模式只允许 /workspace 下的目录"}
+            try:
+                timeout = max(3, min(int(args.get("timeout") or 60), 120))
+            except (TypeError, ValueError):
+                timeout = 60
+            store.log_plugin_event(
+                "devtools", "exec", f"isolated {cwd}: {command[:300]}")
+            try:
+                return executor.shell(
+                    command, timeout, cwd=cwd, sandbox=False)
+            except Exception as exc:
+                return {"error": f"隔离执行器不可用：{exc}"}
         cwd = str(args.get("cwd") or DEFAULT_CWD).strip()
         if not cwd.startswith("/"):
             return {"error": "cwd 必须是绝对路径"}

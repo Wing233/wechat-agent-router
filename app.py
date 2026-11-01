@@ -32,6 +32,7 @@ from channels import ChannelManager
 from data import CST, SiteData
 import evals
 from geo import Geo
+import governance
 import help_center
 from hub import Hub, HubError, parse_quote, parse_text
 from imagegen import ImageGen
@@ -43,7 +44,7 @@ import sso_routes
 from plugin_loader import PluginError, PluginLoader
 from registry import JobScheduler, ToolRegistry
 from settings_service import SettingsService
-from store import Store, now_iso
+from store import INBOUND_MAX_ATTEMPTS, Store, now_iso
 import traces
 import trace_ctx
 
@@ -103,6 +104,9 @@ trace_ctx.install_logging()
 CONFIG_PATH = os.environ.get("ROUTER_CONFIG", "/app/config.json")
 with open(CONFIG_PATH, "r", encoding="utf-8") as fh:
     CFG = json.load(fh)
+governance.set_executor_policy(
+    str((CFG.get("executor") or {}).get("mode") or "host"),
+    bool((CFG.get("executor") or {}).get("allow_control_plane", False)))
 
 BASE = CFG["hub"]["base_url"]
 OWNER = CFG["hub"]["owner_id"]
@@ -125,6 +129,8 @@ except Exception as exc:
     log.warning("eval store unavailable: %s", exc)
 
 store = Store(CFG["db"])
+store.init()
+BROKER.attach_store(store)
 hub = Hub(BASE, CFG["hub"]["channel_key"], OWNER)
 geo = Geo(CFG["geo"]["vendor_dir"], CFG["geo"]["v4"], CFG["geo"].get("v6", ""))
 site = SiteData(
@@ -188,6 +194,7 @@ SERVICE_TOKEN = CFG["service_token"]
 PUBLIC_BASE = CFG["public_base_url"].rstrip("/")
 CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 CODE_RE = re.compile(r"\b([" + CODE_ALPHABET + r"]{4})\b")
+APPROVAL_AGENTS = {"toolbox", "ops", "evolution"}
 
 
 # ---------------------------------------------------------------------------
@@ -316,18 +323,36 @@ def call_agent(agent: dict, payload: dict, timeout: int = 20) -> dict:
 def _call_agent_impl(agent: dict, payload: dict, timeout: int = 20) -> dict:
     if agent.get("transport") == "poll":
         wait_seconds = int(CFG.get("agent_wait_seconds", 60))
-        result, task_id, done = BROKER.enqueue(agent["id"], {
+        online = BROKER.is_online(agent["id"])
+        result, task_id, status, task = BROKER.enqueue(agent["id"], {
             "message": payload.get("reply", ""),
             "engine": payload.get("engine", ""),
             "workspace": payload.get("workspace", ""),
             "chat_id": payload.get("chat_id", OWNER),
             "meta": payload.get("meta") or {},
             "wait_seconds": wait_seconds,
-        }, wait_seconds)
-        if result:
-            return {"text": result.get("text", ""), "final": True}
-        return {"text": f"任务已交给 {agent.get('name', agent['id'])}，完成后会通知你。",
-                "final": False, "task_id": task_id}
+        }, wait_seconds if online else 0)
+        name = agent.get("name", agent["id"])
+        short = task_id[:8]
+        if status == "completed":
+            text = str((result or {}).get("text") or "任务已完成。")
+            if BROKER.claim_delivery(task_id):
+                return {"text": text, "final": True, "task_id": task_id}
+            return {"text": "", "final": True, "silent": True,
+                    "task_id": task_id}
+        if status in {"claimed", "running"}:
+            return {"text": f"任务 {short} 已被 {name} 领取，正在执行；完成后通知你。",
+                    "final": False, "task_id": task_id}
+        if status == "queued":
+            reason = "当前没有领取（可能离线或忙）" if not online else "还没有领取"
+            return {"text": f"{name} {reason}，任务 {short} 已排队；它领取后会通知你。",
+                    "final": False, "task_id": task_id}
+        if status in {"failed", "expired"}:
+            error = str((task or {}).get("error") or status)[:300]
+            return {"text": f"任务 {short} 失败：{error}", "final": True,
+                    "task_id": task_id}
+        return {"text": f"任务 {short} 当前状态：{status}", "final": False,
+                "task_id": task_id}
     timeout = max(1, int(agent.get("timeout") or timeout))
     body = json.dumps(payload, ensure_ascii=False).encode()
     sig = hmac.new(agent.get("callback_secret", "").encode(), body, hashlib.sha256).hexdigest()
@@ -351,6 +376,8 @@ def agent_auth(request: Request) -> dict:
 
 
 def send_agent_result(result: dict) -> None:
+    if result.get("silent"):
+        return
     text = (result.get("text") or "").strip()
     image = result.get("image_base64")
     if image:
@@ -381,10 +408,10 @@ LOADER = PluginLoader(
     tools=TOOLS,
     jobs=JOBS,
     resources={"site": site, "geo": geo, "store": store, "agents": AGENTS,
-               "call_agent": call_agent, "settings": SETTINGS},
+               "call_agent": call_agent, "settings": SETTINGS, "llm": llm},
     root_config={"jobs": CFG.get("jobs", {}), "plugins": CFG.get("plugins", {}), "owner": OWNER,
                  "websearch": CFG.setdefault("websearch", {"provider": "bing", "default_count": 5}),
-                 "toolbox": CFG.get("toolbox", {})},
+                 "toolbox": CFG.get("toolbox", {}), "executor": CFG.get("executor", {})},
     send_fn=send_text,
     services=SERVICES,
     secrets={"credential_key": CFG["credential_key"], "service_token": SERVICE_TOKEN,
@@ -392,6 +419,7 @@ LOADER = PluginLoader(
              "web_search_api_key": (CFG.get("websearch") or {}).get("api_key", ""),
              "github_token": (CFG.get("toolbox") or {}).get("github_token", ""),
              "slack_webhook": (CFG.get("toolbox") or {}).get("slack_webhook", ""),
+             "executor_token": (CFG.get("executor") or {}).get("token", ""),
              "ops_token": (CFG.get("ops_agent") or {}).get("token", "")},
     login_url_fn=login_url,
     audit_fn=lambda plugin_id, action, detail: store.log_plugin_event(plugin_id, action, detail),
@@ -560,7 +588,8 @@ TOOLS.register(
 )
 
 
-def build_system_prompt(origin: dict | None = None, role: str = "owner") -> str:
+def build_system_prompt(origin: dict | None = None, role: str = "owner",
+                        classification: str = "") -> str:
     lines = [
         CFG["llm"].get("system_prompt", ""),
         "",
@@ -568,9 +597,11 @@ def build_system_prompt(origin: dict | None = None, role: str = "owner") -> str:
         "你在即时通讯软件里服务站主。回答要简洁、口语化，不要 Markdown 表格。",
         "站点访问、访客、IP 归属地、AI 对话内容必须调用工具查询，绝不能编造数字；查不到就直说。",
         "涉及实时信息、新闻、价格、政策、人物、产品、网页内容时，先调用 web_search；需要读全文时用 web_fetch；不要凭记忆编造。",
+        "用户问 GitHub trending、每日开源项目、某个项目值不值得借鉴/接入时，调用 github_trending 的 trending_now / trending_list / trending_evaluate，不要凭记忆编造。",
         "涉及用户长期偏好、项目约定或以前解决过的问题时，先调用 memory_search；解决可复用的问题后用 learn_skill 固化。",
-        "高危操作先调用 ask_human_confirmation，等主人回复 APPROVE 并用 confirm_action 确认后再执行。",
-        "需要跑代码用 python_repl 或 run_sandbox；改代码用 write_patch；回滚用 snapshot_checkpoint。",
+        "高危操作必须先调用 ask_human_confirmation，并传 tool（工具名）和 args（将执行参数）；拿到 code 后结束本轮，等主人回复 APPROVE；执行时把 code 作为 mandate 传给高危工具。",
+        "写入长期记忆或技能（memory_update / learn_skill）也属于高危操作，同样要先申请 mandate。",
+        "需要跑代码用 python_repl 或 run_sandbox；改代码用 write_patch；回滚用 snapshot_checkpoint。这些工具没有 mandate 会被硬拒绝。",
         "复杂任务可用 delegate_to_subagent 派给已注册 Agent；定时任务用 schedule_cron。",
         "力扣/LeetCode/刷题/做题相关的问题调用 leetcode_stats。",
         "用户发图片或文件时，系统会把图片交给视觉模型、把文件文字附在消息里；只根据实际提供的内容回答，不要假装看到了没读到的东西。",
@@ -604,6 +635,51 @@ def build_system_prompt(origin: dict | None = None, role: str = "owner") -> str:
             f"身份：{'主人' if role == 'owner' else '访客'}",
             "你的回复会自动发回当前渠道，不要假设用户在微信里。",
         ])
+    if classification == governance.READ_ONLY:
+        lines.extend([
+            "",
+            "## 本轮准入：只读",
+            "本轮是只读问答。只能调用只读工具；不要调用执行、写入、删除、发送、配置、审批类工具。",
+            "如果主人实际想让你动手，告诉主人用明确指令重新发起，例如“执行：重启 router”。",
+        ])
+    elif classification == governance.ACTION_EXPLICIT:
+        lines.extend([
+            "",
+            "## 本轮准入：明确动作",
+            "本轮是主人明确动作请求。可以调用工具；高危工具必须带 mandate 审批码，或处于生效中的会话授权内。",
+        ])
+    if role == "owner" and SERVICES.get("toolbox"):
+        try:
+            approved = SERVICES["toolbox"].recent_approved(limit=3)
+        except Exception:
+            approved = []
+        if approved:
+            lines.extend([
+                "",
+                "## 已批准的审批码",
+                "这些审批码已由主人批准，可在对应高危工具中作为 mandate 使用；过期、撤销或用完即失效。",
+            ])
+            for item in approved:
+                lines.append(
+                    f"- {item.get('code', '')}：{item.get('tool') or item.get('action') or ''}，"
+                    f"剩余 {item.get('remaining', 1)} 次，{item.get('expires_at', '')} 到期"
+                )
+        try:
+            sessions = SERVICES["toolbox"].list_sessions(limit=3)
+        except Exception:
+            sessions = {}
+        session_items = sessions.get("items") or []
+        if session_items:
+            lines.extend([
+                "",
+                "## 当前会话授权",
+                "以下授权已生效；高危工具可以直接调用，系统会自动按 scope 校验，不需要再申请 mandate。",
+            ])
+            for item in session_items:
+                lines.append(
+                    f"- {item.get('label') or item.get('preset')}：剩余 "
+                    f"{item.get('remaining_minutes')} 分钟，剩余 {item.get('remaining')} 次"
+                )
     if role != "owner":
         lines.extend([
             "",
@@ -615,7 +691,9 @@ def build_system_prompt(origin: dict | None = None, role: str = "owner") -> str:
         lines.extend([
             "",
             "## 主人权限（完整）",
-            "对方是主人本人，不需要再确认身份。你能动手的事就直接动手做完，再汇报结果，不要只说做不到。",
+            "对方是主人本人，不需要再确认身份。在明确动作轮次，能动手的事就直接动手做完，再汇报结果，不要只说做不到。",
+            "- 高危工具（python_repl、run_sandbox、write_patch、snapshot restore、delegate_to_subagent、webhook_post、mcp_call、文件写入/删除、配置修改、记忆/技能写入、模型/渠道/预算变更、trace 读取等）必须带 mandate 审批码；没有审批码会被硬拒绝。",
+            "- 主人可以用“开发模式 2 小时”“运维 30 分钟”“模型 30 分钟”“授权全部 1 小时”开启会话授权；用“查看授权”“取消授权”管理。会话授权内高危工具直接执行，到期自动失效。",
             "- 服务器命令：run_command 可以在容器里执行 shell，用于装依赖、跑测试、git、看日志、处理文件；一次一条，别执行破坏性命令。",
             "- 文件：fs_list / fs_read / fs_write / fs_replace / fs_delete / fs_move 可读写 /app、/lyph-src、/workspace，默认立即生效。",
             "- 网络：web_search 搜实时信息，web_fetch 读网页正文，http_request 调任意公开 API。",
@@ -631,11 +709,16 @@ def build_system_prompt(origin: dict | None = None, role: str = "owner") -> str:
 SYSTEM_PROMPT = build_system_prompt()
 
 
+_DEFAULT_ALLOWED = object()
+
+
 def llm_answer(text: str, history: list[dict], origin: dict | None = None,
-               role: str = "owner") -> str:
+               role: str = "owner", classification: str = "",
+               allowed=_DEFAULT_ALLOWED) -> str:
     trace_id = trace_ctx.get_trace_id()
-    messages = [{"role": "system", "content": build_system_prompt(origin, role)}]
-    allowed = None if role == "owner" else GUEST_TOOLS
+    if allowed is _DEFAULT_ALLOWED:
+        allowed = None if role == "owner" else GUEST_TOOLS
+    messages = [{"role": "system", "content": build_system_prompt(origin, role, classification)}]
     for item in history:
         if item["role"] in ("user", "assistant"):
             messages.append({"role": item["role"], "content": item["content"]})
@@ -667,15 +750,19 @@ def llm_answer(text: str, history: list[dict], origin: dict | None = None,
             log.info("llm round %s tool=%s args=%s", round_no, name,
                      json.dumps(args, ensure_ascii=False)[:300])
             tool_started = time.perf_counter()
-            if allowed is not None and name not in allowed:
+            canonical = TOOLS.canonical(name)
+            if allowed is not None and canonical not in allowed:
                 result = {"error": "当前会话是只读模式，不能调用这个工具"}
+            elif classification and not governance.tool_allowed(
+                    canonical, classification, role, allowed):
+                result = {"error": f"本轮准入（{classification}）不允许调用 {canonical}"}
             else:
                 result = TOOLS.execute(name, args)
             traces.span(
                 trace_id, "tool", name,
                 status="error" if isinstance(result, dict) and result.get("error") else "ok",
                 latency_ms=int((time.perf_counter() - tool_started) * 1000),
-                detail={"args": args, "result": result},
+                detail={"args": args, "result": result, "classification": classification},
             )
             seen[signature] = result
             tool_trace.append({"name": name, "args": args, "result": result})
@@ -739,36 +826,62 @@ def match_quote(quoted: str, pending: list[dict]) -> dict | None:
 
 def match_pending(text: str, chat_id: str, quote: dict | None = None) -> dict | str | None:
     pending = store.active_pending(chat_id)
-    match = CODE_RE.search(text.upper())
+    approval = governance.parse_approval(text)
+
+    def _check(item: dict):
+        if item.get("agent_id") in APPROVAL_AGENTS:
+            if approval is None:
+                if str(item.get("code") or "").upper() in (text or "").upper():
+                    return "NEED_APPROVAL"
+                return None
+            if approval.code != str(item.get("code") or "").upper():
+                return "INVALID_CODE"
+        return item
+
+    if approval is not None:
+        found = store.by_code(approval.code, chat_id)
+        if not found:
+            return "INVALID_CODE"
+        return _check(found)
+
+    match = CODE_RE.search((text or "").upper())
     if match:
-        found = store.by_code(match.group(1))
+        found = store.by_code(match.group(1), chat_id)
         if found:
-            return found
+            return _check(found)
+
     quoted = str((quote or {}).get("text") or (quote or {}).get("title") or "").strip()
     if quote is not None:
         qmatch = CODE_RE.search(quoted.upper())
         if qmatch:
-            found = store.by_code(qmatch.group(1))
+            found = store.by_code(qmatch.group(1), chat_id)
             if found:
-                return found
+                return _check(found)
         # A quoted message is an explicit target. If it is not one of the
         # pending notifications, treat this as a normal chat message.
         found = match_quote(quoted, pending)
         if found:
-            return found
+            return _check(found)
         return None
     if len(pending) == 1:
-        return pending[0]
+        return _check(pending[0])
     if len(pending) > 1:
         short = text.strip().lower()
         if short in {"好了", "已登录", "完成", "ok", "好", "可以了", "登录好了"}:
             newest = pending[0]
-            try:
-                age = time.time() - datetime.fromisoformat(newest["created_at"]).timestamp()
-            except Exception:
-                age = 9999
-            if age < 600:
-                return newest
+            if newest.get("agent_id") not in APPROVAL_AGENTS:
+                try:
+                    age = time.time() - datetime.fromisoformat(newest["created_at"]).timestamp()
+                except Exception:
+                    age = 9999
+                if age < 600:
+                    return newest
+        code_match = CODE_RE.search((text or "").upper())
+        known_code = bool(code_match and any(
+            str(item.get("code") or "").upper() == code_match.group(1)
+            for item in pending))
+        if approval is None and not known_code:
+            return None
         lines = ["现在有多个待回复，请带上编号回我："]
         for item in pending[:5]:
             lines.append(f"- {item['code']}：{item['agent_id']}，{item['text'][:40]}")
@@ -777,12 +890,32 @@ def match_pending(text: str, chat_id: str, quote: dict | None = None) -> dict | 
     return None
 
 
-def handle_reply(notification: dict, text: str) -> None:
+def handle_reply(notification: dict, text: str, approved_by: str = "") -> None:
     agent = AGENTS.get(notification["agent_id"])
+    approval = governance.parse_approval(text)
+    strict = notification["agent_id"] in APPROVAL_AGENTS
+    if strict:
+        if approval is None:
+            send_text("请回复 APPROVE 码 或 REJECT 码。")
+            return
+        if any(word in text.lower() for word in (
+                "不要", "别", "先别", "取消", "不执行")):
+            send_text("审批文本包含否定词，请只回复 APPROVE 码 或 REJECT 码。")
+            return
+        if approval.code != str(notification.get("code") or "").upper():
+            send_text("确认码不匹配，请重新回复。")
+            return
+        text_for_handler = "APPROVE" if approval.approved else "REJECT"
+    else:
+        text_for_handler = text
+    if (notification["agent_id"] in {"evolution", "ops", "toolbox"}
+            and not SERVICES.get(notification["agent_id"])):
+        send_text("确认服务暂时不可用，请稍后再试。")
+        return
     store.mark_replied(notification["id"], text)
     if notification["agent_id"] == "evolution" and SERVICES.get("evolution"):
         try:
-            result = SERVICES["evolution"].handle_reply(notification, text)
+            result = SERVICES["evolution"].handle_reply(notification, text_for_handler)
             send_agent_result(result)
             store.set_status(notification["id"], "answered")
         except Exception as exc:
@@ -791,7 +924,7 @@ def handle_reply(notification: dict, text: str) -> None:
         return
     if notification["agent_id"] == "ops" and SERVICES.get("ops"):
         try:
-            result = SERVICES["ops"].handle_reply(notification, text)
+            result = SERVICES["ops"].handle_reply(notification, text_for_handler)
             send_agent_result(result)
             store.set_status(notification["id"], "answered")
         except Exception as exc:
@@ -800,7 +933,8 @@ def handle_reply(notification: dict, text: str) -> None:
         return
     if notification["agent_id"] == "toolbox" and SERVICES.get("toolbox"):
         try:
-            result = SERVICES["toolbox"].handle_reply(notification, text)
+            result = SERVICES["toolbox"].handle_reply(
+                notification, text, approved_by=approved_by)
             send_agent_result(result)
             store.set_status(notification["id"], "answered")
         except Exception as exc:
@@ -827,7 +961,9 @@ def handle_reply(notification: dict, text: str) -> None:
 
 
 def answer_with_attachments(text: str, history: list[dict], bundle: dict,
-                            origin: dict | None = None, role: str = "owner") -> str:
+                            origin: dict | None = None, role: str = "owner",
+                            classification: str = "",
+                            allowed=_DEFAULT_ALLOWED) -> str:
     notes = list(bundle.get("notes") or [])
     errors = list(bundle.get("errors") or [])
     if errors:
@@ -844,11 +980,13 @@ def answer_with_attachments(text: str, history: list[dict], bundle: dict,
                     "附件内容：\n" + "\n\n".join(notes)]
         if text:
             combined.append("用户问题：" + text)
-        return llm_answer("\n\n".join(combined), history, origin, role)
+        return llm_answer("\n\n".join(combined), history, origin, role,
+                          classification=classification, allowed=allowed)
     prompt = text or "请查看我发的附件。"
     if notes:
         prompt += "\n\n[附件内容]\n" + "\n\n".join(notes)
-    return llm_answer(prompt, history, origin, role)
+    return llm_answer(prompt, history, origin, role,
+                      classification=classification, allowed=allowed)
 
 
 def _handle_inbound(text: str, message: dict, origin: dict | None = None) -> None:
@@ -922,12 +1060,57 @@ def _handle_inbound_impl(text: str, message: dict, origin: dict | None = None) -
         send_text(answer)
         return
 
+    session_reply = governance.handle_session_command(
+        text, role, chat_type,
+        approved_by=str((origin or {}).get("user_id") or OWNER))
+    if session_reply:
+        store.log_route(session_id, display, "session", "command")
+        store.add_message(session_id, "assistant", session_reply)
+        send_text(session_reply)
+        return
+
     if origin is None and text in {"力扣登录", "更新力扣", "绑定力扣", "leetcode登录"}:
         if LEETCODE is not None:
             LEETCODE.notify_login("missing", force=True)
         return
 
     explicit = parse_explicit_agent(text) if not has_attachments else None
+    explicit_reply = bool(governance.parse_approval(text))
+    decision = governance.classify_inbound(
+        text, origin,
+        has_attachments=has_attachments,
+        explicit_agent=explicit,
+        pending_reply=explicit_reply,
+    )
+    trace_id = trace_ctx.get_trace_id()
+    try:
+        store.log_decision(
+            trace_id=trace_id,
+            role=role,
+            chat_id=str((origin or {}).get("chat_id") or OWNER),
+            text=text or display,
+            classification=decision.classification,
+            would_accept=decision.would_accept,
+            executed=decision.executed,
+            reason=decision.reason,
+            rule=decision.rule,
+            meta={
+                "chat_type": chat_type,
+                "explicit_agent": decision.explicit_agent,
+                "has_attachments": has_attachments,
+                "scores": decision.scores,
+                "source": str((origin or {}).get("platform")
+                              or (origin or {}).get("channel") or "wechat"),
+            },
+        )
+    except Exception as exc:
+        log.warning("decision log failed: %s", exc)
+    traces.span(trace_id, "gate", decision.classification,
+                detail={"reason": decision.reason, "rule": decision.rule,
+                        "would_accept": decision.would_accept,
+                        "executed": decision.executed,
+                        "scores": decision.scores})
+
     if explicit:
         if role != "owner":
             send_text("只有主人可以派 Agent 任务。")
@@ -956,18 +1139,73 @@ def _handle_inbound_impl(text: str, message: dict, origin: dict | None = None) -
             send_text(f"已经收到，但 {agent.get('name', agent_id)} 暂时没有响应。")
         return
 
-    explicit_reply = bool(re.search(r"\b(APPROVE|REJECT)\b", text.upper()))
+    if decision.classification == governance.IGNORE:
+        if role != "owner":
+            answer = "访客只能查询公开信息，不能执行操作。"
+        else:
+            answer = "这条我先不处理。需要我动手的话，直接说“执行：…”"
+        store.log_route(session_id, display, "gate", decision.classification)
+        store.add_message(session_id, "assistant", answer)
+        send_text(answer)
+        return
+
+    if decision.classification == governance.ACTION_INFERRED:
+        answer = "我先记下了，不执行。要做的话直接说“执行：…”"
+        store.log_route(session_id, display, "gate", decision.classification)
+        store.add_message(session_id, "assistant", answer)
+        send_text(answer)
+        return
+
     if not has_attachments and (origin is None or (role == "owner" and explicit_reply)):
         pending = match_pending(text, OWNER, quote)
         if pending == "ASKED":
             return
+        if pending == "NEED_APPROVAL":
+            send_text("这是审批操作，请回复 APPROVE 码 或 REJECT 码。")
+            return
+        if pending == "INVALID_CODE":
+            send_text("确认码不存在或已过期，请检查后重试。")
+            return
         if isinstance(pending, dict):
             store.log_route(session_id, text, "pending", pending["code"])
-            handle_reply(pending, text)
+            approval = governance.parse_approval(text)
+            handle_reply(
+                pending, text,
+                approved_by=str((origin or {}).get("user_id") or OWNER),
+            )
+            if approval is not None:
+                try:
+                    store.log_decision(
+                        trace_id=trace_id,
+                        role=role,
+                        chat_id=str((origin or {}).get("chat_id") or OWNER),
+                        text=text,
+                        classification=governance.ACTION_EXPLICIT,
+                        would_accept=True,
+                        executed=True,
+                        reason=("审批已批准" if approval.approved else "审批已拒绝"),
+                        rule="approval_processed",
+                        meta={"code": pending.get("code"),
+                              "agent_id": pending.get("agent_id"),
+                              "approved": approval.approved},
+                    )
+                except Exception as exc:
+                    log.warning("approval decision log failed: %s", exc)
             return
 
+    if decision.classification == governance.READ_ONLY:
+        allowed = governance.read_only_tools(TOOLS.names())
+        if role != "owner":
+            allowed = set(GUEST_TOOLS)
+    else:
+        allowed = None if role == "owner" else set(GUEST_TOOLS)
+
     try:
-        answer = answer_with_attachments(text, history, bundle, origin, role)
+        answer = answer_with_attachments(
+            text, history, bundle, origin, role,
+            classification=decision.classification,
+            allowed=allowed,
+        )
     except AttachmentError as exc:
         log.error("attachment vision failed: %s", exc)
         traces.mark_failed("attachment_error", str(exc))
@@ -981,7 +1219,8 @@ def _handle_inbound_impl(text: str, message: dict, origin: dict | None = None) -
         traces.mark_failed("llm_error", str(exc))
         answer = "AI 暂时不可用，稍后我再试。"
     store.log_route(session_id, display, "llm",
-                    "attachment" if has_attachments else ("guest" if role != "owner" else ""))
+                    decision.classification
+                    + (" attachment" if has_attachments else ""))
     store.add_message(session_id, "assistant", answer)
     send_text(answer)
 
@@ -1004,13 +1243,37 @@ def poll_once(last_id: int) -> int:
         mid = int(message.get("id") or 0)
         if mid <= last_id:
             continue
-        last_id = mid
-        store.state_set("last_message_id", str(last_id))
-        if message.get("direction") != "inbound":
+        if message.get("direction") != "inbound" or message.get("from_user_id") != OWNER:
+            last_id = mid
+            store.state_set("last_message_id", str(last_id))
             continue
-        if message.get("from_user_id") != OWNER:
+        text = parse_text(message)
+        dedup = f"hub:{mid}"
+        claim = store.claim_inbound(
+            dedup, source="hub", message_id=str(mid),
+            chat_id=str(message.get("chat_id") or ""),
+            user_id=str(message.get("from_user_id") or ""),
+            text=text)
+        if claim is None:
+            last_id = mid
+            store.state_set("last_message_id", str(last_id))
             continue
-        handle_inbound(parse_text(message), message)
+        try:
+            handle_inbound(text, message)
+        except Exception as exc:
+            attempts = store.fail_inbound(claim["id"], str(exc))
+            if attempts >= INBOUND_MAX_ATTEMPTS:
+                store.mark_inbound_dead(claim["id"], str(exc))
+                send_text(f"消息处理失败（已重试 {attempts} 次）：{str(exc)[:300]}")
+                last_id = mid
+                store.state_set("last_message_id", str(last_id))
+                continue
+            log.warning("inbound %s failed (attempt %s): %s", dedup, attempts, exc)
+            break
+        else:
+            store.finish_inbound(claim["id"])
+            last_id = mid
+            store.state_set("last_message_id", str(last_id))
     return last_id
 
 
@@ -1028,11 +1291,24 @@ async def maintenance_loop() -> None:
     last_check = 0.0
     while True:
         try:
-            store.expire_stale()
-            flush_outbox()
+            # Everything here can block on SQLite or Hub HTTP; keep it off the
+            # event loop so inbound polling and agent heartbeats stay responsive.
+            await asyncio.to_thread(store.expire_stale)
+            await asyncio.to_thread(flush_outbox)
+            failed_tasks = await asyncio.to_thread(BROKER.requeue_expired)
+            for task in failed_tasks:
+                await asyncio.to_thread(
+                    send_text,
+                    f"任务 {task['id'][:8]} 执行超时，已失败："
+                    f"{str(task.get('error') or '')[:200]}")
             if time.time() - last_check > 6 * 3600:
                 last_check = time.time()
-                store.cleanup_channel_outbox(7)
+                await asyncio.to_thread(store.cleanup_channel_outbox, 7)
+                await asyncio.to_thread(
+                    store.prune_decisions,
+                    int(CFG.get("decision_retention_days") or 30))
+                await asyncio.to_thread(store.prune_inbound, 30)
+                await asyncio.to_thread(store.prune_agent_tasks, 30)
                 if LEETCODE is not None:
                     await asyncio.to_thread(LEETCODE.get_stats, 5)
         except Exception as exc:
@@ -1078,6 +1354,12 @@ class NotifyIn(BaseModel):
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     store.init()
+    store.recover_inbound()
+    failed_tasks = BROKER.recover()
+    for task in failed_tasks:
+        send_text(
+            f"任务 {task['id'][:8]} 重启后无法恢复，已失败："
+            f"{str(task.get('error') or '')[:200]}")
     tasks = [
         asyncio.create_task(poll_loop()),
         asyncio.create_task(maintenance_loop()),
@@ -1176,7 +1458,23 @@ async def agent_result(request: Request):
     task_id = str(body.get("task_id") or "")
     if not task_id:
         raise HTTPException(400, "task_id required")
-    ok = BROKER.complete(task_id, bool(body.get("ok")), str(body.get("text") or ""))
+    text = str(body.get("text") or "")
+    ok = BROKER.complete(
+        task_id, bool(body.get("ok")), text,
+        agent_id=agent["id"],
+        lease_token=str(body.get("lease_token") or ""))
+    delivered = BROKER.claim_delivery(task_id) if ok else False
+    if delivered:
+        send_agent_result({"text": text, "final": True})
+    return {"ok": ok, "delivered": delivered}
+
+
+@app.post("/agent/tasks/{task_id}/heartbeat")
+async def agent_task_heartbeat(task_id: str, request: Request):
+    agent = agent_auth(request)
+    body = await request.json()
+    ok = BROKER.heartbeat(
+        task_id, str(body.get("lease_token") or ""), agent_id=agent["id"])
     return {"ok": ok}
 
 
@@ -1243,6 +1541,15 @@ async def channel_inbound(request: Request):
     if role != "owner" and not identity.get("guest_enabled", True):
         return {"reply": "访客只读通道已关闭。请联系主人。"}
 
+    message_id = str(body.get("message_id") or "").strip()[:200]
+    inbound_claim = None
+    if message_id:
+        inbound_claim = store.claim_inbound(
+            f"channel:{channel_id}:{message_id}", source=channel_id,
+            message_id=message_id, chat_id=chat_id, user_id=user_id, text=text)
+        if inbound_claim is None:
+            return {"ignored": True, "duplicate": True}
+
     collector: list[str] = []
     origin = {
         "channel": channel_id,
@@ -1252,7 +1559,7 @@ async def channel_inbound(request: Request):
         "user_id": user_id,
         "user_name": user_name or user_id,
         "role": role,
-        "message_id": str(body.get("message_id") or "")[:200],
+        "message_id": message_id,
         "account_id": str(body.get("account_id") or "")[:200],
         "collector": collector,
     }
@@ -1265,17 +1572,25 @@ async def channel_inbound(request: Request):
     }, ensure_ascii=False))
     try:
         await asyncio.to_thread(handle_inbound, text, {}, origin)
+        if inbound_claim is not None:
+            store.finish_inbound(inbound_claim["id"])
     except LLMBudgetError as exc:
+        if inbound_claim is not None:
+            store.fail_inbound(inbound_claim["id"], str(exc))
         log.warning("channel budget exceeded: %s", exc)
         CHANNELS.record(channel_id, "out", platform=platform, chat_id=chat_id,
                         user_id=user_id, text="", ok=False, detail="budget_exceeded")
         return {"reply": exc.user_message}
     except LLMError as exc:
+        if inbound_claim is not None:
+            store.fail_inbound(inbound_claim["id"], str(exc))
         log.error("channel llm failed: %s", exc)
         CHANNELS.record(channel_id, "out", platform=platform, chat_id=chat_id,
                         user_id=user_id, text="", ok=False, detail=str(exc)[:200])
         return {"reply": "AI 暂时不可用，稍后再试。"}
     except Exception as exc:
+        if inbound_claim is not None:
+            store.fail_inbound(inbound_claim["id"], str(exc))
         log.exception("channel inbound failed: %s", exc)
         CHANNELS.record(channel_id, "out", platform=platform, chat_id=chat_id,
                         user_id=user_id, text="", ok=False, detail=str(exc)[:200])

@@ -19,6 +19,33 @@ services:
       - default
       - hub
       - lyph
+      - executor
+
+  executor:
+    image: wechat-agent-router:0.1.0
+    container_name: wechat-agent-executor
+    restart: unless-stopped
+    profiles: ["isolated-executor"]
+    command: ["python", "-m", "uvicorn", "executor.server:app", "--host", "0.0.0.0", "--port", "9800", "--no-access-log"]
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /tmp
+    volumes:
+      - ./executor:/app/executor:ro
+      - ./workspace:/workspace
+    environment:
+      PYTHONPATH: /app
+      EXECUTOR_TOKEN: ${EXECUTOR_TOKEN:-}
+      EXECUTOR_WORKSPACE: /workspace
+    working_dir: /workspace
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 512m
+    cpus: 1
+    networks:
+      - executor
 
 networks:
   hub:
@@ -27,3 +54,5 @@ networks:
   lyph:
     external: true
     name: lyph_private
+  executor:
+    internal: true

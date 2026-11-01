@@ -1,0 +1,17 @@
+{
+  "id": "github_trending",
+  "name": "GitHub 趋势",
+  "version": "1.0.0",
+  "api_version": "1",
+  "entry": "plugin.py",
+  "capabilities": ["tools", "jobs", "service"],
+  "permissions": [
+    "db:router",
+    "send:wechat",
+    "llm:use",
+    "net:github.com",
+    "net:api.github.com"
+  ],
+  "secrets": ["github_token"],
+  "description": "每日 GitHub Trending 简报、项目评估与接入建议"
+}

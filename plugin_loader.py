@@ -82,6 +82,7 @@ class PluginContext:
         required = {
             "site": "read:site", "geo": "read:site", "store": "db:router",
             "agents": "agent:read", "call_agent": "agent:call", "settings": "admin",
+            "llm": "llm:use",
         }.get(name)
         if required and required not in self.permissions:
             raise PermissionError(f"plugin {self.id} lacks permission {required}")
@@ -108,7 +109,8 @@ class PluginContext:
         return self._login_url(service)
 
     def http_request(self, method: str, url: str, headers: dict | None = None,
-                     body: bytes | str | None = None, timeout: int = 10) -> tuple[int, str]:
+                     body: bytes | str | None = None, timeout: int = 10,
+                     limit: int = 16000) -> tuple[int, str]:
         host = urlsplit(url).hostname or ""
         if not host or f"net:{host}" not in self.permissions:
             raise PermissionError(f"plugin {self.id} lacks permission net:{host or '?'}")
@@ -116,7 +118,7 @@ class PluginContext:
             body = body.encode("utf-8")
         request = urllib.request.Request(url, data=body, method=method.upper(), headers=headers or {})
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            return response.status, response.read(16000).decode("utf-8", "replace")
+            return response.status, response.read(max(1, int(limit))).decode("utf-8", "replace")
 
     def send(self, text: str) -> bool:
         if "send:wechat" not in self.permissions:

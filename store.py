@@ -1,11 +1,12 @@
 """SQLite state for the WeChat agent router."""
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 SCHEMA = """
@@ -121,11 +122,71 @@ CREATE TABLE IF NOT EXISTS plugin_events (
   detail TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS decisions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  trace_id TEXT NOT NULL DEFAULT '',
+  role TEXT NOT NULL DEFAULT '',
+  chat_id TEXT NOT NULL DEFAULT '',
+  text_hash TEXT NOT NULL DEFAULT '',
+  text_preview TEXT NOT NULL DEFAULT '',
+  classification TEXT NOT NULL,
+  would_accept INTEGER NOT NULL DEFAULT 0,
+  executed INTEGER NOT NULL DEFAULT 0,
+  reason TEXT NOT NULL DEFAULT '',
+  rule TEXT NOT NULL DEFAULT '',
+  meta_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS decisions_created ON decisions(created_at);
+CREATE INDEX IF NOT EXISTS decisions_class ON decisions(classification, created_at);
+
+CREATE TABLE IF NOT EXISTS inbound_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  dedup_key TEXT NOT NULL UNIQUE,
+  source TEXT NOT NULL DEFAULT 'hub',
+  message_id TEXT NOT NULL DEFAULT '',
+  chat_id TEXT NOT NULL DEFAULT '',
+  user_id TEXT NOT NULL DEFAULT '',
+  text TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'pending',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  processed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS inbound_status ON inbound_messages(status, updated_at);
+CREATE INDEX IF NOT EXISTS inbound_created ON inbound_messages(created_at);
+
+CREATE TABLE IF NOT EXISTS agent_tasks (
+  id TEXT PRIMARY KEY,
+  agent_id TEXT NOT NULL,
+  status TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  result_json TEXT,
+  error TEXT NOT NULL DEFAULT '',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  max_attempts INTEGER NOT NULL DEFAULT 3,
+  lease_token TEXT NOT NULL DEFAULT '',
+  lease_until TEXT,
+  delivered INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  completed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS agent_tasks_agent ON agent_tasks(agent_id, status, created_at);
+CREATE INDEX IF NOT EXISTS agent_tasks_status ON agent_tasks(status, lease_until);
 """
 
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+INBOUND_MAX_ATTEMPTS = 3
+TASK_MAX_ATTEMPTS = 3
+TASK_LEASE_SECONDS = 1800
 
 
 class Store:
@@ -223,12 +284,15 @@ class Store:
         item["meta"] = json.loads(item.pop("meta_json") or "{}")
         return item
 
-    def by_code(self, code: str) -> dict | None:
+    def by_code(self, code: str, chat_id: str = "") -> dict | None:
+        sql = "SELECT * FROM notifications WHERE code=? AND status='pending'"
+        params: list = [code.upper()]
+        if chat_id:
+            sql += " AND chat_id=?"
+            params.append(chat_id)
+        sql += " ORDER BY created_at DESC LIMIT 1"
         with self._conn() as conn:
-            row = conn.execute(
-                "SELECT * FROM notifications WHERE code=? AND status='pending' ORDER BY created_at DESC LIMIT 1",
-                (code.upper(),),
-            ).fetchone()
+            row = conn.execute(sql, params).fetchone()
         if not row:
             return None
         item = dict(row)
@@ -515,3 +579,413 @@ class Store:
                 "SELECT * FROM plugin_events ORDER BY id DESC LIMIT ?", (limit,)
             ).fetchall()
         return [dict(row) for row in rows]
+
+    # --- inbound gate audit --------------------------------------------
+    def log_decision(
+        self,
+        *,
+        trace_id: str = "",
+        role: str = "",
+        chat_id: str = "",
+        text: str = "",
+        classification: str = "",
+        would_accept: bool = False,
+        executed: bool = False,
+        reason: str = "",
+        rule: str = "",
+        meta: dict | None = None,
+    ) -> int:
+        digest = hashlib.sha256((text or "").encode("utf-8")).hexdigest()
+        with self._conn() as conn:
+            cursor = conn.execute(
+                """INSERT INTO decisions
+                   (trace_id,role,chat_id,text_hash,text_preview,classification,
+                    would_accept,executed,reason,rule,meta_json,created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    trace_id,
+                    role,
+                    chat_id,
+                    digest,
+                    (text or "")[:240],
+                    classification,
+                    1 if would_accept else 0,
+                    1 if executed else 0,
+                    reason[:500],
+                    rule[:120],
+                    json.dumps(meta or {}, ensure_ascii=False, default=str),
+                    now_iso(),
+                ),
+            )
+            return int(cursor.lastrowid or 0)
+
+    def list_decisions(self, limit: int = 50, classification: str = "") -> list[dict]:
+        limit = max(1, min(int(limit or 50), 200))
+        with self._conn() as conn:
+            if classification:
+                rows = conn.execute(
+                    "SELECT * FROM decisions WHERE classification=? "
+                    "ORDER BY id DESC LIMIT ?", (classification, limit)
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM decisions ORDER BY id DESC LIMIT ?", (limit,)
+                ).fetchall()
+        items = []
+        for row in rows:
+            item = dict(row)
+            item["meta"] = json.loads(item.pop("meta_json") or "{}")
+            item["would_accept"] = bool(item["would_accept"])
+            item["executed"] = bool(item["executed"])
+            items.append(item)
+        return items
+
+    def decision_stats(self, days: int = 7) -> dict:
+        days = max(1, min(int(days or 7), 90))
+        since = time.time() - days * 86400
+        since_iso = datetime.fromtimestamp(since, timezone.utc).isoformat(timespec="seconds")
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT classification,COUNT(*) AS count FROM decisions "
+                "WHERE created_at>=? GROUP BY classification", (since_iso,)
+            ).fetchall()
+        counts = {row["classification"]: row["count"] for row in rows}
+        return {"days": days, "counts": counts,
+                "total": sum(counts.values())}
+
+    def prune_decisions(self, days: int = 30) -> int:
+        days = max(1, min(int(days or 30), 365))
+        cutoff = datetime.fromtimestamp(
+            time.time() - days * 86400, timezone.utc).isoformat(timespec="seconds")
+        with self._conn() as conn:
+            cursor = conn.execute(
+                "DELETE FROM decisions WHERE created_at < ?", (cutoff,))
+            return int(cursor.rowcount or 0)
+
+    # --- inbound message journal ---------------------------------------
+    def claim_inbound(
+        self,
+        dedup_key: str,
+        *,
+        source: str = "hub",
+        message_id: str = "",
+        chat_id: str = "",
+        user_id: str = "",
+        text: str = "",
+        stale_seconds: int = 1800,
+    ) -> dict | None:
+        now = now_iso()
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM inbound_messages WHERE dedup_key=?",
+                (dedup_key,)).fetchone()
+            if row:
+                item = dict(row)
+                if item["status"] in {"done", "dead"}:
+                    return None
+                if item["status"] == "processing":
+                    try:
+                        updated = datetime.fromisoformat(item["updated_at"])
+                        if updated.tzinfo is None:
+                            updated = updated.replace(tzinfo=timezone.utc)
+                        age = (datetime.now(timezone.utc) - updated).total_seconds()
+                        if age < stale_seconds:
+                            return None
+                    except Exception:
+                        pass
+                if int(item["attempts"]) >= INBOUND_MAX_ATTEMPTS:
+                    conn.execute(
+                        "UPDATE inbound_messages SET status='dead',"
+                        "last_error=?,updated_at=? WHERE id=?",
+                        ("max attempts exceeded", now, item["id"]))
+                    return None
+                conn.execute(
+                    "UPDATE inbound_messages SET status='processing',"
+                    "attempts=attempts+1,last_error='',updated_at=? WHERE id=?",
+                    (now, item["id"]))
+                item["status"] = "processing"
+                item["attempts"] = int(item["attempts"]) + 1
+                return item
+            cursor = conn.execute(
+                """INSERT INTO inbound_messages
+                   (dedup_key,source,message_id,chat_id,user_id,text,status,
+                    attempts,last_error,created_at,updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                (dedup_key, source[:40], message_id[:200], chat_id[:200],
+                 user_id[:200], text[:4000], "processing", 1, "", now, now))
+            row = conn.execute(
+                "SELECT * FROM inbound_messages WHERE id=?",
+                (cursor.lastrowid,)).fetchone()
+            return dict(row) if row else None
+
+    def finish_inbound(self, inbound_id: int) -> None:
+        now = now_iso()
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE inbound_messages SET status='done',processed_at=?,"
+                "updated_at=? WHERE id=?", (now, now, inbound_id))
+
+    def fail_inbound(self, inbound_id: int, error: str) -> int:
+        now = now_iso()
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE inbound_messages SET status='failed',last_error=?,"
+                "updated_at=? WHERE id=?", (str(error)[:2000], now, inbound_id))
+            row = conn.execute(
+                "SELECT attempts FROM inbound_messages WHERE id=?",
+                (inbound_id,)).fetchone()
+        return int(row["attempts"] or 0) if row else 0
+
+    def mark_inbound_dead(self, inbound_id: int, error: str) -> None:
+        now = now_iso()
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE inbound_messages SET status='dead',last_error=?,"
+                "updated_at=? WHERE id=?", (str(error)[:2000], now, inbound_id))
+
+    def recover_inbound(self) -> int:
+        now = now_iso()
+        with self._conn() as conn:
+            cursor = conn.execute(
+                "UPDATE inbound_messages SET status='pending',"
+                "last_error='worker restarted',updated_at=? "
+                "WHERE status='processing'", (now,))
+            return int(cursor.rowcount or 0)
+
+    def list_inbound(self, limit: int = 50, status: str = "") -> list[dict]:
+        limit = max(1, min(int(limit or 50), 200))
+        with self._conn() as conn:
+            if status:
+                rows = conn.execute(
+                    "SELECT * FROM inbound_messages WHERE status=? "
+                    "ORDER BY id DESC LIMIT ?", (status, limit)).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM inbound_messages ORDER BY id DESC LIMIT ?",
+                    (limit,)).fetchall()
+        return [dict(row) for row in rows]
+
+    def prune_inbound(self, days: int = 30) -> int:
+        cutoff = (datetime.now(timezone.utc)
+                  - timedelta(days=max(1, int(days or 30)))).isoformat(
+                      timespec="seconds")
+        with self._conn() as conn:
+            cursor = conn.execute(
+                "DELETE FROM inbound_messages WHERE created_at<?", (cutoff,))
+            return int(cursor.rowcount or 0)
+
+    # --- durable agent tasks ------------------------------------------
+    def create_agent_task(self, agent_id: str, payload: dict,
+                          max_attempts: int = TASK_MAX_ATTEMPTS) -> dict:
+        task_id = uuid.uuid4().hex
+        now = now_iso()
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT INTO agent_tasks
+                   (id,agent_id,status,payload_json,result_json,error,attempts,
+                    max_attempts,lease_token,lease_until,delivered,created_at,
+                    updated_at,completed_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (task_id, agent_id[:120], "queued",
+                 json.dumps(payload or {}, ensure_ascii=False, default=str),
+                 None, "", 0, max(1, int(max_attempts)), "", None, 0,
+                 now, now, None))
+        return self.get_agent_task(task_id) or {"id": task_id, "status": "queued"}
+
+    def get_agent_task(self, task_id: str) -> dict | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM agent_tasks WHERE id=?", (task_id,)).fetchone()
+        return self._agent_task(row) if row else None
+
+    @staticmethod
+    def _agent_task(row) -> dict:
+        item = dict(row)
+        item["payload"] = json.loads(item.pop("payload_json") or "{}")
+        raw_result = item.pop("result_json", None)
+        item["result"] = json.loads(raw_result) if raw_result else None
+        item["delivered"] = bool(item.get("delivered"))
+        return item
+
+    def claim_agent_task(self, agent_id: str,
+                         lease_seconds: int = TASK_LEASE_SECONDS) -> dict | None:
+        now = now_iso()
+        lease_until = (datetime.now(timezone.utc)
+                       + timedelta(seconds=max(60, int(lease_seconds)))
+                       ).isoformat(timespec="seconds")
+        lease_token = uuid.uuid4().hex
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT id FROM agent_tasks WHERE agent_id=? AND status='queued' "
+                "AND attempts<max_attempts ORDER BY created_at LIMIT 1",
+                (agent_id,)).fetchone()
+            if not row:
+                return None
+            cursor = conn.execute(
+                "UPDATE agent_tasks SET status='claimed',attempts=attempts+1,"
+                "lease_token=?,lease_until=?,updated_at=? "
+                "WHERE id=? AND status='queued'",
+                (lease_token, lease_until, now, row["id"]))
+            if cursor.rowcount != 1:
+                return None
+        return self.get_agent_task(row["id"])
+
+    def complete_agent_task(self, task_id: str, ok: bool, text: str,
+                            *, agent_id: str = "",
+                            lease_token: str = "") -> bool:
+        now = now_iso()
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM agent_tasks WHERE id=?", (task_id,)).fetchone()
+            if not row:
+                return False
+            item = dict(row)
+            if agent_id and item["agent_id"] != agent_id:
+                return False
+            if item["status"] in {"completed", "failed", "expired", "cancelled"}:
+                return True
+            if lease_token and item["lease_token"] and lease_token != item["lease_token"]:
+                return False
+            status = "completed" if ok else "failed"
+            result = json.dumps({"ok": bool(ok), "text": str(text)[:8000]},
+                                ensure_ascii=False)
+            conn.execute(
+                "UPDATE agent_tasks SET status=?,result_json=?,error=?,"
+                "lease_token='',lease_until=NULL,delivered=0,updated_at=?,"
+                "completed_at=? WHERE id=?",
+                (status, result, "" if ok else str(text)[:2000], now, now, task_id))
+        return True
+
+    def mark_agent_task_delivered(self, task_id: str) -> bool:
+        with self._conn() as conn:
+            cursor = conn.execute(
+                "UPDATE agent_tasks SET delivered=1 WHERE id=? AND delivered=0",
+                (task_id,))
+            return int(cursor.rowcount or 0) == 1
+
+    def heartbeat_agent_task(self, task_id: str, lease_token: str,
+                             *, agent_id: str = "",
+                             lease_seconds: int = TASK_LEASE_SECONDS) -> bool:
+        now = now_iso()
+        lease_until = (datetime.now(timezone.utc)
+                       + timedelta(seconds=max(60, int(lease_seconds)))
+                       ).isoformat(timespec="seconds")
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT agent_id,lease_token,status FROM agent_tasks WHERE id=?",
+                (task_id,)).fetchone()
+            if not row:
+                return False
+            if agent_id and row["agent_id"] != agent_id:
+                return False
+            if lease_token and row["lease_token"] and lease_token != row["lease_token"]:
+                return False
+            if row["status"] not in {"claimed", "running"}:
+                return False
+            conn.execute(
+                "UPDATE agent_tasks SET status='running',lease_until=?,"
+                "updated_at=? WHERE id=?", (lease_until, now, task_id))
+            return True
+
+    def requeue_expired_agent_tasks(self) -> list[dict]:
+        now = now_iso()
+        failed_ids: list[str] = []
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM agent_tasks WHERE status IN ('claimed','running') "
+                "AND lease_until IS NOT NULL AND lease_until<?",
+                (now,)).fetchall()
+            for row in rows:
+                item = dict(row)
+                if int(item["attempts"]) >= int(item["max_attempts"]):
+                    conn.execute(
+                        "UPDATE agent_tasks SET status='failed',error=?,"
+                        "lease_token='',lease_until=NULL,delivered=0,"
+                        "updated_at=?,completed_at=? WHERE id=?",
+                        (f"lease expired after {item['attempts']} attempts",
+                         now, now, item["id"]))
+                    failed_ids.append(item["id"])
+                else:
+                    conn.execute(
+                        "UPDATE agent_tasks SET status='queued',"
+                        "error='lease expired; requeued',lease_token='',"
+                        "lease_until=NULL,updated_at=? WHERE id=?",
+                        (now, item["id"]))
+            rows = conn.execute(
+                "SELECT * FROM agent_tasks WHERE status='queued' "
+                "AND attempts>=max_attempts").fetchall()
+            for row in rows:
+                item = dict(row)
+                conn.execute(
+                    "UPDATE agent_tasks SET status='failed',error=?,"
+                    "updated_at=?,completed_at=? WHERE id=?",
+                    (f"attempts exhausted ({item['attempts']})",
+                     now, now, item["id"]))
+                failed_ids.append(item["id"])
+        return [task for task in (self.get_agent_task(tid) for tid in failed_ids)
+                if task]
+
+    def recover_agent_tasks(self) -> list[dict]:
+        """On startup, requeue tasks left claimed/running by the previous process."""
+        now = now_iso()
+        failed_ids: list[str] = []
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM agent_tasks WHERE status IN ('claimed','running')"
+            ).fetchall()
+            for row in rows:
+                item = dict(row)
+                if int(item["attempts"]) >= int(item["max_attempts"]):
+                    conn.execute(
+                        "UPDATE agent_tasks SET status='failed',error=?,"
+                        "lease_token='',lease_until=NULL,delivered=0,"
+                        "updated_at=?,completed_at=? WHERE id=?",
+                        ("worker restarted; attempts exhausted",
+                         now, now, item["id"]))
+                    failed_ids.append(item["id"])
+                else:
+                    conn.execute(
+                        "UPDATE agent_tasks SET status='queued',"
+                        "error='worker restarted; requeued',lease_token='',"
+                        "lease_until=NULL,updated_at=? WHERE id=?",
+                        (now, item["id"]))
+        return [task for task in (self.get_agent_task(tid) for tid in failed_ids)
+                if task]
+
+    def agent_task_counts(self) -> dict:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT status,COUNT(*) AS count FROM agent_tasks GROUP BY status"
+            ).fetchall()
+        return {row["status"]: row["count"] for row in rows}
+
+    def agent_task_pending_by_agent(self) -> dict:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT agent_id,COUNT(*) AS count FROM agent_tasks "
+                "WHERE status='queued' GROUP BY agent_id").fetchall()
+        return {row["agent_id"]: row["count"] for row in rows}
+
+    def list_agent_tasks(self, limit: int = 50, status: str = "") -> list[dict]:
+        limit = max(1, min(int(limit or 50), 200))
+        with self._conn() as conn:
+            if status:
+                rows = conn.execute(
+                    "SELECT * FROM agent_tasks WHERE status=? "
+                    "ORDER BY created_at DESC LIMIT ?", (status, limit)).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM agent_tasks ORDER BY created_at DESC LIMIT ?",
+                    (limit,)).fetchall()
+        return [self._agent_task(row) for row in rows]
+
+    def prune_agent_tasks(self, days: int = 30) -> int:
+        cutoff = (datetime.now(timezone.utc)
+                  - timedelta(days=max(1, int(days or 30)))).isoformat(
+                      timespec="seconds")
+        with self._conn() as conn:
+            cursor = conn.execute(
+                "DELETE FROM agent_tasks WHERE status IN "
+                "('completed','failed','expired','cancelled') AND updated_at<?",
+                (cutoff,))
+            return int(cursor.rowcount or 0)

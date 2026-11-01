@@ -29,6 +29,12 @@
     "github_token": "",
     "slack_webhook": ""
   },
+  "executor": {
+    "mode": "host",
+    "url": "http://executor:9800",
+    "token": "REPLACE_EXECUTOR_TOKEN",
+    "allow_control_plane": false
+  },
   "geo": {
     "vendor_dir": "/app/vendor",
     "v4": "/geodb/ip2region_v4.xdb",
@@ -83,6 +89,20 @@
     "steps": 20,
     "guidance": 7.5,
     "dir": "/workspace/generated"
+  },
+  "plugins": {
+    "github_trending": {
+      "db": "/data/github_trending.db",
+      "count": 12
+    }
+  },
+  "jobs": {
+    "github_trending": {
+      "enabled": true,
+      "interval_minutes": 1440,
+      "window_minutes": 1440,
+      "daily_at": "09:00"
+    }
   },
   "agents": [
     {

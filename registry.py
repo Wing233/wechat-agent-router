@@ -1,6 +1,7 @@
 """Small registries so tools, agents and scheduled jobs are configuration, not code paths."""
 from __future__ import annotations
 
+import copy
 import logging
 import re
 import time
@@ -39,15 +40,41 @@ class ToolRegistry:
                 self._aliases[alias] = name
 
     def definitions(self, allowed: set[str] | None = None) -> list[dict]:
-        return [
-            {"type": "function", "function": {"name": t.name, "description": t.description,
-                                              "parameters": t.parameters}}
-            for t in self._tools.values()
-            if allowed is None or t.name in allowed
-        ]
+        try:
+            import governance
+        except Exception:  # pragma: no cover - governance is optional in tests
+            governance = None
+        items = []
+        for tool in self._tools.values():
+            if allowed is not None and tool.name not in allowed:
+                continue
+            if governance is not None and not governance.executor_tool_allowed(tool.name):
+                continue
+            parameters = tool.parameters
+            if governance is not None and governance.is_high_risk_tool(tool.name):
+                parameters = copy.deepcopy(parameters)
+                properties = parameters.setdefault("properties", {})
+                properties.setdefault("mandate", {
+                    "type": "string",
+                    "description": ("主人批准后得到的审批码。高危工具必须携带；"
+                                    "先用 ask_human_confirmation 并传 tool/args 获取。"),
+                })
+            items.append({
+                "type": "function",
+                "function": {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": parameters,
+                },
+            })
+        return items
 
     def names(self) -> list[str]:
         return sorted(self._tools)
+
+    def canonical(self, name: str) -> str:
+        """Resolve an alias to the registered tool name."""
+        return self._aliases.get(name, name)
 
     def names_for_plugin(self, plugin_id: str) -> list[str]:
         return sorted(name for name, tool in self._tools.items() if plugin_id in tool.tags)
@@ -65,8 +92,25 @@ class ToolRegistry:
         tool = self._tools.get(name)
         if not tool:
             return {"error": f"unknown tool: {name}"}
+        arguments = dict(arguments) if isinstance(arguments, dict) else {}
         try:
-            return tool.handler(arguments or {})
+            import governance
+        except ImportError:  # pragma: no cover - governance is required in production
+            return {"error": "执行策略模块不可用，已拒绝执行"}
+        try:
+            policy = governance.check_executor_policy(name)
+            if policy is not None:
+                return policy
+            checked = governance.check_mandate(name, arguments)
+        except Exception as exc:
+            log.warning("tool %s policy check failed: %s", name, exc)
+            return {"error": f"执行策略校验失败，已拒绝执行：{exc}"}
+        if checked is not None:
+            if checked.get("error"):
+                return checked
+            arguments = checked.get("args", arguments)
+        try:
+            return tool.handler(arguments)
         except Exception as exc:  # tool failures never crash the chat loop
             log.warning("tool %s failed: %s", name, exc)
             return {"error": str(exc)[:500]}
