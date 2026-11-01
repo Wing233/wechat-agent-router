@@ -234,7 +234,7 @@ class TrendingStore:
 class TrendingService:
     def __init__(self, ctx):
         self.ctx = ctx
-        job_opts = (ctx.root_config.get("jobs") or {}).get("github_trending", {})
+        job_opts = (ctx.root_config.get("jobs") or {}).get("github_trending") or {}
         self.count = max(5, min(int(ctx.config.get("count")
                                      or job_opts.get("count") or 12), 20))
         self.db = TrendingStore(
@@ -256,7 +256,7 @@ class TrendingService:
             status, body = self.ctx.http_request(
                 "GET", TRENDING_URL,
                 headers={"User-Agent": USER_AGENT, "Accept": "text/html"},
-                timeout=20, limit=2_000_000)
+                timeout=45, limit=2_000_000)
             if status == 200:
                 items = parse_trending_html(body)
         except Exception as exc:
@@ -322,7 +322,7 @@ class TrendingService:
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
         status, body = self.ctx.http_request(
-            "GET", API + path, headers=headers, timeout=20, limit=limit)
+            "GET", API + path, headers=headers, timeout=30, limit=limit)
         if status >= 400:
             raise TrendingError(f"GitHub API {status}: {path}")
         return body

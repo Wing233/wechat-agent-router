@@ -40,7 +40,7 @@ def apply(ctx) -> None:
         aliases=("trending_evaluate",),
     )
 
-    options = (ctx.root_config.get("jobs") or {}).get("github_trending", {})
+    options = (ctx.root_config.get("jobs") or {}).get("github_trending") or {}
     if options.get("enabled", True):
         daily_at = str(options.get("daily_at") or "09:00")
         hour, minute = parse_daily_at(daily_at)
