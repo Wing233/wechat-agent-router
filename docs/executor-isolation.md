@@ -49,7 +49,8 @@ sudo chown -R 10001:10001 /opt/wechat-agent-router/workspace
 cd /opt/wechat-agent-router
 EXECUTOR_TOKEN='刚才生成的 token' \
   docker compose --profile isolated-executor up -d executor
-docker restart wechat-agent-router
+# 让 router 加入 executor 内部网络；必须重建容器，restart 不会加网络
+docker compose up -d --force-recreate router
 ```
 
 5. 验证：
