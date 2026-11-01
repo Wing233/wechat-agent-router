@@ -1491,7 +1491,7 @@ def settings_overview(request: Request):
     service_auth(request)
     return {
         "time": now_iso(),
-        "version": "1.2.0",
+        "version": "1.2.1",
         "agents": _agents_with_presence(),
         "plugins": SETTINGS.plugins(),
         "plugin_errors": LOADER.errors,
