@@ -514,21 +514,36 @@ def daemon(db: WorklogDB, client: LyphClient | None, config: dict) -> None:
     sample_seconds = max(5, int(config.get("sample_seconds") or 30))
     finalize_hour, finalize_minute = _parse_time(str(config.get("finalize_time") or "22:50"))
     last_day = datetime.now().astimezone().date().isoformat()
+    paused = False
+    last_config_check = 0.0
     # Upload yesterday if the process was not running at finalize time.
     try:
-        finalize_day((datetime.now().astimezone().date() - timedelta(days=1)).isoformat(),
-                     db, client, config)
+        if client is not None:
+            paused = bool(client.get_config().get("paused"))
+            last_config_check = time.time()
+        if not paused:
+            finalize_day((datetime.now().astimezone().date() - timedelta(days=1)).isoformat(),
+                         db, client, config)
     except Exception as exc:
         logging.warning("startup finalize failed: %s", exc)
     while True:
         try:
-            sample_once(db, config)
+            now_ts = time.time()
+            if client is not None and now_ts - last_config_check > 300:
+                try:
+                    paused = bool(client.get_config().get("paused"))
+                except Exception as exc:
+                    logging.warning("device config check failed: %s", exc)
+                last_config_check = now_ts
+            if not paused:
+                sample_once(db, config)
             now = datetime.now().astimezone()
             today = now.date().isoformat()
             if today != last_day:
-                finalize_day(last_day, db, client, config)
+                if not paused:
+                    finalize_day(last_day, db, client, config)
                 last_day = today
-            if (now.hour, now.minute) >= (finalize_hour, finalize_minute):
+            if not paused and (now.hour, now.minute) >= (finalize_hour, finalize_minute):
                 existing = db.day(today) or {}
                 if existing.get("status") not in ("uploaded", "published", "conflict", "empty"):
                     finalize_day(today, db, client, config)
