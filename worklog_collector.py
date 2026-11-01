@@ -447,7 +447,10 @@ class LyphClient:
 
 
 def finalize_day(day: str, db: WorklogDB, client: LyphClient | None,
-                 config: dict, *, force: bool = False, dry_run: bool = False) -> dict:
+                 config: dict, *, force: bool = False, dry_run: bool = False,
+                 refresh_sources: bool = True) -> dict:
+    if refresh_sources:
+        worklog_sources.clear_caches()
     existing = db.day(day) or {}
     if existing.get("status") in ("uploaded", "published", "empty") and not force:
         return {"day": day, "status": "skipped", "reason": "already processed"}
@@ -495,11 +498,13 @@ def _client(config: dict, secrets: SecretStore) -> LyphClient | None:
 
 def backfill(days: int, db: WorklogDB, client: LyphClient | None, config: dict,
              *, dry_run: bool = False) -> None:
+    worklog_sources.clear_caches()
     today = datetime.now().astimezone().date()
     for offset in range(1, max(1, days) + 1):
         day = (today - timedelta(days=offset)).isoformat()
         try:
-            result = finalize_day(day, db, client, config, dry_run=dry_run)
+            result = finalize_day(day, db, client, config, dry_run=dry_run,
+                                  refresh_sources=False)
             logging.info("backfill %s -> %s", day, result)
         except Exception as exc:
             logging.warning("backfill %s failed: %s", day, exc)

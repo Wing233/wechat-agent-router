@@ -26,6 +26,12 @@ _CODEX_CACHE: dict[str, dict] = {}
 _FILE_CACHE: dict[tuple, dict[str, Counter]] = {}
 
 
+def clear_caches() -> None:
+    """Drop history indexes so a long-running daemon sees new commits/sessions."""
+    _CODEX_CACHE.clear()
+    _FILE_CACHE.clear()
+
+
 def _local_day(ts: datetime) -> str:
     return ts.astimezone().date().isoformat()
 
