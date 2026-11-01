@@ -44,7 +44,7 @@ import sso_routes
 from plugin_loader import PluginError, PluginLoader
 from registry import JobScheduler, ToolRegistry
 from settings_service import SettingsService
-from store import Store, now_iso
+from store import INBOUND_MAX_ATTEMPTS, Store, now_iso
 import traces
 import trace_ctx
 
@@ -127,6 +127,7 @@ except Exception as exc:
 
 store = Store(CFG["db"])
 store.init()
+BROKER.attach_store(store)
 hub = Hub(BASE, CFG["hub"]["channel_key"], OWNER)
 geo = Geo(CFG["geo"]["vendor_dir"], CFG["geo"]["v4"], CFG["geo"].get("v6", ""))
 site = SiteData(
@@ -319,18 +320,36 @@ def call_agent(agent: dict, payload: dict, timeout: int = 20) -> dict:
 def _call_agent_impl(agent: dict, payload: dict, timeout: int = 20) -> dict:
     if agent.get("transport") == "poll":
         wait_seconds = int(CFG.get("agent_wait_seconds", 60))
-        result, task_id, done = BROKER.enqueue(agent["id"], {
+        online = BROKER.is_online(agent["id"])
+        result, task_id, status, task = BROKER.enqueue(agent["id"], {
             "message": payload.get("reply", ""),
             "engine": payload.get("engine", ""),
             "workspace": payload.get("workspace", ""),
             "chat_id": payload.get("chat_id", OWNER),
             "meta": payload.get("meta") or {},
             "wait_seconds": wait_seconds,
-        }, wait_seconds)
-        if result:
-            return {"text": result.get("text", ""), "final": True}
-        return {"text": f"任务已交给 {agent.get('name', agent['id'])}，完成后会通知你。",
-                "final": False, "task_id": task_id}
+        }, wait_seconds if online else 0)
+        name = agent.get("name", agent["id"])
+        short = task_id[:8]
+        if status == "completed":
+            text = str((result or {}).get("text") or "任务已完成。")
+            if BROKER.claim_delivery(task_id):
+                return {"text": text, "final": True, "task_id": task_id}
+            return {"text": "", "final": True, "silent": True,
+                    "task_id": task_id}
+        if status in {"claimed", "running"}:
+            return {"text": f"任务 {short} 已被 {name} 领取，正在执行；完成后通知你。",
+                    "final": False, "task_id": task_id}
+        if status == "queued":
+            reason = "当前没有领取（可能离线或忙）" if not online else "还没有领取"
+            return {"text": f"{name} {reason}，任务 {short} 已排队；它领取后会通知你。",
+                    "final": False, "task_id": task_id}
+        if status in {"failed", "expired"}:
+            error = str((task or {}).get("error") or status)[:300]
+            return {"text": f"任务 {short} 失败：{error}", "final": True,
+                    "task_id": task_id}
+        return {"text": f"任务 {short} 当前状态：{status}", "final": False,
+                "task_id": task_id}
     timeout = max(1, int(agent.get("timeout") or timeout))
     body = json.dumps(payload, ensure_ascii=False).encode()
     sig = hmac.new(agent.get("callback_secret", "").encode(), body, hashlib.sha256).hexdigest()
@@ -354,6 +373,8 @@ def agent_auth(request: Request) -> dict:
 
 
 def send_agent_result(result: dict) -> None:
+    if result.get("silent"):
+        return
     text = (result.get("text") or "").strip()
     image = result.get("image_base64")
     if image:
@@ -1218,13 +1239,37 @@ def poll_once(last_id: int) -> int:
         mid = int(message.get("id") or 0)
         if mid <= last_id:
             continue
-        last_id = mid
-        store.state_set("last_message_id", str(last_id))
-        if message.get("direction") != "inbound":
+        if message.get("direction") != "inbound" or message.get("from_user_id") != OWNER:
+            last_id = mid
+            store.state_set("last_message_id", str(last_id))
             continue
-        if message.get("from_user_id") != OWNER:
+        text = parse_text(message)
+        dedup = f"hub:{mid}"
+        claim = store.claim_inbound(
+            dedup, source="hub", message_id=str(mid),
+            chat_id=str(message.get("chat_id") or ""),
+            user_id=str(message.get("from_user_id") or ""),
+            text=text)
+        if claim is None:
+            last_id = mid
+            store.state_set("last_message_id", str(last_id))
             continue
-        handle_inbound(parse_text(message), message)
+        try:
+            handle_inbound(text, message)
+        except Exception as exc:
+            attempts = store.fail_inbound(claim["id"], str(exc))
+            if attempts >= INBOUND_MAX_ATTEMPTS:
+                store.mark_inbound_dead(claim["id"], str(exc))
+                send_text(f"消息处理失败（已重试 {attempts} 次）：{str(exc)[:300]}")
+                last_id = mid
+                store.state_set("last_message_id", str(last_id))
+                continue
+            log.warning("inbound %s failed (attempt %s): %s", dedup, attempts, exc)
+            break
+        else:
+            store.finish_inbound(claim["id"])
+            last_id = mid
+            store.state_set("last_message_id", str(last_id))
     return last_id
 
 
@@ -1244,10 +1289,17 @@ async def maintenance_loop() -> None:
         try:
             store.expire_stale()
             flush_outbox()
+            failed_tasks = await asyncio.to_thread(BROKER.requeue_expired)
+            for task in failed_tasks:
+                send_text(
+                    f"任务 {task['id'][:8]} 执行超时，已失败："
+                    f"{str(task.get('error') or '')[:200]}")
             if time.time() - last_check > 6 * 3600:
                 last_check = time.time()
                 store.cleanup_channel_outbox(7)
                 store.prune_decisions(int(CFG.get("decision_retention_days") or 30))
+                store.prune_inbound(30)
+                store.prune_agent_tasks(30)
                 if LEETCODE is not None:
                     await asyncio.to_thread(LEETCODE.get_stats, 5)
         except Exception as exc:
@@ -1293,6 +1345,12 @@ class NotifyIn(BaseModel):
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     store.init()
+    store.recover_inbound()
+    failed_tasks = BROKER.recover()
+    for task in failed_tasks:
+        send_text(
+            f"任务 {task['id'][:8]} 重启后无法恢复，已失败："
+            f"{str(task.get('error') or '')[:200]}")
     tasks = [
         asyncio.create_task(poll_loop()),
         asyncio.create_task(maintenance_loop()),
@@ -1391,7 +1449,23 @@ async def agent_result(request: Request):
     task_id = str(body.get("task_id") or "")
     if not task_id:
         raise HTTPException(400, "task_id required")
-    ok = BROKER.complete(task_id, bool(body.get("ok")), str(body.get("text") or ""))
+    text = str(body.get("text") or "")
+    ok = BROKER.complete(
+        task_id, bool(body.get("ok")), text,
+        agent_id=agent["id"],
+        lease_token=str(body.get("lease_token") or ""))
+    delivered = BROKER.claim_delivery(task_id) if ok else False
+    if delivered:
+        send_agent_result({"text": text, "final": True})
+    return {"ok": ok, "delivered": delivered}
+
+
+@app.post("/agent/tasks/{task_id}/heartbeat")
+async def agent_task_heartbeat(task_id: str, request: Request):
+    agent = agent_auth(request)
+    body = await request.json()
+    ok = BROKER.heartbeat(
+        task_id, str(body.get("lease_token") or ""), agent_id=agent["id"])
     return {"ok": ok}
 
 
@@ -1458,6 +1532,15 @@ async def channel_inbound(request: Request):
     if role != "owner" and not identity.get("guest_enabled", True):
         return {"reply": "访客只读通道已关闭。请联系主人。"}
 
+    message_id = str(body.get("message_id") or "").strip()[:200]
+    inbound_claim = None
+    if message_id:
+        inbound_claim = store.claim_inbound(
+            f"channel:{channel_id}:{message_id}", source=channel_id,
+            message_id=message_id, chat_id=chat_id, user_id=user_id, text=text)
+        if inbound_claim is None:
+            return {"ignored": True, "duplicate": True}
+
     collector: list[str] = []
     origin = {
         "channel": channel_id,
@@ -1467,7 +1550,7 @@ async def channel_inbound(request: Request):
         "user_id": user_id,
         "user_name": user_name or user_id,
         "role": role,
-        "message_id": str(body.get("message_id") or "")[:200],
+        "message_id": message_id,
         "account_id": str(body.get("account_id") or "")[:200],
         "collector": collector,
     }
@@ -1480,17 +1563,25 @@ async def channel_inbound(request: Request):
     }, ensure_ascii=False))
     try:
         await asyncio.to_thread(handle_inbound, text, {}, origin)
+        if inbound_claim is not None:
+            store.finish_inbound(inbound_claim["id"])
     except LLMBudgetError as exc:
+        if inbound_claim is not None:
+            store.fail_inbound(inbound_claim["id"], str(exc))
         log.warning("channel budget exceeded: %s", exc)
         CHANNELS.record(channel_id, "out", platform=platform, chat_id=chat_id,
                         user_id=user_id, text="", ok=False, detail="budget_exceeded")
         return {"reply": exc.user_message}
     except LLMError as exc:
+        if inbound_claim is not None:
+            store.fail_inbound(inbound_claim["id"], str(exc))
         log.error("channel llm failed: %s", exc)
         CHANNELS.record(channel_id, "out", platform=platform, chat_id=chat_id,
                         user_id=user_id, text="", ok=False, detail=str(exc)[:200])
         return {"reply": "AI 暂时不可用，稍后再试。"}
     except Exception as exc:
+        if inbound_claim is not None:
+            store.fail_inbound(inbound_claim["id"], str(exc))
         log.exception("channel inbound failed: %s", exc)
         CHANNELS.record(channel_id, "out", platform=platform, chat_id=chat_id,
                         user_id=user_id, text="", ok=False, detail=str(exc)[:200])
