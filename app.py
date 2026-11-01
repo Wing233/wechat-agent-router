@@ -591,7 +591,7 @@ def build_system_prompt(origin: dict | None = None, role: str = "owner",
         lines.extend([
             "",
             "## 本轮准入：明确动作",
-            "本轮是主人明确动作请求。可以调用工具；高危工具必须带 mandate 审批码。",
+            "本轮是主人明确动作请求。可以调用工具；高危工具必须带 mandate 审批码，或处于生效中的会话授权内。",
         ])
     if role == "owner" and SERVICES.get("toolbox"):
         try:
@@ -609,6 +609,22 @@ def build_system_prompt(origin: dict | None = None, role: str = "owner",
                     f"- {item.get('code', '')}：{item.get('tool') or item.get('action') or ''}，"
                     f"剩余 {item.get('remaining', 1)} 次，{item.get('expires_at', '')} 到期"
                 )
+        try:
+            sessions = SERVICES["toolbox"].list_sessions(limit=3)
+        except Exception:
+            sessions = {}
+        session_items = sessions.get("items") or []
+        if session_items:
+            lines.extend([
+                "",
+                "## 当前会话授权",
+                "以下授权已生效；高危工具可以直接调用，系统会自动按 scope 校验，不需要再申请 mandate。",
+            ])
+            for item in session_items:
+                lines.append(
+                    f"- {item.get('label') or item.get('preset')}：剩余 "
+                    f"{item.get('remaining_minutes')} 分钟，剩余 {item.get('remaining')} 次"
+                )
     if role != "owner":
         lines.extend([
             "",
@@ -622,6 +638,7 @@ def build_system_prompt(origin: dict | None = None, role: str = "owner",
             "## 主人权限（完整）",
             "对方是主人本人，不需要再确认身份。在明确动作轮次，能动手的事就直接动手做完，再汇报结果，不要只说做不到。",
             "- 高危工具（python_repl、run_sandbox、write_patch、snapshot restore、delegate_to_subagent、webhook_post、mcp_call、文件写入/删除、配置修改、记忆/技能写入、模型/渠道/预算变更、trace 读取等）必须带 mandate 审批码；没有审批码会被硬拒绝。",
+            "- 主人可以用“开发模式 2 小时”“运维 30 分钟”“模型 30 分钟”“授权全部 1 小时”开启会话授权；用“查看授权”“取消授权”管理。会话授权内高危工具直接执行，到期自动失效。",
             "- 服务器命令：run_command 可以在容器里执行 shell，用于装依赖、跑测试、git、看日志、处理文件；一次一条，别执行破坏性命令。",
             "- 文件：fs_list / fs_read / fs_write / fs_replace / fs_delete / fs_move 可读写 /app、/lyph-src、/workspace，默认立即生效。",
             "- 网络：web_search 搜实时信息，web_fetch 读网页正文，http_request 调任意公开 API。",
@@ -979,6 +996,15 @@ def _handle_inbound_impl(text: str, message: dict, origin: dict | None = None) -
     display = text or ("[图片]" if bundle.get("images") else "[附件]")
     store.add_message(session_id, "user", display)
     flush_outbox()
+
+    session_reply = governance.handle_session_command(
+        text, role, chat_type,
+        approved_by=str((origin or {}).get("user_id") or OWNER))
+    if session_reply:
+        store.log_route(session_id, display, "session", "command")
+        store.add_message(session_id, "assistant", session_reply)
+        send_text(session_reply)
+        return
 
     if origin is None and text in {"力扣登录", "更新力扣", "绑定力扣", "leetcode登录"}:
         if LEETCODE is not None:

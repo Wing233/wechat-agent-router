@@ -134,6 +134,39 @@ pending -> approved -> used
 
 `ask_human_confirmation` 不传 `tool` 也能创建审批，但这种审批**不能**用于高危工具，只适合查看状态。系统会在返回值和批准回复里提示。
 
+### 会话授权（平衡模式）
+
+如果每次高危操作都弹审批太碎，主人可以在**私聊**里发一条确定性命令，开启一段限时授权：
+
+```text
+开发模式 2 小时
+运维 30 分钟
+模型 30 分钟
+授权全部 1 小时
+查看授权
+取消授权
+```
+
+预设：
+
+| 预设 | 覆盖工具 | 路径 scope |
+|---|---|---|
+| `dev` | python_repl、run_sandbox、write_patch、devtools shell、ops 文件写入/删除等 | `/workspace`、`/app`、`/lyph-src` |
+| `ops` | devtools shell、admin 任务/配置、send_to_channel、webhook、slack、send_to_agent | `/workspace`、`/app`、`/lyph-src` |
+| `model` | model_add/remove/bind/switch、budget_set、optimize_apply | 不限 |
+| `all` | 所有高危工具 | `/workspace`、`/app`、`/lyph-src` |
+
+规则：
+
+- 只接受主人私聊命令，解析在 `governance.parse_session_command()`，**不是 LLM 工具**，模型不能给自己授权。
+- 最长 8 小时；`max_uses = min(2000, max(100, 分钟数 × 20))`。
+- 高危工具调用时如果没带 per-call mandate，`require_mandate` 会自动查找匹配的会话授权并扣减一次；per-call mandate 仍然优先。
+- 有路径参数的工具会校验 `path/cwd/src/dst/...` 是否在 scope 内；`python_repl` 这类没有路径参数的工具只受工具和时限约束。
+- 会话授权记录在 `confirmations` 表，`strength='session'`，`approved_by` 是实际发命令的主人；`uses` 每次扣减，到期/撤销/用完即失效。
+- 主人可以随时发“取消授权”立即撤销所有生效中的会话授权。
+
+注意：`python_repl` 和 shell 运行在 Router 容器里，能读到 `/data` 下的数据库和配置密钥。会话授权是限时止损，不是隔离沙箱；建议只在需要时开短窗口，用完就“取消授权”。
+
 ## 4. 高危工具
 
 当前强制 Mandate 的工具：

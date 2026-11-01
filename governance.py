@@ -72,6 +72,7 @@ READ_ONLY_TOOLS = {
     "model_list",
     "model_test",
     "cost_report",
+    "show_help",
     "eval_cases",
     "eval_report",
     "eval_drift",
@@ -133,6 +134,150 @@ HIGH_RISK_TOOLS = {
     "toolbox__sql_query",
 }
 _HIGH_RISK_SUFFIXES = {name.split("__")[-1] for name in HIGH_RISK_TOOLS}
+
+# Time-boxed owner grants. These are created only by a deterministic owner
+# command (never by an LLM tool), so a prompt-injected model cannot self-grant.
+SESSION_PRESETS = {
+    "dev": {
+        "label": "开发",
+        "tools": [
+            "toolbox__python_repl",
+            "toolbox__run_sandbox",
+            "toolbox__run_docker_sandbox",
+            "toolbox__write_patch",
+            "toolbox__snapshot_checkpoint",
+            "devtools__execute_bash",
+            "devtools__run_command",
+            "devtools__http_request",
+            "ops__fs_write",
+            "ops__fs_replace",
+            "ops__fs_delete",
+            "ops__fs_move",
+        ],
+        "paths": ["/workspace", "/app", "/lyph-src"],
+    },
+    "ops": {
+        "label": "运维",
+        "tools": [
+            "devtools__execute_bash",
+            "devtools__run_command",
+            "admin__set_job_interval",
+            "admin__set_job_enabled",
+            "admin__config_set",
+            "send_to_channel",
+            "webhook_post",
+            "slack_post",
+            "agents__send_to_agent",
+        ],
+        "paths": ["/workspace", "/app", "/lyph-src"],
+    },
+    "model": {
+        "label": "模型",
+        "tools": [
+            "model_add",
+            "model_remove",
+            "model_bind",
+            "model_switch_chat",
+            "budget_set",
+            "optimize_apply",
+        ],
+        "paths": [],
+    },
+    "all": {
+        "label": "全部",
+        "tools": sorted(HIGH_RISK_TOOLS),
+        "paths": ["/workspace", "/app", "/lyph-src"],
+    },
+}
+
+_PRESET_ALIASES = {
+    "开发模式": "dev", "开发": "dev",
+    "运维模式": "ops", "运维": "ops", "部署模式": "ops", "部署": "ops",
+    "模型模式": "model", "模型": "model",
+    "全部": "all", "所有": "all",
+}
+
+_SESSION_GRANT_RE = re.compile(
+    r"^\s*(?:开启|进入|授权)?\s*"
+    r"(开发模式|开发|运维模式|运维|部署模式|部署|模型模式|模型|全部|所有)"
+    r"\s*(?:授权)?\s*(\d+)\s*(分钟|分|小时|h|m)\s*$",
+    re.IGNORECASE,
+)
+_SESSION_GRANT_DEFAULT_RE = re.compile(
+    r"^\s*(?:开启|进入|授权)?\s*"
+    r"(开发模式|运维模式|部署模式|模型模式|全部|所有)\s*$",
+    re.IGNORECASE,
+)
+_SESSION_REVOKE_RE = re.compile(r"^\s*(?:取消|撤销|关闭)授权\s*$")
+_SESSION_LIST_RE = re.compile(r"^\s*(?:查看|当前|查询)授权(?:状态)?\s*$")
+
+
+def parse_session_command(text: str) -> dict | None:
+    """Parse an owner-issued session grant command.
+
+    Examples: ``开发模式 2 小时``, ``授权全部 30 分钟``, ``取消授权``.
+    """
+    raw = (text or "").strip()
+    if _SESSION_REVOKE_RE.match(raw):
+        return {"action": "revoke"}
+    if _SESSION_LIST_RE.match(raw):
+        return {"action": "list"}
+    match = _SESSION_GRANT_RE.match(raw)
+    if match:
+        preset = _PRESET_ALIASES.get(match.group(1))
+        if not preset:
+            return None
+        minutes = int(match.group(2))
+        if match.group(3).lower() in {"小时", "h"}:
+            minutes *= 60
+        return {"action": "grant", "preset": preset,
+                "minutes": max(1, min(minutes, 480))}
+    match = _SESSION_GRANT_DEFAULT_RE.match(raw)
+    if match:
+        preset = _PRESET_ALIASES.get(match.group(1))
+        if preset:
+            return {"action": "grant", "preset": preset, "minutes": 60}
+    return None
+
+
+def handle_session_command(text: str, role: str, chat_type: str,
+                           approved_by: str = "") -> str | None:
+    """Create/revoke/list session grants from a deterministic owner command."""
+    if role != "owner" or chat_type != "private":
+        return None
+    command = parse_session_command(text)
+    if not command:
+        return None
+    store = _MANDATE_STORE
+    if store is None:
+        return "授权服务未加载，暂时不能开启会话授权。"
+    if command["action"] == "grant":
+        result = store.session_grant(
+            command["preset"], command["minutes"], approved_by=approved_by)
+        if not result.get("ok"):
+            return f"授权失败：{result.get('error')}"
+        tools = result.get("tools") or []
+        shown = "、".join(tools[:8]) + ("…" if len(tools) > 8 else "")
+        return (f"已开启{result['label']}会话授权，有效期 {result['minutes']} 分钟。\n"
+                f"工具：{shown}\n"
+                f"路径：{'、'.join(result.get('paths') or []) or '不限'}\n"
+                f"最多执行 {result['max_uses']} 次，到期 {result['expires_at']}。\n"
+                "回复“查看授权”查看，回复“取消授权”立即撤销。")
+    if command["action"] == "revoke":
+        result = store.revoke_sessions()
+        return f"已撤销 {result.get('revoked', 0)} 个生效中的会话授权。"
+    result = store.list_sessions()
+    items = result.get("items") or []
+    if not items:
+        return "当前没有生效中的会话授权。"
+    lines = ["当前生效的会话授权："]
+    for item in items:
+        lines.append(
+            f"- {item['label'] or item['preset']}：剩余 "
+            f"{item['remaining_minutes']} 分钟，剩余 {item['remaining']} 次，"
+            f"到期 {item['expires_at']}")
+    return "\n".join(lines)
+
 
 _HASH_IGNORED_KEYS = {"mandate", "confirm_code", "_mandate", "timeout", "wait_ms"}
 
