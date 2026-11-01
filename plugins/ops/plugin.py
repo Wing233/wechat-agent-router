@@ -6,6 +6,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from executor_client import ExecutorClient
+
 ALLOWED_ROOTS = (Path("/app"), Path("/lyph-src"), Path("/app/plugins"), Path("/workspace"))
 DENY_PARTS = {".git", ".env", "config.json", "data", "node_modules", "__pycache__",
               "runtime", "host-before", "host-packages"}
@@ -30,12 +32,20 @@ class Ops:
         # WeChat approval round-trip is off by default. Set
         # plugins.ops.auto_approve=false to bring the approval flow back.
         self.auto_approve = bool(ctx.config.get("auto_approve", True))
+        self.executor = ExecutorClient(ctx)
 
     # ------------------------------------------------------------------
     def _resolve(self, raw: str) -> Path:
         if not raw or not str(raw).startswith("/"):
             raise OpsError("必须使用绝对路径")
         path = Path(raw).resolve(strict=False)
+        if self.executor.enabled:
+            root = Path("/workspace")
+            if path != root and root not in path.parents:
+                raise OpsError("隔离模式只允许 /workspace")
+            if any(part in DENY_PARTS for part in path.parts):
+                raise OpsError("该路径属于禁止访问的区域")
+            return path
         root = next((item for item in ALLOWED_ROOTS if path == item or item in path.parents), None)
         if root is None:
             raise OpsError("路径不在允许范围：/app、/lyph-src、/app/plugins、/workspace")
@@ -47,6 +57,11 @@ class Ops:
         return f"{text}：{path}"
 
     def list_dir(self, raw: str) -> dict:
+        if self.executor.enabled:
+            try:
+                return self.executor.fs("list", raw)
+            except Exception as exc:
+                raise OpsError(f"隔离执行器不可用：{exc}") from None
         path = self._resolve(raw)
         if not path.is_dir():
             raise OpsError("目录不存在")
@@ -60,6 +75,11 @@ class Ops:
         return {"path": str(path), "items": items[:200]}
 
     def read(self, raw: str) -> dict:
+        if self.executor.enabled:
+            try:
+                return self.executor.fs("read", raw)
+            except Exception as exc:
+                raise OpsError(f"隔离执行器不可用：{exc}") from None
         path = self._resolve(raw)
         if not path.is_file():
             raise OpsError("文件不存在")
@@ -69,6 +89,17 @@ class Ops:
                 "truncated": False}
 
     def _apply(self, action: str, path: Path, meta: dict) -> str:
+        if self.executor.enabled:
+            try:
+                result = self.executor.fs(
+                    action, str(path),
+                    content=str(meta.get("content") or ""),
+                    dst=str(meta.get("dst") or ""))
+            except Exception as exc:
+                raise OpsError(f"隔离执行器不可用：{exc}") from None
+            if result.get("error"):
+                raise OpsError(str(result["error"]))
+            return str(result.get("detail") or f"{action} {path}")
         if action == "write":
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(str(meta.get("content") or ""), encoding="utf-8")
@@ -145,6 +176,8 @@ class Ops:
 
     # ------------------------------------------------------------------
     def _git_sync(self, paths) -> str:
+        if self.executor.enabled:
+            return "（隔离模式：未同步 git）"
         rels: list[str] = []
         root = Path("/lyph-src")
         for item in paths:

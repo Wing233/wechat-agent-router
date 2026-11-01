@@ -16,8 +16,8 @@
 
 | 模式 | 行为 |
 |---|---|
-| `host`（默认） | 保持现状：`python_repl`、`run_sandbox`、`devtools run_command` 在 Router 容器内执行，能访问 `/app`、`/data`、`/lyph-src` 等挂载。 |
-| `isolated` | Python/Shell 发到独立 executor 容器；只挂 `/workspace`，非 root、只读根文件系统、无 `/data`、无源码挂载、无外网。执行器不可用时直接报错，**不会回退到 host**。 |
+| `host`（默认） | 保持现状：`python_repl`、`run_sandbox`、`devtools run_command`、文件写入/补丁在 Router 容器内执行，能访问 `/app`、`/data`、`/lyph-src` 等挂载。 |
+| `isolated` | Python/Shell、`write_patch`、`ops__fs_*` 都发到独立 executor 容器；只挂 `/workspace`，非 root、只读根文件系统、无 `/data`、无源码挂载、无外网。执行器不可用时直接报错，**不会回退到 host**。 |
 
 ## 启用步骤
 
@@ -59,6 +59,9 @@ docker compose up -d --force-recreate router
 python_repl("import os; print(os.getuid())")   -> 10001
 python_repl("open('/data/router.db')")         -> 失败（没有 /data）
 devtools run_command("ls /data")               -> 失败
+ops__fs_write("/workspace/test.txt", "hi")     -> 成功
+ops__fs_write("/app/test.txt", "hi")           -> 拒绝
+write_patch(cwd="/workspace")                  -> 在 /workspace 应用
 ```
 
 ## executor 的安全边界
@@ -85,20 +88,36 @@ networks: [executor]   # internal: true，无外网
 - 非 root（10001），drop 全部 capabilities。
 - 无外网；`pip install`、外部 API 调用在隔离模式下不可用。
 
-## 还没隔离的部分
+## 控制面工具
 
-这次只把 **Python/Shell 执行** 切到 executor。以下工具仍在 Router 容器内：
+`isolated` 模式默认拒绝以下工具（不会执行），避免模型绕过执行器碰 Router 的 `/data`、模型配置或外发通道：
 
 ```text
-write_patch
-ops__fs_write / fs_replace / fs_delete / fs_move
-snapshot_checkpoint restore
-admin__config_set
+admin__config_set / enable_plugin / disable_plugin / reload_plugin / set_job_*
 model_add / model_remove / model_bind / model_switch_chat
-send_to_channel / webhook / slack / mcp_call
+budget_set / optimize_apply
+send_to_channel / send_media / generate_image
+webhook_post / slack_post / mcp_call / browser_click_fill
+agents__send_to_agent / toolbox__delegate_to_subagent
+toolbox__github_api / toolbox__sql_query
+trace_get / trace_search / trace_explain / insight_report
+toolbox__snapshot_checkpoint / memory_update / learn_skill
+toolbox__list_mandates / revoke_mandate / governance_report
+site__set_preset_questions
 ```
 
-所以 `isolated` 不是完整的“安全多租户”方案。对外部署时，建议继续把文件写入、配置修改和模型管理拆到独立服务，或者给 Router 本身做非 root + 最小挂载。
+需要时可以在配置里显式放开：
+
+```json
+"executor": {
+  "mode": "isolated",
+  "allow_control_plane": true
+}
+```
+
+默认 `false`。个人高权限使用建议直接用 `mode=host`，不要把 `isolated` 和 `allow_control_plane=true` 当成默认组合。
+
+`write_patch`、`ops__fs_*` 在 isolated 模式下仍然可用，但只允许 `/workspace`；`snapshot_checkpoint` 暂不支持 isolated，会直接报错。
 
 ## 故障行为
 

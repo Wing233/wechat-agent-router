@@ -267,6 +267,14 @@ class Toolbox:
             return {"error": "patch 不能为空"}
         if len(patch.encode("utf-8")) > MAX_PATCH:
             return {"error": "patch 超过 64KB"}
+        if self.executor.enabled:
+            cwd = str(args.get("cwd") or "/workspace").strip()
+            if not (cwd == "/workspace" or cwd.startswith("/workspace/")):
+                return {"error": "隔离模式只允许 /workspace"}
+            try:
+                return self.executor.patch(patch, cwd)
+            except Exception as exc:
+                return {"error": f"隔离执行器不可用：{exc}"}
         cwd = _safe_root(args.get("cwd") or "/app")
         if not cwd.is_dir():
             return {"error": f"目录不存在：{cwd}"}
@@ -305,6 +313,8 @@ class Toolbox:
 
     def snapshot(self, args: dict) -> dict:
         action = str(args.get("action") or "create").lower()
+        if self.executor.enabled:
+            return {"error": "隔离模式暂不支持快照；请在 host 模式或使用 /workspace 文件工具"}
         if action == "list":
             SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
             items = []

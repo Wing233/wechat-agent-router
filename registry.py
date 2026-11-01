@@ -48,6 +48,8 @@ class ToolRegistry:
         for tool in self._tools.values():
             if allowed is not None and tool.name not in allowed:
                 continue
+            if governance is not None and not governance.executor_tool_allowed(tool.name):
+                continue
             parameters = tool.parameters
             if governance is not None and governance.is_high_risk_tool(tool.name):
                 parameters = copy.deepcopy(parameters)
@@ -93,12 +95,16 @@ class ToolRegistry:
         arguments = dict(arguments) if isinstance(arguments, dict) else {}
         try:
             import governance
-            checked = governance.check_mandate(name, arguments)
         except ImportError:  # pragma: no cover - governance is required in production
-            return {"error": "审批模块不可用，已拒绝执行"}
+            return {"error": "执行策略模块不可用，已拒绝执行"}
+        try:
+            policy = governance.check_executor_policy(name)
+            if policy is not None:
+                return policy
+            checked = governance.check_mandate(name, arguments)
         except Exception as exc:
-            log.warning("tool %s mandate check failed: %s", name, exc)
-            return {"error": f"审批校验失败，已拒绝执行：{exc}"}
+            log.warning("tool %s policy check failed: %s", name, exc)
+            return {"error": f"执行策略校验失败，已拒绝执行：{exc}"}
         if checked is not None:
             if checked.get("error"):
                 return checked

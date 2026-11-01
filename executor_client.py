@@ -66,3 +66,16 @@ class ExecutorClient:
              "cwd": cwd, "sandbox": bool(sandbox)},
             timeout,
         )
+
+    def fs(self, action: str, path: str, *, content: str = "",
+           dst: str = "", timeout: int = 30) -> dict:
+        return self._post(
+            "/v1/fs",
+            {"action": action, "path": path, "content": content, "dst": dst},
+            timeout,
+        )
+
+    def patch(self, patch: str, cwd: str = "/workspace",
+              timeout: int = 60) -> dict:
+        return self._post(
+            "/v1/patch", {"patch": patch, "cwd": cwd}, timeout)

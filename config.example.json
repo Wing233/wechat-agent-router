@@ -32,7 +32,8 @@
   "executor": {
     "mode": "host",
     "url": "http://executor:9800",
-    "token": "REPLACE_EXECUTOR_TOKEN"
+    "token": "REPLACE_EXECUTOR_TOKEN",
+    "allow_control_plane": false
   },
   "geo": {
     "vendor_dir": "/app/vendor",

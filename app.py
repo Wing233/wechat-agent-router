@@ -104,6 +104,9 @@ trace_ctx.install_logging()
 CONFIG_PATH = os.environ.get("ROUTER_CONFIG", "/app/config.json")
 with open(CONFIG_PATH, "r", encoding="utf-8") as fh:
     CFG = json.load(fh)
+governance.set_executor_policy(
+    str((CFG.get("executor") or {}).get("mode") or "host"),
+    bool((CFG.get("executor") or {}).get("allow_control_plane", False)))
 
 BASE = CFG["hub"]["base_url"]
 OWNER = CFG["hub"]["owner_id"]

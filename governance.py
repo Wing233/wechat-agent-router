@@ -135,6 +135,72 @@ HIGH_RISK_TOOLS = {
 }
 _HIGH_RISK_SUFFIXES = {name.split("__")[-1] for name in HIGH_RISK_TOOLS}
 
+# In isolated executor mode the model may run code/shell and edit /workspace,
+# but control-plane actions still live in the Router process. They are denied
+# unless the owner explicitly opts in with executor.allow_control_plane.
+ISOLATED_DENY_TOOLS = {
+    "admin__config_set",
+    "admin__enable_plugin",
+    "admin__disable_plugin",
+    "admin__reload_plugin",
+    "admin__set_job_interval",
+    "admin__set_job_enabled",
+    "model_add",
+    "model_remove",
+    "model_bind",
+    "model_switch_chat",
+    "budget_set",
+    "optimize_apply",
+    "send_to_channel",
+    "send_media",
+    "generate_image",
+    "webhook_post",
+    "slack_post",
+    "mcp_call",
+    "browser_click_fill",
+    "agents__send_to_agent",
+    "toolbox__delegate_to_subagent",
+    "toolbox__github_api",
+    "toolbox__sql_query",
+    "trace_get",
+    "trace_search",
+    "trace_explain",
+    "insight_report",
+    "toolbox__snapshot_checkpoint",
+    "toolbox__memory_update",
+    "toolbox__learn_skill",
+    "toolbox__list_mandates",
+    "toolbox__revoke_mandate",
+    "toolbox__governance_report",
+    "site__set_preset_questions",
+}
+
+_EXECUTOR_MODE = "host"
+_EXECUTOR_ALLOW_CONTROL_PLANE = False
+
+
+def set_executor_policy(mode: str, allow_control_plane: bool = False) -> None:
+    global _EXECUTOR_MODE, _EXECUTOR_ALLOW_CONTROL_PLANE
+    _EXECUTOR_MODE = str(mode or "host").strip().lower()
+    _EXECUTOR_ALLOW_CONTROL_PLANE = bool(allow_control_plane)
+
+
+def executor_tool_allowed(name: str) -> bool:
+    if _EXECUTOR_MODE != "isolated" or _EXECUTOR_ALLOW_CONTROL_PLANE:
+        return True
+    return name not in ISOLATED_DENY_TOOLS
+
+
+def check_executor_policy(name: str) -> dict | None:
+    if executor_tool_allowed(name):
+        return None
+    return {
+        "error": f"隔离执行器模式禁止控制面工具：{name}",
+        "hint": ("如需在 isolated 模式开放，设置 executor.allow_control_plane=true；"
+                 "个人高权限使用请用 executor.mode=host"),
+        "policy": "isolated_control_plane",
+    }
+
 # Time-boxed owner grants. These are created only by a deterministic owner
 # command (never by an LLM tool), so a prompt-injected model cannot self-grant.
 SESSION_PRESETS = {
