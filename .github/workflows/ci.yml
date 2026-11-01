@@ -28,7 +28,5 @@ jobs:
             pytest==9.1.1 \
             python-multipart==0.0.32 \
             tzdata==2026.5
-      - name: Compile
-        run: python -m py_compile app.py agent_broker.py executor_client.py executor/server.py governance.py registry.py store.py
-      - name: Test
-        run: python -m pytest -q tests
+      - name: Compile and test
+        run: bash scripts/ci.sh
