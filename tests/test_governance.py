@@ -169,6 +169,20 @@ def test_parse_approval_is_strict() -> None:
     assert governance.parse_approval("7GSJ") is None
 
 
+def test_parse_session_command() -> None:
+    assert governance.parse_session_command("开发模式 2 小时") == {
+        "action": "grant", "preset": "dev", "minutes": 120}
+    assert governance.parse_session_command("授权全部 30 分钟") == {
+        "action": "grant", "preset": "all", "minutes": 30}
+    assert governance.parse_session_command("运维 1 小时") == {
+        "action": "grant", "preset": "ops", "minutes": 60}
+    assert governance.parse_session_command("开发模式") == {
+        "action": "grant", "preset": "dev", "minutes": 60}
+    assert governance.parse_session_command("取消授权") == {"action": "revoke"}
+    assert governance.parse_session_command("查看授权") == {"action": "list"}
+    assert governance.parse_session_command("开发文档在哪里") is None
+
+
 def test_args_hash_binding() -> None:
     base = {"code": "print(1)"}
     assert governance.args_hash(base) == governance.args_hash(dict(base))

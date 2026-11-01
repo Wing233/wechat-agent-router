@@ -84,6 +84,20 @@
     "guidance": 7.5,
     "dir": "/workspace/generated"
   },
+  "plugins": {
+    "github_trending": {
+      "db": "/data/github_trending.db",
+      "count": 12
+    }
+  },
+  "jobs": {
+    "github_trending": {
+      "enabled": true,
+      "interval_minutes": 1440,
+      "window_minutes": 1440,
+      "daily_at": "09:00"
+    }
+  },
   "agents": [
     {
       "id": "echo",

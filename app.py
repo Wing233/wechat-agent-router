@@ -384,7 +384,7 @@ LOADER = PluginLoader(
     tools=TOOLS,
     jobs=JOBS,
     resources={"site": site, "geo": geo, "store": store, "agents": AGENTS,
-               "call_agent": call_agent, "settings": SETTINGS},
+               "call_agent": call_agent, "settings": SETTINGS, "llm": llm},
     root_config={"jobs": CFG.get("jobs", {}), "plugins": CFG.get("plugins", {}), "owner": OWNER,
                  "websearch": CFG.setdefault("websearch", {"provider": "bing", "default_count": 5}),
                  "toolbox": CFG.get("toolbox", {})},
@@ -572,6 +572,7 @@ def build_system_prompt(origin: dict | None = None, role: str = "owner",
         "你在即时通讯软件里服务站主。回答要简洁、口语化，不要 Markdown 表格。",
         "站点访问、访客、IP 归属地、AI 对话内容必须调用工具查询，绝不能编造数字；查不到就直说。",
         "涉及实时信息、新闻、价格、政策、人物、产品、网页内容时，先调用 web_search；需要读全文时用 web_fetch；不要凭记忆编造。",
+        "用户问 GitHub trending、每日开源项目、某个项目值不值得借鉴/接入时，调用 github_trending 的 trending_now / trending_list / trending_evaluate，不要凭记忆编造。",
         "涉及用户长期偏好、项目约定或以前解决过的问题时，先调用 memory_search；解决可复用的问题后用 learn_skill 固化。",
         "高危操作必须先调用 ask_human_confirmation，并传 tool（工具名）和 args（将执行参数）；拿到 code 后结束本轮，等主人回复 APPROVE；执行时把 code 作为 mandate 传给高危工具。",
         "写入长期记忆或技能（memory_update / learn_skill）也属于高危操作，同样要先申请 mandate。",
@@ -620,7 +621,7 @@ def build_system_prompt(origin: dict | None = None, role: str = "owner",
         lines.extend([
             "",
             "## 本轮准入：明确动作",
-            "本轮是主人明确动作请求。可以调用工具；高危工具必须带 mandate 审批码。",
+            "本轮是主人明确动作请求。可以调用工具；高危工具必须带 mandate 审批码，或处于生效中的会话授权内。",
         ])
     if role == "owner" and SERVICES.get("toolbox"):
         try:
@@ -638,6 +639,22 @@ def build_system_prompt(origin: dict | None = None, role: str = "owner",
                     f"- {item.get('code', '')}：{item.get('tool') or item.get('action') or ''}，"
                     f"剩余 {item.get('remaining', 1)} 次，{item.get('expires_at', '')} 到期"
                 )
+        try:
+            sessions = SERVICES["toolbox"].list_sessions(limit=3)
+        except Exception:
+            sessions = {}
+        session_items = sessions.get("items") or []
+        if session_items:
+            lines.extend([
+                "",
+                "## 当前会话授权",
+                "以下授权已生效；高危工具可以直接调用，系统会自动按 scope 校验，不需要再申请 mandate。",
+            ])
+            for item in session_items:
+                lines.append(
+                    f"- {item.get('label') or item.get('preset')}：剩余 "
+                    f"{item.get('remaining_minutes')} 分钟，剩余 {item.get('remaining')} 次"
+                )
     if role != "owner":
         lines.extend([
             "",
@@ -651,6 +668,7 @@ def build_system_prompt(origin: dict | None = None, role: str = "owner",
             "## 主人权限（完整）",
             "对方是主人本人，不需要再确认身份。在明确动作轮次，能动手的事就直接动手做完，再汇报结果，不要只说做不到。",
             "- 高危工具（python_repl、run_sandbox、write_patch、snapshot restore、delegate_to_subagent、webhook_post、mcp_call、文件写入/删除、配置修改、记忆/技能写入、模型/渠道/预算变更、trace 读取等）必须带 mandate 审批码；没有审批码会被硬拒绝。",
+            "- 主人可以用“开发模式 2 小时”“运维 30 分钟”“模型 30 分钟”“授权全部 1 小时”开启会话授权；用“查看授权”“取消授权”管理。会话授权内高危工具直接执行，到期自动失效。",
             "- 服务器命令：run_command 可以在容器里执行 shell，用于装依赖、跑测试、git、看日志、处理文件；一次一条，别执行破坏性命令。",
             "- 文件：fs_list / fs_read / fs_write / fs_replace / fs_delete / fs_move 可读写 /app、/lyph-src、/workspace，默认立即生效。",
             "- 网络：web_search 搜实时信息，web_fetch 读网页正文，http_request 调任意公开 API。",
@@ -1015,6 +1033,15 @@ def _handle_inbound_impl(text: str, message: dict, origin: dict | None = None) -
         store.log_route(session_id, display, "help")
         store.add_message(session_id, "assistant", answer)
         send_text(answer)
+        return
+
+    session_reply = governance.handle_session_command(
+        text, role, chat_type,
+        approved_by=str((origin or {}).get("user_id") or OWNER))
+    if session_reply:
+        store.log_route(session_id, display, "session", "command")
+        store.add_message(session_id, "assistant", session_reply)
+        send_text(session_reply)
         return
 
     if origin is None and text in {"力扣登录", "更新力扣", "绑定力扣", "leetcode登录"}:
