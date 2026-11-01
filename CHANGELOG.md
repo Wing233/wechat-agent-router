@@ -20,6 +20,7 @@
 - 新增 `evals.py` 确定性评测、`eval_run` / `eval_report` / `eval_drift`
 - 新增 `insights.py` 异常归因与 `insight_report` / `optimize_suggest` / `optimize_apply`
 - 新增 `docs/capabilities.md`
+- 新增 `show_help` / `help`：按当前入口、身份和已加载工具返回能力清单与示例；访客只读
 - `config.json` 新增 `trace_db`、`eval_db`、`eval_cases`、`model_bindings`、`spend_db`
 - 访客即使开启 `allow_guest_tools`，也会过滤模型、成本、链路、评测和 ops 等站主工具
 

@@ -32,6 +32,7 @@ import capabilities
 from timeutil import CST
 import evals
 from hub import Hub, HubError, parse_quote, parse_text
+import help_center
 from imagegen import ImageGen
 from llm import LLM, LLMBudgetError, LLMError
 import models
@@ -535,6 +536,34 @@ CAPS = capabilities.CapabilityService(
 CAPS.register()
 
 
+def show_help_tool(args: dict) -> dict:
+    endpoint = CHANNELS.endpoint(CURRENT_ENDPOINT.get())
+    principal = CHANNELS.principal(CURRENT_PRINCIPAL.get())
+    role = "owner" if (principal and principal.owner) else "guest"
+    return {
+        "role": role,
+        "text": help_center.build_help(
+            role=role,
+            channel=str(getattr(endpoint, "channel", "") or ""),
+            endpoint=str(getattr(endpoint, "id", "") or ""),
+            chat_type=str(getattr(endpoint, "kind", "") or ""),
+            tool_names=TOOLS.names(),
+            agents=AGENTS,
+            plugins=LOADER.loaded.keys(),
+            model_bindings=MODELS.list().get("bindings") or {},
+        ),
+    }
+
+
+TOOLS.register(
+    "show_help",
+    "当用户问 help、你能做什么、有哪些功能、怎么用时，返回完整能力清单和示例。不要凭空列能力。",
+    {"type": "object", "properties": {}},
+    show_help_tool,
+    aliases=("help", "capabilities"),
+)
+
+
 def send_media_tool(args: dict) -> dict:
     raw = str(args.get("path") or "").strip()
     if not raw:
@@ -678,6 +707,7 @@ def build_system_prompt() -> str:
         "用户要求某个项目 Agent 做事时调用 send_to_agent，不要假装已经完成。",
         "用户说“发到QQ/微信/某个群”时，先调用 list_channels 确认入口，再调用 send_to_channel；不要猜 endpoint。",
         "结果默认回到当前会话；只有用户明确要求时才跨入口发送。",
+        "用户问“你能做什么 / help / 有哪些功能 / 怎么用”时调用 show_help，不要凭空列能力。",
         "模型与运维：model_list / model_add / model_bind / model_switch_chat / cost_report / budget_set / trace_search / trace_explain / insight_report / eval_run / eval_drift / optimize_suggest / optimize_apply。只在站主明确要求时改模型或预算；不要擅自执行 optimize_apply。",
         "用户消息以 @AgentID 开头时，系统会直接路由到该 Agent，不经过你；你可以按普通对话理解。",
         "如果用户是在回复某条待处理通知，系统会先做匹配；你不需要猜。",
@@ -1019,6 +1049,14 @@ def _handle_inbound(envelope: Envelope, endpoint) -> None:
     display = text or ("[图片]" if bundle.get("images") else "[附件]")
     store.add_message(key, "user", display)
     flush_outbox()
+
+    if help_center.is_help_request(text):
+        answer = str(show_help_tool({}).get("text") or "")
+        store.log_route(key, display, "help")
+        store.add_message(key, "assistant", answer)
+        send_text(answer)
+        return
+
     # Approval / login notifications are owner-only. Guests must never be able
     # to answer someone else's pending notification by guessing a code.
     if is_owner and text in {"力扣登录", "更新力扣", "绑定力扣", "leetcode登录"}:

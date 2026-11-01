@@ -342,6 +342,7 @@ stateDiagram-v2
 
 | 你想做什么 | 直接说 | 工具 |
 |---|---|---|
+| 看所有能力 | “help / 你能做什么？” | `show_help` |
 | 看当前模型 | “现在用的什么模型？” | `model_list` |
 | 加一个免费模型 | “加一个免费模型，地址是 …，key 是 …” | `model_add` |
 | 切换主模型 | “把 chat 切到 xxx” | `model_switch_chat` |

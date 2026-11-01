@@ -338,6 +338,7 @@ There is no admin page for model, cost, trace or eval management. Everything is 
 
 | Goal | Say this | Tool |
 |---|---|---|
+| See all capabilities | “help / what can you do?” | `show_help` |
 | Inspect models | “What model are we using?” | `model_list` |
 | Add a free model | “Add a free model at …, key …” | `model_add` |
 | Switch the chat model | “Switch chat to xxx” | `model_switch_chat` |
