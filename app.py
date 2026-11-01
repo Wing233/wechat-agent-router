@@ -1291,19 +1291,24 @@ async def maintenance_loop() -> None:
     last_check = 0.0
     while True:
         try:
-            store.expire_stale()
-            flush_outbox()
+            # Everything here can block on SQLite or Hub HTTP; keep it off the
+            # event loop so inbound polling and agent heartbeats stay responsive.
+            await asyncio.to_thread(store.expire_stale)
+            await asyncio.to_thread(flush_outbox)
             failed_tasks = await asyncio.to_thread(BROKER.requeue_expired)
             for task in failed_tasks:
-                send_text(
+                await asyncio.to_thread(
+                    send_text,
                     f"任务 {task['id'][:8]} 执行超时，已失败："
                     f"{str(task.get('error') or '')[:200]}")
             if time.time() - last_check > 6 * 3600:
                 last_check = time.time()
-                store.cleanup_channel_outbox(7)
-                store.prune_decisions(int(CFG.get("decision_retention_days") or 30))
-                store.prune_inbound(30)
-                store.prune_agent_tasks(30)
+                await asyncio.to_thread(store.cleanup_channel_outbox, 7)
+                await asyncio.to_thread(
+                    store.prune_decisions,
+                    int(CFG.get("decision_retention_days") or 30))
+                await asyncio.to_thread(store.prune_inbound, 30)
+                await asyncio.to_thread(store.prune_agent_tasks, 30)
                 if LEETCODE is not None:
                     await asyncio.to_thread(LEETCODE.get_stats, 5)
         except Exception as exc:
