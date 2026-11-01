@@ -254,7 +254,7 @@ class TrendingService:
             status, body = self.ctx.http_request(
                 "GET", TRENDING_URL,
                 headers={"User-Agent": USER_AGENT, "Accept": "text/html"},
-                timeout=20, limit=500_000)
+                timeout=20, limit=2_000_000)
             if status == 200:
                 items = parse_trending_html(body)
         except Exception as exc:
