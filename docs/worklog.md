@@ -98,8 +98,14 @@ D:\xx\wechatbot\agent-router\desktop\.runtime\worklog\
 也可以命令行补全（路径以桌面端数据目录为准）：
 
 ```powershell
+# 源码模式
 python D:\xx\wechatbot\agent-router\worklog_collector.py `
   --config "D:\xx\wechatbot\agent-router\desktop\.runtime\worklog\config.json" `
+  --backfill 30
+
+# exe 模式
+python D:\xx\wechatbot\agent-router\worklog_collector.py `
+  --config "D:\xx\wechatbot\agent-router\desktop\dist\data\worklog\config.json" `
   --backfill 30
 ```
 
