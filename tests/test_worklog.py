@@ -76,6 +76,13 @@ def test_codex_index(tmp_path: Path) -> None:
     assert day["cwd"][r"D:\work\a"] == 2
 
 
+def test_finalize_target_uses_previous_day_at_4am() -> None:
+    from datetime import datetime
+    assert collector._finalize_target(datetime(2026, 11, 2, 3, 0), 4).isoformat() == "2026-10-31"
+    assert collector._finalize_target(datetime(2026, 11, 2, 4, 0), 4).isoformat() == "2026-11-01"
+    assert collector._finalize_target(datetime(2026, 11, 2, 23, 0), 4).isoformat() == "2026-11-01"
+
+
 def test_file_index(tmp_path: Path) -> None:
     root = tmp_path / "repo"
     (root / "project").mkdir(parents=True)
