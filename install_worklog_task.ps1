@@ -17,7 +17,7 @@ $action = New-ScheduledTaskAction -Execute $pythonw `
     -WorkingDirectory (Split-Path $script)
 
 $logon = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
-$daily = New-ScheduledTaskTrigger -Daily -At "22:50"
+$daily = New-ScheduledTaskTrigger -Daily -At "03:55"
 
 $principal = New-ScheduledTaskPrincipal `
     -UserId "$env:USERDOMAIN\$env:USERNAME" `

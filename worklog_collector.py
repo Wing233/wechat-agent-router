@@ -23,7 +23,7 @@ import sys
 import time
 from collections import Counter, defaultdict
 from ctypes import wintypes
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -38,7 +38,7 @@ DEFAULT_CONFIG = {
     "device_name": "pc-home-worklog",
     "sample_seconds": 30,
     "idle_skip_seconds": 300,
-    "finalize_time": "22:50",
+    "finalize_time": "04:00",
     "min_note_chars": 100,
     "worklog_dir": str(Path.home() / "Documents" / "worklog"),
     "browser_apps": ["chrome.exe", "msedge.exe", "firefox.exe", "brave.exe"],
@@ -510,30 +510,44 @@ def backfill(days: int, db: WorklogDB, client: LyphClient | None, config: dict,
             logging.warning("backfill %s failed: %s", day, exc)
 
 
+def _finalize_target(now: datetime, finalize_hour: int) -> date:
+    """At 04:00 collect yesterday; before 04:00 the latest complete day is two days ago."""
+    return now.date() - timedelta(days=1 if now.hour >= finalize_hour else 2)
+
+
+def catch_up(db: WorklogDB, client: LyphClient | None, config: dict,
+             finalize_hour: int, days: int = 7) -> None:
+    now = datetime.now().astimezone()
+    newest = _finalize_target(now, finalize_hour)
+    for offset in range(max(1, days)):
+        day = (newest - timedelta(days=offset)).isoformat()
+        existing = db.day(day) or {}
+        if existing.get("status") in ("uploaded", "published", "conflict", "empty"):
+            continue
+        if not db.samples(day):
+            continue
+        try:
+            logging.info("catch-up %s -> %s", day,
+                         finalize_day(day, db, client, config))
+        except Exception as exc:
+            logging.warning("catch-up %s failed: %s", day, exc)
+
+
 def daemon(db: WorklogDB, client: LyphClient | None, config: dict) -> None:
     sample_seconds = max(5, int(config.get("sample_seconds") or 30))
-    finalize_hour, finalize_minute = _parse_time(str(config.get("finalize_time") or "22:50"))
-    last_day = datetime.now().astimezone().date().isoformat()
+    finalize_hour, finalize_minute = _parse_time(str(config.get("finalize_time") or "04:00"))
     logging.info("collector started: sample=%ss finalize=%02d:%02d",
                  sample_seconds, finalize_hour, finalize_minute)
-    # Upload yesterday if the process was not running at finalize time.
-    try:
-        finalize_day((datetime.now().astimezone().date() - timedelta(days=1)).isoformat(),
-                     db, client, config)
-    except Exception as exc:
-        logging.warning("startup finalize failed: %s", exc)
+    catch_up(db, client, config, finalize_hour)
     while True:
         try:
             sample_once(db, config)
             now = datetime.now().astimezone()
-            today = now.date().isoformat()
-            if today != last_day:
-                finalize_day(last_day, db, client, config)
-                last_day = today
             if (now.hour, now.minute) >= (finalize_hour, finalize_minute):
-                existing = db.day(today) or {}
+                day = (now.date() - timedelta(days=1)).isoformat()
+                existing = db.day(day) or {}
                 if existing.get("status") not in ("uploaded", "published", "conflict", "empty"):
-                    finalize_day(today, db, client, config)
+                    finalize_day(day, db, client, config)
             db.prune(30)
         except Exception as exc:
             logging.warning("collector loop failed: %s", exc)

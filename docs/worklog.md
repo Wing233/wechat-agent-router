@@ -8,11 +8,11 @@ Windows 前台窗口采样
   + Codex 会话（只取 cwd/数量，不取对话内容）
   + 浏览器分类（只取分类/次数，不取 URL/标题）
   + 文件修改数量
-        ↓ 每天 22:50
+        ↓ 每天 04:00
   一条 [worklog] note
         ↓ LYPH device API
   captures
-        ↓ 服务器 23:30
+        ↓ 服务器 04:30
   LYPH 日报生成 → 发布为 public automatic 日志
 ```
 
@@ -78,17 +78,17 @@ powershell -NoProfile -ExecutionPolicy Bypass `
   -File D:\xx\wechatbot\agent-router\install_worklog_task.ps1
 ```
 
-任务在登录时启动，并在每天 22:50 再检查一次；`MultipleInstances=IgnoreNew` 保证只有一个采集进程。
+任务在登录时启动，并在每天 03:55 再检查一次；`MultipleInstances=IgnoreNew` 保证只有一个采集进程。
 
 ## 4. 日常运行
 
 - 采集进程每 30 秒采样一次前台窗口。
-- 每天 22:50 生成当天 note，上传到 LYPH。
-- 服务器每天 23:30 运行 `publish_daily.sh`：
+- 每天 04:00 生成前一天 note，上传到 LYPH。
+- 服务器每天 04:30 运行 `publish_daily.sh`：
   - 只处理当天全部 capture 都是 `[worklog]` note 的日期；
   - 触发 LYPH 日报生成；
   - 把生成结果更新为 `visibility=public` 并发布。
-- 如果 23:30 时电脑还没上传，第二天 23:30 会回看最近 3 天。
+- 如果 04:30 时电脑还没上传，第二天 04:30 会回看最近 3 天。
 - 如果机器关机/休眠，下次启动会补传昨天；采集进程的本地 SQLite 会保留采样。
 
 ## 5. 补全往日
