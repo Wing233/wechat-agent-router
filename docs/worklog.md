@@ -1,22 +1,35 @@
 # 工作电脑活动采集与 LYPH 日报
 
-这套能力把 Windows 工作电脑的活动汇总成 LYPH 日志：
+工作日志采集已经集成到 **WeChatAgentDesktop** 桌面端，不再单独安装计划任务。桌面端启动时自动启动采集线程，退出时自动停止。
 
 ```text
-Windows 前台窗口采样
-  + Git 提交
-  + Codex 会话（只取 cwd/数量，不取对话内容）
-  + 浏览器分类（只取分类/次数，不取 URL/标题）
-  + 文件修改数量
-        ↓ 每天 04:00
-  一条 [worklog] note
-        ↓ LYPH device API
-  captures
-        ↓ 服务器 04:30
-  LYPH 日报生成 → 发布为 public automatic 日志
+WeChatAgentDesktop
+  ├─ 本机 Agent（pc-home）
+  ├─ 本地控制台 API / UI
+  └─ WorklogService
+        ├─ 前台窗口采样（30s）
+        ├─ Git / Codex / 浏览器分类 / 文件改动
+        ├─ 每天 04:00 汇总前一天
+        └─ 上传 LYPH device API
+                ↓
+        LYPH 04:30 生成并发布日报
 ```
 
-## 1. 采集什么
+## 1. 在桌面端使用
+
+打开桌面端左侧「工作日志」：
+
+- 查看采集状态、今日采样数、LYPH 设备是否已配对
+- 启动 / 停止采集
+- 立即补采昨天
+- 补全最近 30 天
+- 修改采样间隔、空闲跳过、每日采集时间、本地日报目录
+- 保存 / 清除 LYPH 设备 token
+- 打开数据目录、本地日报目录、采集日志
+
+桌面端「设置」里的「开机自动启动」建议保持开启；这样登录 Windows 后桌面端会以无窗口模式启动，工作日志采集也会一起启动。
+
+## 2. 采集什么
 
 | 来源 | 内容 | 是否上传 |
 |---|---|---|
@@ -31,85 +44,66 @@ Windows 前台窗口采样
 
 窗口标题命中 `password`、`token`、`密码`、`私钥`、`银行卡`、`验证码` 等词时，上传为 `[敏感窗口已隐藏]`。浏览器窗口标题统一为 `[浏览器页面已隐藏]`。
 
-## 2. 文件与路径
+## 3. 数据位置
+
+源码模式：
 
 ```text
-D:\xx\wechatbot\agent-router\worklog_collector.py       # 采集守护进程
-D:\xx\wechatbot\agent-router\worklog_sources.py         # Git/Codex/浏览器/文件历史
-D:\xx\wechatbot\agent-router\worklog_config.example.json
-D:\xx\wechatbot\agent-router\install_worklog_task.ps1   # 当前用户计划任务
-%LOCALAPPDATA%\WeChatAgentWorklog\config.json           # 实际配置
-%LOCALAPPDATA%\WeChatAgentWorklog\secrets.json          # DPAPI 加密的设备 token
-%LOCALAPPDATA%\WeChatAgentWorklog\worklog.sqlite3       # 采样、每日状态
-%LOCALAPPDATA%\WeChatAgentWorklog\collector.log
-C:\Users\liubo\Documents\worklog\YYYY-MM-DD.md          # 本地 Markdown 副本
+D:\xx\wechatbot\agent-router\desktop\.runtime\worklog\
+  config.json
+  secrets.json          # DPAPI 加密的 LYPH 设备 token
+  worklog.sqlite3
+  collector.log
+  notes\                # 如果配置里使用默认目录
 ```
 
-## 3. 首次配置
+打包 exe 模式：
 
-1. 复制配置：
-
-```powershell
-Copy-Item D:\xx\wechatbot\agent-router\worklog_config.example.json `
-  "$env:LOCALAPPDATA\WeChatAgentWorklog\config.json"
+```text
+<exe 同目录>\data\worklog\
 ```
 
-2. 在 LYPH 服务器创建一个专用设备，拿到一次性 token：
+旧版独立采集器如果存在，桌面端首次启动会自动迁移：
 
-```bash
-# 在服务器 /opt/lyph-worklog
-docker cp create_device.py lyph-api-1:/data/create_device.py
-docker exec -u root lyph-api-1 chmod 644 /data/create_device.py
-docker exec lyph-api-1 python /data/create_device.py pc-home-worklog > device.json
+```text
+%LOCALAPPDATA%\WeChatAgentWorklog
 ```
 
-把 `device.json` 拷回 Windows，然后导入 DPAPI：
+迁移后旧目录保留作备份，不再写入。
 
-```powershell
-python D:\xx\wechatbot\agent-router\worklog_collector.py `
-  --import-device .\device.json
-Remove-Item .\device.json
+## 4. 每天的时间线
+
+```text
+04:00  WorklogService 汇总前一天并上传 [worklog] note
+04:30  LYPH 服务器 cron 生成日报并发布
 ```
 
-3. 安装当前用户计划任务（不需要管理员）：
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass `
-  -File D:\xx\wechatbot\agent-router\install_worklog_task.ps1
-```
-
-任务在登录时启动，并在每天 03:55 再检查一次；`MultipleInstances=IgnoreNew` 保证只有一个采集进程。
-
-## 4. 日常运行
-
-- 采集进程每 30 秒采样一次前台窗口。
-- 每天 04:00 生成前一天 note，上传到 LYPH。
-- 服务器每天 04:30 运行 `publish_daily.sh`：
-  - 只处理当天全部 capture 都是 `[worklog]` note 的日期；
-  - 触发 LYPH 日报生成；
-  - 把生成结果更新为 `visibility=public` 并发布。
-- 如果 04:30 时电脑还没上传，第二天 04:30 会回看最近 3 天。
-- 如果机器关机/休眠，下次启动会补传昨天；采集进程的本地 SQLite 会保留采样。
+- 采集线程随桌面端启动，不需要单独任务。
+- 如果 04:00 时电脑关机/休眠，下次桌面端启动会自动补跑前一天。
+- 如果 04:30 时还没上传，第二天 04:30 会回看最近 3 天。
+- 如果桌面端被关闭，采集也会停止；重新打开后继续。
 
 ## 5. 补全往日
 
-在 Windows 上：
-
-```powershell
-python D:\xx\wechatbot\agent-router\worklog_collector.py --backfill 30
-```
-
-它会按天读取：
+桌面端「工作日志」→「补全最近 30 天」，会读取：
 
 - Git 提交
 - Codex 会话（cwd/数量）
 - 浏览器分类（次数）
 - 文件修改数
-- 本地已有的采样
+- 本地已有采样
 
-每天生成一条 `[worklog]` note，上传到 LYPH。没有证据的日期会跳过；内容过短的日期也会跳过，避免生成“无意义日报”。
+每天生成一条 `[worklog]` note，上传到 LYPH。没有证据的日期会跳过；内容过短的日期也会跳过。
 
-然后在服务器上触发日报生成并发布：
+也可以命令行补全（路径以桌面端数据目录为准）：
+
+```powershell
+python D:\xx\wechatbot\agent-router\worklog_collector.py `
+  --config "D:\xx\wechatbot\agent-router\desktop\.runtime\worklog\config.json" `
+  --backfill 30
+```
+
+服务器端发布：
 
 ```bash
 docker exec lyph-api-1 python /data/worklog_publish.py \
@@ -142,15 +136,7 @@ docker exec lyph-api-1 python /data/worklog_publish.py \
 
 ## 7. 停止/卸载
 
-```powershell
-Stop-ScheduledTask -TaskName "WeChatAgentWorklog"
-Unregister-ScheduledTask -TaskName "WeChatAgentWorklog" -Confirm:$false
-```
-
-删除本地数据：
-
-```powershell
-Remove-Item -Recurse "$env:LOCALAPPDATA\WeChatAgentWorklog"
-```
-
-吊销 LYPH 设备：在 LYPH 后台「桌面与日报」或数据库 `devices` 表把对应设备 `revoked=1`。
+- 在桌面端「工作日志」点「停止采集」。
+- 或者直接退出桌面端。
+- 要彻底删除本地数据，退出桌面端后删除 `desktop\.runtime\worklog`。
+- 吊销 LYPH 设备：在 LYPH 后台「桌面与日报」或数据库 `devices` 表把对应设备 `revoked=1`。

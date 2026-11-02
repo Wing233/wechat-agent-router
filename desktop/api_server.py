@@ -246,6 +246,25 @@ class ApiHandler(BaseHTTPRequestHandler):
             return {"enabled": app.autostart_status()}
         if method == "POST" and path == "/api/autostart":
             return {"enabled": app.set_autostart(bool(body.get("enabled")))}
+        if method == "GET" and path == "/api/worklog":
+            return app.worklog_status()
+        if method == "POST" and path == "/api/worklog/start":
+            return app.worklog_start()
+        if method == "POST" and path == "/api/worklog/stop":
+            return app.worklog_stop()
+        if method == "POST" and path == "/api/worklog/finalize":
+            return app.worklog_finalize(str(body.get("day") or ""))
+        if method == "POST" and path == "/api/worklog/backfill":
+            return app.worklog_backfill(int(body.get("days") or 30))
+        if method == "PUT" and path == "/api/worklog/config":
+            return app.worklog_update_config(body)
+        if method == "POST" and path == "/api/worklog/device-token":
+            return app.worklog_set_token(str(body.get("token") or ""))
+        if method == "POST" and path == "/api/worklog/device-token/clear":
+            return app.worklog_clear_token()
+        if method == "POST" and path == "/api/worklog/open":
+            app.worklog_open(str(body.get("kind") or "data"))
+            return {"ok": True}
         if method == "POST" and path == "/api/server/connect":
             return app.server_connect(str(body.get("token") or ""), str(body.get("url") or ""))
         if method == "POST" and path == "/api/server/disconnect":

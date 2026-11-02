@@ -7,6 +7,7 @@ const state = {
   config: null,
   agent: null,
   router: null,
+  worklog: null,
   server: null,
   serverError: "",
   serverTried: false,
@@ -773,6 +774,79 @@ function renderLogs() {
   </div></section>`;
 }
 
+/* ------------------------------------------------------------------ worklog */
+function worklogDayLabel(day) {
+  return day ? day.slice(5) : "—";
+}
+
+function renderWorklog() {
+  const w = state.worklog || state.bootstrap?.worklog || {};
+  const cfg = w.config || {};
+  const running = Boolean(w.running);
+  const tokenReady = Boolean(w.device_configured);
+  const days = w.days || [];
+  const job = w.job || null;
+  const jobText = job
+    ? `${job.kind}${job.target ? ` · ${job.target}` : ""} · ${job.error ? `失败：${job.error}` : (job.result ? "完成" : "进行中")}`
+    : "空闲";
+  const dayRows = days.length ? days.map((row) => `
+    <div class="summary-item">
+      <strong>${esc(row.day)}</strong>
+      <span>${esc(row.status || "unknown")} · ${esc(row.chars || 0)} 字 · ${esc(row.updated_at || "")}</span>
+    </div>`).join("") : `<div class="empty">还没有上传记录</div>`;
+  return `<div class="grid-2">
+    <section class="card"><div class="card-head"><div><h2 class="card-title">工作电脑采集</h2><p class="card-sub">随桌面端启动；每天 04:00 汇总前一天，04:30 由 LYPH 发布。</p></div>${badge(running ? "运行中" : "已停止", running ? "ok" : "muted")}</div>
+      <div class="card-body">
+        <div class="summary-grid">
+          <div class="summary-item"><strong>${esc(w.samples_today || 0)}</strong><span>今日采样</span></div>
+          <div class="summary-item"><strong>${tokenReady ? "已配对" : "未配对"}</strong><span>LYPH 设备</span></div>
+          <div class="summary-item"><strong>${esc(w.next_finalize || "—")}</strong><span>下次采集</span></div>
+          <div class="summary-item"><strong>${esc(w.last_upload?.day || "—")}</strong><span>最近上传</span></div>
+        </div>
+        <div class="form-actions">
+          <button class="btn btn-sm ${running ? "btn-danger" : "btn-primary"}" data-action="worklog-toggle">${icon(running ? "stop" : "play")}${running ? "停止采集" : "启动采集"}</button>
+          <button class="btn btn-sm" data-action="worklog-finalize">${icon("clock")}立即补采昨天</button>
+          <button class="btn btn-sm" data-action="worklog-backfill">${icon("refresh")}补全最近 30 天</button>
+          <button class="btn btn-sm btn-ghost" data-action="worklog-refresh">${icon("refresh")}刷新</button>
+        </div>
+        <div class="divider"></div>
+        <dl class="kv">
+          <dt>当前任务</dt><dd>${esc(jobText)}</dd>
+          <dt>数据目录</dt><dd class="mono">${esc(w.paths?.data || "")}</dd>
+          <dt>日志</dt><dd class="mono">${esc(w.paths?.log || "")}</dd>
+          <dt>最近错误</dt><dd>${esc(w.last_error || "无")}</dd>
+        </dl>
+        <div class="form-actions">
+          <button class="btn btn-sm btn-ghost" data-action="worklog-open" data-kind="data">${icon("folder")}数据目录</button>
+          <button class="btn btn-sm btn-ghost" data-action="worklog-open" data-kind="notes">${icon("folder")}本地日报</button>
+          <button class="btn btn-sm btn-ghost" data-action="worklog-open" data-kind="log">${icon("external")}采集日志</button>
+        </div>
+      </div></section>
+
+    <section class="card"><div class="card-head"><div><h2 class="card-title">采集设置</h2><p class="card-sub">修改后会自动重启采集线程。</p></div></div><div class="card-body">
+      <div class="form-grid">
+        <div class="field"><label>采样间隔（秒）</label><input class="input" id="worklog-sample" type="number" min="5" max="600" value="${esc(cfg.sample_seconds || 30)}"></div>
+        <div class="field"><label>空闲跳过（秒）</label><input class="input" id="worklog-idle" type="number" min="60" max="7200" value="${esc(cfg.idle_skip_seconds || 300)}"></div>
+        <div class="field"><label>每日采集时间</label><input class="input" id="worklog-finalize" type="time" value="${esc(cfg.finalize_time || "04:00")}"></div>
+        <div class="field"><label>本地日报目录</label><input class="input mono" id="worklog-dir" value="${esc(cfg.worklog_dir || "")}"></div>
+      </div>
+      <div class="form-actions"><button class="btn btn-sm btn-primary" data-action="worklog-save">${icon("check")}保存设置</button></div>
+      <div class="divider"></div>
+      <div class="field"><label>LYPH 设备 token</label><div class="input-group"><input class="input mono" id="worklog-token" type="password" placeholder="${tokenReady ? "已保存，留空表示不修改" : "粘贴设备 token"}" autocomplete="off"><button class="btn btn-sm" data-action="worklog-token-save">${icon("key")}保存</button><button class="btn btn-sm btn-ghost" data-action="worklog-token-clear">${icon("x")}清除</button></div><small>只用于上传采集事件；保存在本机 DPAPI。</small></div>
+    </div></section>
+  </div>
+
+  <section class="card" style="margin-top:16px"><div class="card-head"><div><h2 class="card-title">最近日报</h2><p class="card-sub">状态由本机 SQLite 记录；uploaded / published 表示已上传 LYPH。</p></div></div><div class="card-body"><div class="summary-grid">${dayRows}</div></div></section>`;
+}
+
+async function loadWorklog(force = false) {
+  if (state.worklog && !force) return state.worklog;
+  const data = await api("/api/worklog");
+  state.worklog = data;
+  if (state.bootstrap) state.bootstrap.worklog = data;
+  return data;
+}
+
 /* ------------------------------------------------------------------ settings */
 function renderSettings() {
   const boot = state.bootstrap || {};
@@ -825,6 +899,13 @@ const PAGES = {
     subtitle: "身份、引擎、工作区和运行参数都在这里改。",
     render: renderLocal,
     actions: () => `<button class="btn btn-sm" type="submit" form="local-form">${icon("check")}保存并应用</button><button class="btn btn-sm btn-ghost" data-action="refresh">${icon("refresh")}刷新状态</button>`,
+  },
+  worklog: {
+    title: "工作日志", eyebrow: "WORKLOG",
+    subtitle: "前台窗口、Git、Codex、浏览器分类和文件改动，每天 04:00 汇总前一天。",
+    render: renderWorklog,
+    actions: () => `<button class="btn btn-sm" data-action="worklog-refresh">${icon("refresh")}刷新</button>`,
+    after: () => { if (!state.worklog) loadWorklog(true).then(renderPage); },
   },
   engines: {
     title: "引擎", eyebrow: "TOOLCHAIN",
@@ -1103,6 +1184,7 @@ async function refreshStatus() {
     const data = await api("/api/status");
     state.agent = data.agent;
     state.router = data.router;
+    state.worklog = data.worklog;
     if (state.bootstrap?.server) state.bootstrap.server.connected = data.server_connected;
     updateSidebar();
     if (state.page === "overview") updateOverviewLive();
@@ -1678,6 +1760,65 @@ document.addEventListener("click", async (event) => {
         }
         break;
       }
+      case "worklog-refresh":
+        await loadWorklog(true);
+        renderPage();
+        break;
+      case "worklog-toggle": {
+        const current = state.worklog || state.bootstrap?.worklog || {};
+        const result = await api(current.running ? "/api/worklog/stop" : "/api/worklog/start",
+          { method: "POST" });
+        state.worklog = result;
+        toast(current.running ? "工作日志采集已停止" : "工作日志采集已启动");
+        renderPage();
+        break;
+      }
+      case "worklog-finalize": {
+        toast("正在补采昨天，完成后刷新状态", "warn");
+        state.worklog = await api("/api/worklog/finalize", { method: "POST", body: {} });
+        renderPage();
+        break;
+      }
+      case "worklog-backfill": {
+        if (!await confirmAction("补全最近 30 天", "会读取本机历史 Git / Codex / 浏览器分类并上传；可能需要几分钟。", "开始补全")) break;
+        toast("已开始补全最近 30 天，完成后刷新状态", "warn");
+        state.worklog = await api("/api/worklog/backfill", { method: "POST", body: { days: 30 } });
+        renderPage();
+        break;
+      }
+      case "worklog-save": {
+        const payload = {
+          sample_seconds: Number($("worklog-sample")?.value || 30),
+          idle_skip_seconds: Number($("worklog-idle")?.value || 300),
+          finalize_time: $("worklog-finalize")?.value || "04:00",
+          worklog_dir: $("worklog-dir")?.value || "",
+        };
+        state.worklog = await api("/api/worklog/config", { method: "PUT", body: payload });
+        toast("工作日志设置已保存");
+        renderPage();
+        break;
+      }
+      case "worklog-token-save": {
+        const token = ($("worklog-token")?.value || "").trim();
+        if (!token) { toast("请先粘贴设备 token", "error"); break; }
+        state.worklog = await api("/api/worklog/device-token",
+          { method: "POST", body: { token } });
+        const input = $("worklog-token");
+        if (input) input.value = "";
+        toast("LYPH 设备 token 已保存");
+        renderPage();
+        break;
+      }
+      case "worklog-token-clear": {
+        if (!await confirmAction("清除设备 token", "清除后采集会暂停上传，本地采样仍保留。", "清除")) break;
+        state.worklog = await api("/api/worklog/device-token/clear", { method: "POST" });
+        toast("设备 token 已清除");
+        renderPage();
+        break;
+      }
+      case "worklog-open":
+        await api("/api/worklog/open", { method: "POST", body: { kind: target.dataset.kind || "data" } });
+        break;
       case "toggle-autostart": {
         const enabled = target.dataset.enabled === "true";
         const result = await api("/api/autostart", { method: "POST", body: { enabled: !enabled } });

@@ -7,6 +7,7 @@
 - 本地工作区：路径白名单、目录选择、打开目录
 - 服务器：Agent 注册、插件启停/重载、定时任务、脱敏配置、联网搜索、DeepSeek 余额
 - 渠道：QQ / Telegram / Discord 等经 Koishi 接入，统一身份映射、群聊 @、访客只读
+- 工作日志：前台窗口、Git、Codex、浏览器分类、文件改动，每天 04:00 汇总前一天并上传 LYPH
 - 本机日志：Agent 轮询、任务执行、配置修改
 
 ## 直接运行（源码）
@@ -34,6 +35,20 @@ python desktop\main.py --headless
 ```
 
 再次双击 exe/主程序时，会检测已运行的实例并直接打开它的界面，不会重复启动 Agent。
+
+## 工作日志（LYPH）
+
+左侧「工作日志」页面已经集成采集器，不需要单独安装计划任务：
+
+- 随桌面端启动/退出自动启停
+- 每 30 秒采样前台应用和窗口标题；空闲超过 5 分钟跳过
+- 汇总 Git 提交、Codex 会话数量、浏览器分类、文件修改数
+- 每天 04:00 生成前一天的 `[worklog]` note，上传到 LYPH
+- 支持「立即补采昨天」和「补全最近 30 天」
+- 设备 token 用 Windows DPAPI 加密
+- 不采集键盘、剪贴板、截图、浏览器 URL
+
+数据目录在 `desktop\.runtime\worklog`（源码）或 `data\worklog`（exe）。完整说明见 [docs/worklog.md](../docs/worklog.md)。
 
 ## 首次配置
 

@@ -109,17 +109,21 @@ def load_config(path: Path) -> dict:
     return json.loads(json.dumps(DEFAULT_CONFIG))
 
 
-def setup_logging(log_path: Path) -> None:
+def setup_logging(log_path: Path, stream: bool = True) -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         if log_path.exists() and log_path.stat().st_size > 5 * 1024 * 1024:
             log_path.replace(log_path.with_name(log_path.name + ".1"))
     except OSError:
         pass
+    handlers = [logging.FileHandler(log_path, encoding="utf-8")]
+    if stream:
+        handlers.append(logging.StreamHandler())
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
-        handlers=[logging.FileHandler(log_path, encoding="utf-8"), logging.StreamHandler()],
+        handlers=handlers,
+        force=True,
     )
 
 
@@ -533,13 +537,14 @@ def catch_up(db: WorklogDB, client: LyphClient | None, config: dict,
             logging.warning("catch-up %s failed: %s", day, exc)
 
 
-def daemon(db: WorklogDB, client: LyphClient | None, config: dict) -> None:
+def daemon(db: WorklogDB, client: LyphClient | None, config: dict,
+           stop_event: threading.Event | None = None) -> None:
     sample_seconds = max(5, int(config.get("sample_seconds") or 30))
     finalize_hour, finalize_minute = _parse_time(str(config.get("finalize_time") or "04:00"))
     logging.info("collector started: sample=%ss finalize=%02d:%02d",
                  sample_seconds, finalize_hour, finalize_minute)
     catch_up(db, client, config, finalize_hour)
-    while True:
+    while not (stop_event and stop_event.is_set()):
         try:
             sample_once(db, config)
             now = datetime.now().astimezone()
@@ -551,7 +556,11 @@ def daemon(db: WorklogDB, client: LyphClient | None, config: dict) -> None:
             db.prune(30)
         except Exception as exc:
             logging.warning("collector loop failed: %s", exc)
-        time.sleep(sample_seconds)
+        if stop_event is not None:
+            stop_event.wait(sample_seconds)
+        else:
+            time.sleep(sample_seconds)
+    logging.info("collector stopped")
 
 
 def main() -> None:

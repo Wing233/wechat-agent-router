@@ -23,6 +23,7 @@ from paths import (APP_NAME, VERSION, config_path as default_config_path, data_d
                    log_file, secrets_file, settings_file, state_file, web_dir)
 from store import DesktopSettings
 from secret_store import SecretStore
+from worklog_service import WorklogService
 
 import secrets as pysecrets
 
@@ -81,6 +82,7 @@ class DesktopApp:
         self.settings = DesktopSettings(settings_file(), SecretStore(secrets_file()))
         self.config = self._load_initial_config()
         self.window_mode = str(self.settings.get("window_mode", "auto"))
+        self.worklog = WorklogService(self.data_dir / "worklog", self.log)
 
     # ------------------------------------------------------------------
     def _load_initial_config(self) -> dict:
@@ -114,6 +116,10 @@ class DesktopApp:
                 self.start_agent()
             except Exception as exc:
                 self.log.add("WARN", f"本机 Agent 未启动：{exc}")
+        try:
+            self.worklog.start()
+        except Exception as exc:
+            self.log.add("WARN", f"工作日志采集未启动：{exc}")
 
     # ------------------------------------------------------------------
     def effective_server_url(self) -> str:
@@ -415,6 +421,44 @@ class DesktopApp:
         self.log.add("INFO", f"开机自启已{'开启' if result else '关闭'}")
         return result
 
+    # ------------------------------------------------------------------
+    def worklog_status(self) -> dict:
+        return self.worklog.status()
+
+    def worklog_start(self) -> dict:
+        return self.worklog.start()
+
+    def worklog_stop(self) -> dict:
+        return self.worklog.stop()
+
+    def worklog_finalize(self, day: str = "") -> dict:
+        return self.worklog.finalize(day)
+
+    def worklog_backfill(self, days: int = 30) -> dict:
+        return self.worklog.backfill(days)
+
+    def worklog_update_config(self, payload: dict) -> dict:
+        return self.worklog.update_config(payload)
+
+    def worklog_set_token(self, token: str) -> dict:
+        return self.worklog.set_device_token(token)
+
+    def worklog_clear_token(self) -> dict:
+        return self.worklog.clear_device_token()
+
+    def worklog_open(self, kind: str) -> None:
+        target = {
+            "data": self.worklog.base_dir,
+            "config": self.worklog.config_path,
+            "log": self.worklog.log_path,
+            "notes": Path(self.worklog.status()["paths"]["notes"]),
+        }.get(kind)
+        if target is None:
+            raise ApiError(400, "未知工作日志路径")
+        if not target.exists():
+            raise ApiError(404, f"路径不存在：{target}")
+        os.startfile(str(target))  # type: ignore[attr-defined]
+
     def open_path(self, kind: str, path: str = "") -> None:
         target: Path | None = None
         if kind == "config":
@@ -451,6 +495,7 @@ class DesktopApp:
             "server": {"url": self.effective_server_url(),
                        "connected": self.settings.has_service_token()},
             "autostart": self.autostart_status(),
+            "worklog": self.worklog.status(),
             "paths": {"config": str(self.config_path), "data": str(self.data_dir),
                       "log": str(log_file())},
         }
@@ -458,7 +503,8 @@ class DesktopApp:
     def status(self) -> dict:
         return {"time": int(time.time()), "agent": self.agent_status(),
                 "router": self.router_health(timeout=1.5),
-                "server_connected": self.settings.has_service_token()}
+                "server_connected": self.settings.has_service_token(),
+                "worklog": self.worklog.status()}
 
     def touch_ui(self) -> None:
         self.last_ui_seen = time.time()
@@ -490,6 +536,11 @@ class DesktopApp:
             self._shutting_down = True
         self.log.add("INFO", "桌面控制台正在退出")
         self.stop_event.set()
+        if self.worklog:
+            try:
+                self.worklog.stop()
+            except Exception:
+                pass
         if self.agent:
             try:
                 self.agent.stop()
