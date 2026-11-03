@@ -57,6 +57,7 @@ GUEST_TOOLS = {
     "site__visit_stats",
     "site__realtime",
     "leetcode__leetcode_stats",
+    "leetcode__leetcode_question",
     "demo_time__now",
     "demo_weather__now",
     "websearch__web_search",
@@ -64,6 +65,12 @@ GUEST_TOOLS = {
     "websearch__weather",
     "websearch__calculator",
     "show_help",
+    "lyph_tools__get_public_profile",
+    "lyph_tools__search_public_content",
+    "lyph_tools__get_public_content",
+    "lyph_tools__search_companies",
+    "lyph_tools__get_company",
+    "lyph_tools__aggregate_companies",
 }
 
 
@@ -411,7 +418,8 @@ LOADER = PluginLoader(
                "call_agent": call_agent, "settings": SETTINGS, "llm": llm},
     root_config={"jobs": CFG.get("jobs", {}), "plugins": CFG.get("plugins", {}), "owner": OWNER,
                  "websearch": CFG.setdefault("websearch", {"provider": "bing", "default_count": 5}),
-                 "toolbox": CFG.get("toolbox", {}), "executor": CFG.get("executor", {})},
+                 "toolbox": CFG.get("toolbox", {}), "executor": CFG.get("executor", {}),
+                 "lyph": CFG.get("lyph", {})},
     send_fn=send_text,
     services=SERVICES,
     secrets={"credential_key": CFG["credential_key"], "service_token": SERVICE_TOKEN,
@@ -603,7 +611,7 @@ def build_system_prompt(origin: dict | None = None, role: str = "owner",
         "写入长期记忆或技能（memory_update / learn_skill）也属于高危操作，同样要先申请 mandate。",
         "需要跑代码用 python_repl 或 run_sandbox；改代码用 write_patch；回滚用 snapshot_checkpoint。这些工具没有 mandate 会被硬拒绝。",
         "复杂任务可用 delegate_to_subagent 派给已注册 Agent；定时任务用 schedule_cron。",
-        "力扣/LeetCode/刷题/做题相关的问题调用 leetcode_stats。",
+        "力扣/LeetCode/刷题/做题相关的问题调用 leetcode_stats；查某道题的首次/最近提交记录调用 leetcode_question。",
         "用户发图片或文件时，系统会把图片交给视觉模型、把文件文字附在消息里；只根据实际提供的内容回答，不要假装看到了没读到的东西。",
         "用户要求某个项目 Agent 做事时调用 send_to_agent，不要假装已经完成。",
         "用户消息以 @AgentID 开头时，系统会直接路由到该 Agent，不经过你；你可以按普通对话理解。",
@@ -987,6 +995,69 @@ def answer_with_attachments(text: str, history: list[dict], bundle: dict,
         prompt += "\n\n[附件内容]\n" + "\n\n".join(notes)
     return llm_answer(prompt, history, origin, role,
                       classification=classification, allowed=allowed)
+
+
+def handle_session_command(text: str, role: str, chat_type: str,
+                           origin: dict | None, session_id: str,
+                           display: str) -> bool:
+    """Deterministic owner-only session grant commands. Never exposed to the LLM."""
+    if role != "owner" or chat_type != "private":
+        return False
+    command = governance.parse_session_command(text)
+    if not command:
+        return False
+    toolbox = SERVICES.get("toolbox")
+    if toolbox is None:
+        answer = "授权服务未加载，暂时不能开启会话授权。"
+    elif command["action"] == "grant":
+        result = toolbox.session_grant(
+            command["preset"], command["minutes"],
+            approved_by=str((origin or {}).get("user_id") or OWNER))
+        if result.get("ok"):
+            tools = result.get("tools") or []
+            shown = "、".join(tools[:8]) + ("…" if len(tools) > 8 else "")
+            answer = (f"已开启{result['label']}会话授权，有效期 {result['minutes']} 分钟。\n"
+                      f"工具：{shown}\n"
+                      f"路径：{'、'.join(result.get('paths') or []) or '不限'}\n"
+                      f"最多执行 {result['max_uses']} 次，到期 {result['expires_at']}。\n"
+                      "回复“查看授权”查看，回复“取消授权”立即撤销。")
+        else:
+            answer = f"授权失败：{result.get('error')}"
+    elif command["action"] == "revoke":
+        result = toolbox.revoke_sessions()
+        answer = f"已撤销 {result.get('revoked', 0)} 个生效中的会话授权。"
+    else:
+        result = toolbox.list_sessions()
+        items = result.get("items") or []
+        if not items:
+            answer = "当前没有生效中的会话授权。"
+        else:
+            lines = ["当前生效的会话授权："]
+            for item in items:
+                lines.append(
+                    f"- {item['label'] or item['preset']}：剩余 "
+                    f"{item['remaining_minutes']} 分钟，剩余 {item['remaining']} 次，"
+                    f"到期 {item['expires_at']}")
+            answer = "\n".join(lines)
+    try:
+        store.log_decision(
+            trace_id=trace_ctx.get_trace_id(),
+            role=role,
+            chat_id=str((origin or {}).get("chat_id") or OWNER),
+            text=text,
+            classification=governance.ACTION_EXPLICIT,
+            would_accept=True,
+            executed=True,
+            reason="会话授权命令",
+            rule="session_command",
+            meta={"command": command},
+        )
+    except Exception as exc:
+        log.warning("session command decision log failed: %s", exc)
+    store.log_route(session_id, display, "session", command["action"])
+    store.add_message(session_id, "assistant", answer)
+    send_text(answer)
+    return True
 
 
 def _handle_inbound(text: str, message: dict, origin: dict | None = None) -> None:
@@ -1490,11 +1561,38 @@ def notify_cancel(nid: str, request: Request):
 
 
 @app.post("/internal/leetcode/stats")
-def leetcode_stats(request: Request):
+async def leetcode_stats(request: Request):
     service_auth(request)
     if LEETCODE is None:
         raise HTTPException(503, "leetcode plugin unavailable")
-    return LEETCODE.get_stats(10)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    limit = body.get("limit", 10) if isinstance(body, dict) else 10
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 20:
+        limit = 10
+    return await asyncio.to_thread(LEETCODE.get_stats, limit)
+
+
+@app.post("/internal/leetcode/question")
+async def leetcode_question(request: Request):
+    service_auth(request)
+    if LEETCODE is None:
+        raise HTTPException(503, "leetcode plugin unavailable")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        raise HTTPException(400, "invalid body")
+    question = body.get("question")
+    if not isinstance(question, str) or not 1 <= len(question.strip()) <= 120:
+        raise HTTPException(400, "question required")
+    limit = body.get("limit", 5)
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 20:
+        limit = 5
+    return await asyncio.to_thread(LEETCODE.get_question_record, question.strip(), limit)
 
 
 @app.post("/internal/ask")

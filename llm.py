@@ -262,6 +262,7 @@ class LLM:
                     "input_price_per_m": float(item.get("input_price_per_m") or 0),
                     "output_price_per_m": float(item.get("output_price_per_m") or 0),
                     "tags": list(item.get("tags") or []),
+                    "headers": dict(item.get("headers") or {}),
                 })
             if providers:
                 return providers
@@ -317,11 +318,12 @@ class LLM:
         base_url = provider["base_url"]
         api_key = provider["api_key"]
         model = provider["model"]
+        headers = dict(provider.get("headers") or {})
         client = _get_litellm()
         if client is not None:
             try:
                 response = self._litellm_call(client, base_url, api_key, model,
-                                              messages, tools, max_tokens)
+                                              messages, tools, max_tokens, headers)
                 data = _as_dict(response)
                 message = _normalize_message(data)
                 message["_usage"] = self._bill(role, provider, data, response, trace_id)
@@ -330,14 +332,16 @@ class LLM:
                 raise
             except Exception as exc:
                 log.warning("litellm call failed (trace=%s): %s", trace_id, str(exc)[:400])
-        data = self._urllib_call(base_url, api_key, model, messages, tools, max_tokens)
+        data = self._urllib_call(base_url, api_key, model, messages, tools, max_tokens,
+                                 headers)
         message = _normalize_message(data)
         message["_usage"] = self._bill(role, provider, data, None, trace_id)
         return message
 
     def _litellm_call(self, client, base_url: str, api_key: str, model: str,
                       messages: list[dict], tools: list[dict] | None,
-                      max_tokens: int | None) -> object:
+                      max_tokens: int | None,
+                      headers: dict[str, str] | None = None) -> object:
         # Force the OpenAI-compatible transport so arbitrary proxy model names
         # (including ones containing "/") never get routed to another provider.
         kwargs = {
@@ -352,6 +356,8 @@ class LLM:
         }
         if max_tokens:
             kwargs["max_tokens"] = int(max_tokens)
+        if headers:
+            kwargs["extra_headers"] = dict(headers)
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
@@ -364,7 +370,8 @@ class LLM:
 
     def _urllib_call(self, base_url: str, api_key: str, model: str,
                      messages: list[dict], tools: list[dict] | None,
-                     max_tokens: int | None) -> dict:
+                     max_tokens: int | None,
+                     headers: dict[str, str] | None = None) -> dict:
         endpoint = base_url.rstrip("/") + "/chat/completions"
         payload: dict = {"model": model, "messages": messages, "temperature": 0.3}
         if max_tokens:
@@ -376,6 +383,8 @@ class LLM:
         request = urllib.request.Request(endpoint, data=body, method="POST")
         request.add_header("Content-Type", "application/json")
         request.add_header("Authorization", "Bearer " + api_key)
+        for header_name, header_value in (headers or {}).items():
+            request.add_header(str(header_name), str(header_value))
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
                 data = json.loads(response.read().decode("utf-8"))

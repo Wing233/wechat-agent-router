@@ -8,6 +8,7 @@ const state = {
   agent: null,
   router: null,
   worklog: null,
+  techStack: null,
   server: null,
   serverError: "",
   serverTried: false,
@@ -847,6 +848,64 @@ async function loadWorklog(force = false) {
   return data;
 }
 
+function renderTechStack() {
+  const tech = state.techStack || state.bootstrap?.tech_stack || {};
+  const summary = tech.summary || {};
+  const roots = (tech.project_roots || []).map((path) => "<li class=\"mono\">" + esc(path) + "</li>").join("");
+  const weekdays = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
+  const options = weekdays.map((label, index) => "<option value=\"" + index + "\"" +
+    (Number(tech.weekly_day ?? 6) === index ? " selected" : "") + ">" + label + "</option>").join("");
+  const stateLabel = tech.running ? "采集中" : (tech.enabled ? "已启用" : "已暂停");
+  const stateClass = tech.running ? "warn" : (tech.enabled ? "ok" : "muted");
+  const next = tech.enabled ? fmtTime(tech.next_run_at, true) : "已暂停";
+  const last = tech.last_completed_at ? fmtTime(tech.last_completed_at, true) : "尚无报告";
+  return "<div class=\"grid-2\">" +
+    "<section class=\"card\"><div class=\"card-head\"><div><h2 class=\"card-title\">本机技术栈周更</h2>" +
+    "<p class=\"card-sub\">扫描项目依赖与获准的 Agent 会话记录，生成含图标、使用说明和进度估算的本机复核报告。</p></div>" +
+    badge(stateLabel, stateClass) + "</div><div class=\"card-body\">" +
+    "<div class=\"summary-grid\">" +
+    "<div class=\"summary-item\"><strong>" + esc(summary.projects_scanned || 0) + "</strong><span>工程目录</span></div>" +
+    "<div class=\"summary-item\"><strong>" + esc(summary.codex_files_scanned || 0) + "</strong><span>Codex 会话文件</span></div>" +
+    "<div class=\"summary-item\"><strong>" + esc(summary.opencode_messages_scanned || 0) + "</strong><span>OpenCode 消息</span></div>" +
+    "<div class=\"summary-item\"><strong>" + esc(summary.workbuddy_files_scanned || 0) + "</strong><span>WorkBuddy 导出</span></div>" +
+    "<div class=\"summary-item\"><strong>" + esc(tech.technology_count || 0) + "</strong><span>识别技术</span></div>" +
+    "<div class=\"summary-item\"><strong>" + esc(tech.public_baseline_status || "尚未采集") + "</strong><span>Lyph 公开栈读取</span></div>" +
+    "</div><div class=\"form-actions\">" +
+    "<button class=\"btn btn-sm btn-primary\" data-action=\"techstack-run\">" + icon("play") + (tech.running ? "正在采集" : "立即采集") + "</button>" +
+    "<button class=\"btn btn-sm\" data-action=\"techstack-open\" data-kind=\"report\">" + icon("external") + "打开最新报告</button>" +
+    "<button class=\"btn btn-sm btn-ghost\" data-action=\"techstack-open\" data-kind=\"reports\">" + icon("folder") + "报告目录</button>" +
+    "<button class=\"btn btn-sm btn-ghost\" data-action=\"techstack-refresh\">" + icon("refresh") + "刷新</button></div>" +
+    "<div class=\"divider\"></div><dl class=\"kv\"><dt>最近采集</dt><dd>" + esc(last) +
+    "</dd><dt>下次采集</dt><dd>" + esc(next) + "</dd><dt>最近错误</dt><dd>" +
+    esc(tech.last_error || "无") + "</dd><dt>报告保存位置</dt><dd class=\"mono\">" +
+    esc(tech.paths?.reports || "") + "</dd></dl></div></section>" +
+    "<section class=\"card\"><div class=\"card-head\"><div><h2 class=\"card-title\">周计划与数据范围</h2>" +
+    "<p class=\"card-sub\">计划由 WeChatAgentDesktop 在本机运行；需保持程序运行或开启开机自启。</p></div></div>" +
+    "<div class=\"card-body\"><div class=\"form-grid\">" +
+    "<div class=\"field\"><label for=\"techstack-enabled\">每周自动采集</label><select class=\"input\" id=\"techstack-enabled\">" +
+    "<option value=\"true\"" + (tech.enabled ? " selected" : "") + ">开启</option><option value=\"false\"" +
+    (!tech.enabled ? " selected" : "") + ">暂停</option></select></div>" +
+    "<div class=\"field\"><label for=\"techstack-day\">每周星期</label><select class=\"input\" id=\"techstack-day\">" + options + "</select></div>" +
+    "<div class=\"field\"><label for=\"techstack-time\">本地时间</label><input class=\"input\" id=\"techstack-time\" type=\"time\" value=\"" +
+    esc(tech.weekly_time || "10:00") + "\"></div></div>" +
+    "<div class=\"form-actions\"><button class=\"btn btn-sm btn-primary\" data-action=\"techstack-save\">" +
+    icon("check") + "保存计划</button><button class=\"btn btn-sm btn-ghost\" data-action=\"techstack-open\" data-kind=\"config\">" +
+    icon("settings") + "采集配置</button><button class=\"btn btn-sm btn-ghost\" data-action=\"techstack-open\" data-kind=\"exports\">" +
+    icon("folder") + "WorkBuddy 导出目录</button></div>" +
+    "<div class=\"divider\"></div><div class=\"callout callout-info\">" + icon("shield") +
+    "<div><strong>本机隐私边界</strong><p>只把技术名称和聚合计数写入报告；不上传会话原文、源码或本机路径。WorkBuddy 仅读取你手动导出的历史文件。报告是待审草稿，不会自动发布到 Lyph。</p></div></div>" +
+    "<details style=\"margin-top:16px\"><summary>当前工程扫描目录（" + (tech.project_roots || []).length + "）</summary><ul class=\"mono\">" +
+    (roots || "<li>没有可扫描目录</li>") + "</ul></details></div></section></div>";
+}
+
+async function loadTechStack(force = false) {
+  if (state.techStack && !force) return state.techStack;
+  const data = await api("/api/tech-stack");
+  state.techStack = data;
+  if (state.bootstrap) state.bootstrap.tech_stack = data;
+  return data;
+}
+
 /* ------------------------------------------------------------------ settings */
 function renderSettings() {
   const boot = state.bootstrap || {};
@@ -906,6 +965,13 @@ const PAGES = {
     render: renderWorklog,
     actions: () => `<button class="btn btn-sm" data-action="worklog-refresh">${icon("refresh")}刷新</button>`,
     after: () => { if (!state.worklog) loadWorklog(true).then(renderPage); },
+  },
+  techstack: {
+    title: "技术栈周更", eyebrow: "TECH STACK",
+    subtitle: "从项目和 Agent 使用证据生成本机复核草案。",
+    render: renderTechStack,
+    actions: () => "<button class=\"btn btn-sm\" data-action=\"techstack-refresh\">" + icon("refresh") + "刷新</button>",
+    after: () => { if (!state.techStack) loadTechStack(true).then(renderPage); },
   },
   engines: {
     title: "引擎", eyebrow: "TOOLCHAIN",
@@ -1185,6 +1251,7 @@ async function refreshStatus() {
     state.agent = data.agent;
     state.router = data.router;
     state.worklog = data.worklog;
+    state.techStack = data.tech_stack;
     if (state.bootstrap?.server) state.bootstrap.server.connected = data.server_connected;
     updateSidebar();
     if (state.page === "overview") updateOverviewLive();
@@ -1760,6 +1827,29 @@ document.addEventListener("click", async (event) => {
         }
         break;
       }
+      case "techstack-refresh":
+        await loadTechStack(true);
+        renderPage();
+        break;
+      case "techstack-run":
+        state.techStack = await api("/api/tech-stack/run", { method: "POST" });
+        toast(state.techStack.running ? "已开始本机采集，完成后刷新报告" : "技术栈采集已提交", "warn");
+        renderPage();
+        break;
+      case "techstack-save": {
+        const payload = {
+          enabled: $("techstack-enabled")?.value === "true",
+          weekly_day: Number($("techstack-day")?.value ?? 6),
+          weekly_time: $("techstack-time")?.value || "10:00",
+        };
+        state.techStack = await api("/api/tech-stack/config", { method: "PUT", body: payload });
+        toast("技术栈周更计划已保存");
+        renderPage();
+        break;
+      }
+      case "techstack-open":
+        await api("/api/tech-stack/open", { method: "POST", body: { kind: target.dataset.kind || "report" } });
+        break;
       case "worklog-refresh":
         await loadWorklog(true);
         renderPage();

@@ -41,7 +41,11 @@ def test_health_is_open_and_limited_to_whitelisted_tools():
     assert response.status_code == 200
     body = response.json()
     assert body["ok"] is True and body["agents"] == ["lyph"]
-    assert body["tools"] == ["calculator", "weather", "web_fetch", "web_search"]
+    assert body["tools"] == [
+        "aggregate_companies", "calculator", "get_company", "get_public_content",
+        "get_public_profile", "search_companies", "search_public_content",
+        "weather", "web_fetch", "web_search",
+    ]
     assert body["rate_limit_per_minute"] == 60
 
 
@@ -187,3 +191,51 @@ def test_missing_lyph_key_means_no_agent_can_authenticate():
                            headers={"X-Agent-Key": ""})
     assert response.status_code == 401
     assert tools.calls == []
+
+
+def test_lyph_domain_tools_route_to_the_lyph_plugin():
+    client, tools, audits, _ = build()
+    cases = {
+        "get_public_profile": {"section": "stack"},
+        "search_public_content": {"query": "缓存"},
+        "get_public_content": {"content_id": "c1"},
+        "search_companies": {"city": "深圳"},
+        "get_company": {"company_id": "c-1"},
+        "aggregate_companies": {"group_by": "industry"},
+    }
+    for name, payload in cases.items():
+        response = client.post(f"/agent/tools/{name}", json=payload,
+                               headers={"X-Agent-Key": KEY})
+        assert response.status_code == 200, name
+        assert tools.calls[-1] == ("lyph_tools__" + name, payload)
+    assert {action for action, _ in audits} == {"tool_call"}
+
+
+def test_coded_tool_errors_keep_their_code_and_hide_nothing_else():
+    client, tools, audits, _ = build()
+    tools.reply = {"data": None, "blocks": [],
+                   "error": {"code": "not_found", "message": "内容不存在或尚未授权用于访客对话。"}}
+    response = client.post("/agent/tools/get_public_content", json={"content_id": "x"},
+                           headers={"X-Agent-Key": KEY})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is False
+    assert body["error"] == {"code": "not_found", "message": "内容不存在或尚未授权用于访客对话。"}
+    assert audits[-1][1]["ok"] is False and audits[-1][1]["error"] == "not_found"
+
+
+def test_no_allowed_tool_can_start_with_a_forbidden_prefix():
+    forbidden = agent_bridge.FORBIDDEN_TOOL_PREFIXES
+    assert not [name for name in agent_bridge.ALLOWED_TOOLS if name.startswith(forbidden)]
+    assert not [name for name in agent_bridge.ALLOWED_TOOLS
+                if name in agent_bridge.FORBIDDEN_TOOL_NAMES]
+    # Every target must exist in the registry naming convention, not in a denied namespace
+    # for the *caller*; targets are router-internal names.
+    assert set(agent_bridge.ALLOWED_TOOLS.values()) == {
+        "websearch__web_search", "websearch__web_fetch", "websearch__weather",
+        "websearch__calculator",
+        "lyph_tools__get_public_profile", "lyph_tools__search_public_content",
+        "lyph_tools__get_public_content", "lyph_tools__search_companies",
+        "lyph_tools__get_company", "lyph_tools__aggregate_companies",
+    }
+

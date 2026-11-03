@@ -24,6 +24,7 @@ from paths import (APP_NAME, VERSION, config_path as default_config_path, data_d
 from store import DesktopSettings
 from secret_store import SecretStore
 from worklog_service import WorklogService
+from tech_stack_service import TechStackService
 
 import secrets as pysecrets
 
@@ -83,6 +84,7 @@ class DesktopApp:
         self.config = self._load_initial_config()
         self.window_mode = str(self.settings.get("window_mode", "auto"))
         self.worklog = WorklogService(self.data_dir / "worklog", self.log)
+        self.tech_stack = TechStackService(self.data_dir / "tech-stack", self.log)
 
     # ------------------------------------------------------------------
     def _load_initial_config(self) -> dict:
@@ -120,6 +122,10 @@ class DesktopApp:
             self.worklog.start()
         except Exception as exc:
             self.log.add("WARN", f"工作日志采集未启动：{exc}")
+        try:
+            self.tech_stack.start()
+        except Exception as exc:
+            self.log.add("WARN", f"技术栈周更未启动：{type(exc).__name__}")
 
     # ------------------------------------------------------------------
     def effective_server_url(self) -> str:
@@ -459,6 +465,18 @@ class DesktopApp:
             raise ApiError(404, f"路径不存在：{target}")
         os.startfile(str(target))  # type: ignore[attr-defined]
 
+    def tech_stack_status(self) -> dict:
+        return self.tech_stack.status()
+
+    def tech_stack_run(self) -> dict:
+        return self.tech_stack.run_now()
+
+    def tech_stack_update_config(self, payload: dict) -> dict:
+        return self.tech_stack.update_config(payload)
+
+    def tech_stack_open(self, kind: str) -> None:
+        self.tech_stack.open_path(kind)
+
     def open_path(self, kind: str, path: str = "") -> None:
         target: Path | None = None
         if kind == "config":
@@ -496,6 +514,7 @@ class DesktopApp:
                        "connected": self.settings.has_service_token()},
             "autostart": self.autostart_status(),
             "worklog": self.worklog.status(),
+            "tech_stack": self.tech_stack.status(),
             "paths": {"config": str(self.config_path), "data": str(self.data_dir),
                       "log": str(log_file())},
         }
@@ -504,7 +523,8 @@ class DesktopApp:
         return {"time": int(time.time()), "agent": self.agent_status(),
                 "router": self.router_health(timeout=1.5),
                 "server_connected": self.settings.has_service_token(),
-                "worklog": self.worklog.status()}
+                "worklog": self.worklog.status(),
+                "tech_stack": self.tech_stack.status()}
 
     def touch_ui(self) -> None:
         self.last_ui_seen = time.time()
@@ -536,6 +556,11 @@ class DesktopApp:
             self._shutting_down = True
         self.log.add("INFO", "桌面控制台正在退出")
         self.stop_event.set()
+        if self.tech_stack:
+            try:
+                self.tech_stack.stop()
+            except Exception:
+                pass
         if self.worklog:
             try:
                 self.worklog.stop()

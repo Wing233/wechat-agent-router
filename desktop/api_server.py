@@ -265,6 +265,15 @@ class ApiHandler(BaseHTTPRequestHandler):
         if method == "POST" and path == "/api/worklog/open":
             app.worklog_open(str(body.get("kind") or "data"))
             return {"ok": True}
+        if method == "GET" and path == "/api/tech-stack":
+            return app.tech_stack_status()
+        if method == "POST" and path == "/api/tech-stack/run":
+            return app.tech_stack_run()
+        if method == "PUT" and path == "/api/tech-stack/config":
+            return app.tech_stack_update_config(body)
+        if method == "POST" and path == "/api/tech-stack/open":
+            app.tech_stack_open(str(body.get("kind") or "report"))
+            return {"ok": True}
         if method == "POST" and path == "/api/server/connect":
             return app.server_connect(str(body.get("token") or ""), str(body.get("url") or ""))
         if method == "POST" and path == "/api/server/disconnect":

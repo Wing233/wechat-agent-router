@@ -8,11 +8,11 @@ from __future__ import annotations
 import threading
 import time
 
-from store import TASK_LEASE_SECONDS
+from store import TASK_LEASE_SECONDS, TASK_MAX_ATTEMPTS
 
 
 class AgentBroker:
-    def __init__(self, store=None):
+    def __init__(self, store=None) -> None:
         self._lock = threading.Lock()
         self._agents: dict[str, dict] = {}
         self._waiters: dict[str, threading.Event] = {}
@@ -31,11 +31,10 @@ class AgentBroker:
             return bool(info and time.time() - info["last_seen"] < max_age)
 
     def enqueue(self, agent_id: str, payload: dict, wait_seconds: int,
-                max_attempts: int = 3) -> tuple[dict | None, str, str, dict]:
+                max_attempts: int = TASK_MAX_ATTEMPTS) -> tuple[dict | None, str, str, dict]:
         if self.store is None:
             raise RuntimeError("agent task store not attached")
-        task = self.store.create_agent_task(
-            agent_id, payload, max_attempts=max_attempts)
+        task = self.store.create_agent_task(agent_id, payload, max_attempts=max_attempts)
         task_id = task["id"]
         event = threading.Event()
         with self._lock:
@@ -54,8 +53,7 @@ class AgentBroker:
     def take(self, agent_id: str) -> dict | None:
         if self.store is None:
             return None
-        task = self.store.claim_agent_task(
-            agent_id, lease_seconds=TASK_LEASE_SECONDS)
+        task = self.store.claim_agent_task(agent_id, lease_seconds=TASK_LEASE_SECONDS)
         if not task:
             return None
         with self._lock:
@@ -89,8 +87,7 @@ class AgentBroker:
     def claim_delivery(self, task_id: str) -> bool:
         return bool(self.store and self.store.mark_agent_task_delivered(task_id))
 
-    def heartbeat(self, task_id: str, lease_token: str, *,
-                  agent_id: str = "") -> bool:
+    def heartbeat(self, task_id: str, lease_token: str, *, agent_id: str = "") -> bool:
         return bool(self.store and self.store.heartbeat_agent_task(
             task_id, lease_token, agent_id=agent_id))
 
@@ -111,9 +108,10 @@ class AgentBroker:
                 }
                 for agent_id, info in self._agents.items()
             }
+            waiting = len(self._waiters)
         tasks = self.store.agent_task_counts() if self.store else {}
         pending = self.store.agent_task_pending_by_agent() if self.store else {}
-        return {"agents": agents, "tasks": tasks, "pending": pending}
+        return {"agents": agents, "tasks": tasks, "pending": pending, "waiting": waiting}
 
 
 BROKER = AgentBroker()

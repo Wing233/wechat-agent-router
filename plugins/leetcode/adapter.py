@@ -6,12 +6,15 @@ import re
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from cryptography.fernet import Fernet, InvalidToken
 
 GRAPHQL = "https://leetcode.cn/graphql/"
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+CST = timezone(timedelta(hours=8))
+SUBMISSION_PAGE_SIZE = 20
+MAX_SUBMISSION_PAGES = 20
 
 STATUS_QUERY = "query { userStatus { isSignedIn username } }"
 STATS_QUERY = """
@@ -32,6 +35,106 @@ query($userSlug: String!) {
   }
 }
 """
+
+QUESTION_SEARCH_QUERY = """
+query problemsetQuestionList($categorySlug: String, $limit: Int, $skip: Int, $filters: QuestionListFilterInput) {
+  problemsetQuestionList: questionList(
+    categorySlug: $categorySlug
+    limit: $limit
+    skip: $skip
+    filters: $filters
+  ) {
+    totalNum
+    questions: data {
+      frontendId
+      title
+      titleCn
+      titleSlug
+      difficulty
+      status
+    }
+  }
+}
+"""
+
+QUESTION_DETAIL_QUERY = """
+query questionData($titleSlug: String!) {
+  question(titleSlug: $titleSlug) {
+    questionFrontendId
+    title
+    translatedTitle
+    titleSlug
+    difficulty
+  }
+}
+"""
+
+SUBMISSIONS_QUERY = """
+query submissionList($offset: Int!, $limit: Int!, $lastKey: String, $questionSlug: String!) {
+  submissionList(offset: $offset, limit: $limit, lastKey: $lastKey, questionSlug: $questionSlug) {
+    lastKey
+    hasNext
+    submissions {
+      id
+      statusDisplay
+      lang
+      runtime
+      timestamp
+      url
+      isPending
+      memory
+    }
+  }
+}
+"""
+
+
+class QuestionNotFound(Exception):
+    pass
+
+
+def _iso_time(value) -> str:
+    try:
+        return datetime.fromtimestamp(int(value), tz=CST).isoformat(timespec="seconds")
+    except (TypeError, ValueError, OSError):
+        return ""
+
+
+def _date_key(value) -> str:
+    try:
+        return datetime.fromtimestamp(int(value), tz=CST).date().isoformat()
+    except (TypeError, ValueError, OSError):
+        return ""
+
+
+def _timestamp(value) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _question_item(item: dict) -> dict:
+    title_en = str(item.get("title") or "").strip()
+    title_cn = str(item.get("titleCn") or item.get("translatedTitle") or "").strip()
+    return {
+        "frontend_id": str(item.get("frontendId") or item.get("questionFrontendId") or "").strip(),
+        "title": title_cn or title_en,
+        "title_en": title_en,
+        "slug": str(item.get("titleSlug") or "").strip(),
+        "difficulty": str(item.get("difficulty") or "").strip(),
+        "status": str(item.get("status") or "").strip(),
+    }
+
+
+def _slug_from_input(value: str) -> str:
+    match = re.search(r"/problems/([A-Za-z0-9_-]+)", value)
+    if match:
+        return match.group(1)
+    if re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)+", value):
+        return value
+    return ""
+
 
 LOGIN_PAGE = """<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8">
@@ -99,9 +202,12 @@ class LeetCode:
                 headers["x-csrftoken"] = csrf
         return headers
 
-    def _graphql(self, query: str, variables: dict | None = None, cookie: str = "") -> dict:
+    def _graphql(self, query: str, variables: dict | None = None, cookie: str = "",
+                 referer: str = "https://leetcode.cn/") -> dict:
         body = json.dumps({"query": query, "variables": variables or {}}).encode()
-        req = urllib.request.Request(GRAPHQL, data=body, method="POST", headers=self._headers(cookie))
+        headers = self._headers(cookie)
+        headers["Referer"] = referer
+        req = urllib.request.Request(GRAPHQL, data=body, method="POST", headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=15) as resp:
                 return json.loads(resp.read().decode("utf-8"))
@@ -169,7 +275,7 @@ class LeetCode:
         secret = json.loads(raw)
         return secret.get("cookie", ""), cred.get("account", ""), cred.get("status", "missing")
 
-    def get_stats(self, limit: int = 10) -> dict:
+    def _auth(self) -> tuple[str, str, str]:
         cookie, account, status = self._load_cookie()
         checked = time.time()
         if cookie and (status == "active" or checked - self._last_status > 300):
@@ -183,6 +289,140 @@ class LeetCode:
                 self.store.mark_credential("leetcode", "expired", error)
                 self.notify_login("expired")
                 status = "expired"
+        return cookie, account, status
+
+    def _resolve_question(self, question: str) -> dict:
+        question = (question or "").strip()
+        if not question:
+            raise QuestionNotFound()
+        slug = _slug_from_input(question)
+        if slug:
+            try:
+                data = self._graphql(QUESTION_DETAIL_QUERY, {"titleSlug": slug})
+                node = (data.get("data") or {}).get("question") or {}
+                if node:
+                    return _question_item(node)
+            except RuntimeError:
+                pass
+        data = self._graphql(QUESTION_SEARCH_QUERY, {
+            "categorySlug": "",
+            "limit": 20,
+            "skip": 0,
+            "filters": {"searchKeywords": question},
+        })
+        if data.get("errors"):
+            raise RuntimeError(str(data["errors"])[:300])
+        node = (data.get("data") or {}).get("problemsetQuestionList") or {}
+        questions = [_question_item(item) for item in node.get("questions") or [] if isinstance(item, dict)]
+        if not questions:
+            raise QuestionNotFound()
+        needle = question.lstrip("#").strip()
+        if needle.isdigit():
+            for item in questions:
+                if item["frontend_id"].lstrip("0") == needle.lstrip("0"):
+                    return item
+        lowered = needle.casefold()
+        for item in questions:
+            if lowered in {item["title"].casefold(), item["title_en"].casefold()}:
+                return item
+        return questions[0]
+
+    def _fetch_submissions(self, slug: str, cookie: str) -> tuple[list[dict], bool]:
+        items: list[dict] = []
+        last_key = ""
+        offset = 0
+        seen: set[tuple[str, ...]] = set()
+        has_next = False
+        for _ in range(MAX_SUBMISSION_PAGES):
+            data = self._graphql(SUBMISSIONS_QUERY, {
+                "offset": offset,
+                "limit": SUBMISSION_PAGE_SIZE,
+                "lastKey": last_key,
+                "questionSlug": slug,
+            }, cookie=cookie, referer="https://leetcode.cn/progress/")
+            if data.get("errors"):
+                raise RuntimeError(str(data["errors"])[:300])
+            node = (data.get("data") or {}).get("submissionList")
+            if node is None:
+                raise RuntimeError("login_expired")
+            page = [item for item in node.get("submissions") or [] if isinstance(item, dict)]
+            signature = tuple(str(item.get("id") or "") for item in page)
+            if signature and signature in seen:
+                break
+            if signature:
+                seen.add(signature)
+            items.extend(page)
+            has_next = bool(node.get("hasNext"))
+            if not has_next or not page:
+                break
+            last_key = str(node.get("lastKey") or "")
+            offset += SUBMISSION_PAGE_SIZE
+        return items, has_next
+
+    def get_question_record(self, question: str, limit: int = 5) -> dict:
+        checked = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        cookie, account, status = self._auth()
+        if not cookie:
+            self.notify_login("missing")
+            return {"login_status": "missing", "error": "尚未绑定力扣登录信息", "checked_at": checked}
+        if status != "active":
+            return {"login_status": status, "error": "力扣登录已过期，需要重新登录",
+                    "username": account, "checked_at": checked}
+        try:
+            info = self._resolve_question(question)
+        except QuestionNotFound:
+            return {"login_status": "ok", "error": "not_found", "message": "没有找到这道题",
+                    "username": account, "checked_at": checked}
+        except Exception as exc:
+            return {"login_status": "error", "error": str(exc)[:300], "username": account, "checked_at": checked}
+        try:
+            submissions, truncated = self._fetch_submissions(info["slug"], cookie)
+        except Exception as exc:
+            message = str(exc)
+            if "login_expired" in message:
+                self.store.mark_credential("leetcode", "expired", message)
+                self.notify_login("expired")
+                return {"login_status": "expired", "error": "力扣登录已过期，需要重新登录",
+                        "username": account, "checked_at": checked}
+            return {"login_status": "error", "error": message[:300], "username": account, "checked_at": checked}
+        timestamps = [_timestamp(item.get("timestamp")) for item in submissions]
+        timestamps = [value for value in timestamps if value > 0]
+        accepted = [_timestamp(item.get("timestamp")) for item in submissions
+                    if str(item.get("statusDisplay") or "").casefold() == "accepted"]
+        accepted = [value for value in accepted if value > 0]
+        accepted_days = sorted({_date_key(value) for value in accepted if _date_key(value)})
+        recent = sorted(submissions, key=lambda item: _timestamp(item.get("timestamp")), reverse=True)[:limit]
+        return {
+            "login_status": "ok",
+            "username": account,
+            "question": info,
+            "attempted": bool(submissions),
+            "first_submitted_at": _iso_time(min(timestamps)) if timestamps else None,
+            "last_submitted_at": _iso_time(max(timestamps)) if timestamps else None,
+            "first_accepted_at": _iso_time(min(accepted)) if accepted else None,
+            "last_accepted_at": _iso_time(max(accepted)) if accepted else None,
+            "submission_count": len(submissions),
+            "accepted_count": len(accepted),
+            "accepted_days": len(accepted_days),
+            "redo_count": max(0, len(accepted_days) - 1),
+            "truncated": truncated,
+            "recent": [
+                {
+                    "time": _iso_time(item.get("timestamp")),
+                    "status": str(item.get("statusDisplay") or ""),
+                    "lang": str(item.get("lang") or ""),
+                    "runtime": str(item.get("runtime") or ""),
+                    "memory": str(item.get("memory") or ""),
+                }
+                for item in recent
+            ],
+            "checked_at": checked,
+            "source_note": ("首次时间基于最近读取的提交记录，若记录较多可能不是真正首次；最近一次提交时间不受影响。"
+                            if truncated else "首次和最近一次均来自已读取的全部提交记录。"),
+        }
+
+    def get_stats(self, limit: int = 10) -> dict:
+        cookie, account, status = self._auth()
         if account:
             try:
                 data = self.fetch(account, cookie if status == "active" else "")

@@ -50,6 +50,15 @@ python desktop\main.py --headless
 
 数据目录在 `desktop\.runtime\worklog`（源码）或 `data\worklog`（exe）。完整说明见 [docs/worklog.md](../docs/worklog.md)。
 
+## 技术栈周更
+
+桌面端「技术栈周更」使用本机后台线程按周采集，默认周日 10:00；首次启动没有报告时会在后台立即补采；如果桌面端关闭而错过预定运行时间，会在下次启动后补跑。请保持 WeChatAgentDesktop 运行，或在「设置」开启开机自启。采集由桌面端直接执行，不依赖 WorkBuddy 定时任务。
+
+- 扫描配置工程根目录中的依赖清单，并在本地读取 Codex JSONL、OpenCode SQLite（只读）和 WorkBuddy 官方导出文件。
+- 报告写入 exe 同目录 data/tech-stack/reports；只保留技术名、聚合计数、图标/说明和进度估算，不上传会话原文、源码或本机路径。
+- WorkBuddy 会话需从官方界面导出后放入 data/tech-stack/workbuddy-exports；该目录可从「技术栈周更」页面打开。
+- 报告只作为待审草稿，不自动发布到 Lyph；页面可立即采集、启停周计划并打开报告。
+
 ## 首次配置
 
 1. 打开「本机 Agent」，填写：

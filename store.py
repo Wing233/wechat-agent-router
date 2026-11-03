@@ -52,6 +52,8 @@ CREATE TABLE IF NOT EXISTS channel_outbox (
   chat_id TEXT NOT NULL,
   user_id TEXT NOT NULL DEFAULT '',
   text TEXT NOT NULL,
+  media_type TEXT NOT NULL DEFAULT '',
+  media_path TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT 'pending',
   created_at TEXT NOT NULL,
   sent_at TEXT,
@@ -204,6 +206,15 @@ class Store:
     def init(self) -> None:
         with self._conn() as conn:
             conn.executescript(SCHEMA)
+            # Older databases predate channel media support; add the columns
+            # in place so existing outbox rows keep working.
+            columns = {row["name"] for row in
+                       conn.execute("PRAGMA table_info(channel_outbox)")}
+            for name in ("media_type", "media_path"):
+                if name not in columns:
+                    conn.execute(
+                        f"ALTER TABLE channel_outbox ADD COLUMN {name} "
+                        "TEXT NOT NULL DEFAULT ''")
 
     # --- generic state -------------------------------------------------
     def state_get(self, key: str, default: str = "") -> str:
@@ -364,20 +375,23 @@ class Store:
 
     # --- channel outbox -------------------------------------------------
     def enqueue_channel(self, channel_id: str, chat_id: str, text: str, *,
-                        platform: str = "", user_id: str = "") -> int:
+                        platform: str = "", user_id: str = "",
+                        media_type: str = "", media_path: str = "") -> int:
         with self._conn() as conn:
             cursor = conn.execute(
                 "INSERT INTO channel_outbox(channel_id,platform,chat_id,user_id,text,"
-                "status,created_at) VALUES(?,?,?,?,?,'pending',?)",
+                "media_type,media_path,status,created_at) VALUES(?,?,?,?,?,?,?,'pending',?)",
                 (str(channel_id)[:40], str(platform)[:40], str(chat_id)[:200],
-                 str(user_id)[:200], str(text)[:8000], now_iso()),
+                 str(user_id)[:200], str(text)[:8000], str(media_type)[:20],
+                 str(media_path)[:400], now_iso()),
             )
             return int(cursor.lastrowid)
 
     def list_channel_outbox(self, channel_id: str, limit: int = 20) -> list[dict]:
         with self._conn() as conn:
             rows = conn.execute(
-                "SELECT id,channel_id,platform,chat_id,user_id,text,status,created_at "
+                "SELECT id,channel_id,platform,chat_id,user_id,text,media_type,"
+                "media_path,status,created_at "
                 "FROM channel_outbox WHERE channel_id=? AND status='pending' "
                 "ORDER BY id LIMIT ?", (str(channel_id), max(1, min(int(limit), 100))),
             ).fetchall()
