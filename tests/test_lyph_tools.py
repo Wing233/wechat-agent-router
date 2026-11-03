@@ -233,3 +233,26 @@ def test_manifest_and_entry_load_through_the_real_plugin_loader(tmp_path):
         "lyph_tools__get_public_content", "lyph_tools__get_public_profile",
         "lyph_tools__search_companies", "lyph_tools__search_public_content",
     ])
+
+
+def test_missing_db_path_fails_the_plugin_load(tmp_path):
+    import shutil
+    from pathlib import Path
+
+    from plugin_loader import PluginLoader
+    from registry import ToolRegistry
+
+    source = Path(__file__).resolve().parents[1] / "plugins" / "lyph_tools"
+    target = tmp_path / "plugins" / "lyph_tools"
+    target.parent.mkdir(parents=True)
+    shutil.copytree(source, target, ignore=shutil.ignore_patterns("__pycache__"))
+    registry = ToolRegistry()
+    loader = PluginLoader(
+        tmp_path / "plugins", registry, [], {},
+        {"jobs": {}, "plugins": {}},          # loader root_config without lyph
+        lambda text: True,
+    )
+    loader.load_all()
+    assert "lyph_tools" in loader.errors
+    assert not [name for name in registry.names() if name.startswith("lyph_tools__")]
+

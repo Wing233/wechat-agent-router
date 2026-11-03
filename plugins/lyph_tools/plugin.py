@@ -164,8 +164,13 @@ def apply(ctx) -> None:
     db_path = str(cfg.get("db") or root.get("db") or "")
     enterprise = cfg.get("enterprise_db") or root.get("enterprise_db") or default_enterprise_path()
     if not db_path:
-        log.warning("lyph_tools registered without lyph db path; every query will report unavailable")
-    data = LyphPublicData(db_path or "/nonexistent/lyph.sqlite3", enterprise)
+        # Fail the plugin load instead of serving six tools that always say
+        # "unavailable": a silent downgrade is invisible until a user asks.
+        raise RuntimeError(
+            "lyph_tools requires lyph.db (router config 'lyph.db' or 'plugins.lyph_tools.db'); "
+            "the plugin loader root_config must pass the lyph section through"
+        )
+    data = LyphPublicData(db_path, enterprise)
     log.info("lyph_tools ready db=%s enterprise=%s", db_path or "-", enterprise or "-")
 
     for name, description, parameters, model, run in TOOL_SPECS:
