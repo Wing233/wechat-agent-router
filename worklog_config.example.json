@@ -1,0 +1,58 @@
+{
+  "lyph_base_url": "https://123.57.153.49",
+  "device_name": "pc-home-worklog",
+  "sample_seconds": 30,
+  "idle_skip_seconds": 300,
+  "finalize_time": "04:00",
+  "worklog_dir": "C:\\Users\\liubo\\Documents\\worklog",
+  "browser_apps": ["chrome.exe", "msedge.exe", "firefox.exe", "brave.exe"],
+  "redact_patterns": [
+    "password", "passwd", "token", "secret", "api key", "apikey",
+    "密码", "口令", "私钥", "助记词", "银行卡", "身份证", "验证码",
+    "支付", "转账", "登录", "sign in", "authenticator"
+  ],
+  "sources": {
+    "git": {
+      "enabled": true,
+      "repos": [
+        "D:\\xx\\wechatbot\\agent-router",
+        "D:\\xx\\wechatbot\\lyph",
+        "D:\\xx\\wechatbot\\public\\wechat-agent-router",
+        "D:\\xx\\wechatbot\\public\\lyph",
+        "D:\\xx\\lyph"
+      ],
+      "authors": ["liubo", "Wing233"],
+      "exclude_authors": ["wechat-agent-router", "evolution", "bot"]
+    },
+    "browser": {
+      "enabled": true,
+      "profiles": [
+        {
+          "name": "edge",
+          "path": "C:\\Users\\liubo\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\History",
+          "exclude_domains": ["localhost", "127.0.0.1", "newtab", "bing.com"]
+        },
+        {
+          "name": "chrome",
+          "path": "C:\\Users\\liubo\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\History",
+          "exclude_domains": ["localhost", "127.0.0.1", "newtab", "google.com"]
+        }
+      ]
+    },
+    "files": {
+      "enabled": true,
+      "roots": ["D:\\xx\\wechatbot", "D:\\xx\\lyph"],
+      "exclude_projects": ["scratch", "data", "backups",
+                            "agent-router-merge", "agent-router-session",
+                            "agent-router-task-state", "agent-router-trending",
+                            "agent-router-media", "agent-router-worklog"]
+    },
+    "codex": {
+      "enabled": true,
+      "root": "C:\\Users\\liubo\\.codex\\sessions"
+    },
+    "workbuddy": {
+      "enabled": false
+    }
+  }
+}

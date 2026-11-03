@@ -1,2 +1,5 @@
 pywebview>=6.0
 pyinstaller>=6.10
+psutil>=5.9
+pywin32>=306
+requests>=2.31

@@ -25,10 +25,16 @@ try {
         --workpath "desktop\build" `
         --specpath "desktop" `
         --add-data "$WebData;desktop\web" `
+        --paths "$Root" `
         --paths "$AgentPath" `
         --collect-all webview `
         --collect-all pythonnet `
         --collect-all clr_loader `
+        --hidden-import psutil `
+        --hidden-import win32gui `
+        --hidden-import win32process `
+        --hidden-import pywintypes `
+        --hidden-import pythoncom `
         "$Entry"
     if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed with exit code $LASTEXITCODE" }
     Write-Host ""
