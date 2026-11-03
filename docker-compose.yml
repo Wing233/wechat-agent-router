@@ -1,23 +1,31 @@
 services:
   router:
-    image: wechat-agent-router:0.1.0
+    build: .
+    image: wechat-agent-router:dev
     container_name: wechat-agent-router
     restart: unless-stopped
     ports:
       - "9900:9900"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
-      - .:/app
+      - ./config.json:/app/config.json
       - ./data:/data
-      - ./geodb:/geodb:ro
-      - ./sandbox:/sandbox
       - ./workspace:/workspace
-      - /opt/lyph:/lyph-src
-      - /opt/git/wechat-agent-router.git:/opt/git/wechat-agent-router.git
-      - /opt/git/lyph.git:/opt/git/lyph.git
-      - /var/lib/docker/volumes/lyph_business/_data:/lyph-data
+      - ./plugins:/app/plugins
+      - ./sandbox:/sandbox
+      - ./geodb:/geodb:ro
+      # lyph 公开数据来源：lyph_tools 直读 lyph 主库与企业公开快照。
+      # 默认值取自部署机（/opt/lyph 源码目录 + lyph_business 卷）；脱离 lyph 单独
+      # 运行时用 LYPH_SRC_PATH / LYPH_DATA_PATH 指到别处，或挂空目录让相关工具
+      # 返回 unavailable。
+      - ${LYPH_SRC_PATH:-/opt/lyph}:/lyph-src
+      - ${LYPH_DATA_PATH:-/var/lib/docker/volumes/lyph_business/_data}:/lyph-data
     networks:
       - default
       - hub
+      # Router -> lyph 回调（/api/v1/internal/router/task）按 lyph-api-1 解析。
+      # 没有 lyph 部署时删掉这一行与下面的 lyph 网络定义即可单独起服务。
       - lyph
 
 networks:

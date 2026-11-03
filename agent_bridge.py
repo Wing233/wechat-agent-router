@@ -28,6 +28,13 @@ ALLOWED_TOOLS = {
     "web_fetch": "websearch__web_fetch",
     "weather": "websearch__weather",
     "calculator": "websearch__calculator",
+    # lyph public-domain tools, implemented by plugins/lyph_tools.
+    "get_public_profile": "lyph_tools__get_public_profile",
+    "search_public_content": "lyph_tools__search_public_content",
+    "get_public_content": "lyph_tools__get_public_content",
+    "search_companies": "lyph_tools__search_companies",
+    "get_company": "lyph_tools__get_company",
+    "aggregate_companies": "lyph_tools__aggregate_companies",
 }
 
 # Explicit denials keep the intent auditable even though the allow-list above
@@ -238,15 +245,21 @@ class AgentBridge:
             "elapsed_ms": elapsed_ms,
         }
         if isinstance(result, dict) and result.get("error"):
-            message = str(result.get("error"))[:300]
+            # Handlers may return a coded error; anything else stays a generic tool_error.
+            raw_error = result.get("error")
+            if isinstance(raw_error, dict):
+                code = str(raw_error.get("code") or "tool_error")[:40]
+                message = str(raw_error.get("message") or "")[:300]
+            else:
+                code, message = "tool_error", str(raw_error)[:300]
             payload = {
                 "ok": False,
                 "agent": agent["id"],
                 "tool": tool,
-                "error": {"code": "tool_error", "message": message},
+                "error": {"code": code, "message": message},
                 "elapsed_ms": elapsed_ms,
             }
-            audit_detail.update(ok=False, error=message)
+            audit_detail.update(ok=False, error=code)
         else:
             payload = {
                 "ok": True,

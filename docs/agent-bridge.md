@@ -10,14 +10,21 @@ lyph chat_agent ──POST /agent/tools/{tool}──▶ Router agent_bridge
       │                                     websearch 插件
       │                                （web_search / web_fetch /
       │                                  weather / calculator）
+      │                                     lyph_tools 插件
+      │                                （公开资料 / 已授权内容 /
+      │                                  企业快照 / 游戏条目）
       │
-Router send_to_agent ──POST callback_url──▶ lyph（待实现，见第 5 节）
+Router send_to_agent ──POST callback_url──▶ lyph /api/v1/internal/router/task
 ```
 
-- lyph → Router：四个只读工具，白名单硬编码，无法通过配置放宽。
+- lyph → Router：十个只读工具（4 个联网 + 6 个 lyph 公开域），白名单硬编码，
+  无法通过配置放宽。lyph 侧只保留入口、权限、会话、配额、缓存与 UI 渲染。
 - Router → lyph：沿用现有 `send_to_agent` + `call_agent`，`transport=http` 时向
-  `callback_url` 发送带 `X-Router-Signature` 的 POST。lyph 侧的接收端点尚未实现，
-  因此当前只是配置骨架。
+  `callback_url` 发送带 `X-Router-Signature` 和 `X-Router-Timestamp` 的 POST。
+  lyph 侧接收端点是 `api/lyph/agent_protocol.py` 的
+  `POST /api/v1/internal/router/task`：对原始请求体做 HMAC-SHA256，时间戳超过
+  300 秒即拒绝，密钥取自 lyph 的 `ROUTER_CALLBACK_SECRET`（不足 32 字符时端点
+  返回 503，即未启用）。该端点只做整轮问答，不是工具级回调。
 - 明确不开放：`ops`、`devtools`、`admin`、`reminders`、`todo`、
   `run_command`、`fs_*`、`http_request`、`send_to_agent`、`generate_image`、
   `send_media`。
@@ -26,9 +33,11 @@ Router send_to_agent ──POST callback_url──▶ lyph（待实现，见第 
 
 ### POST `/agent/tools/{tool}`
 
-鉴权：`X-Agent-Key: <lyph 的 api_key>`，也接受
+鉴权：`X-Agent-Key: <lyph 的 bridge_key>`，也接受
 `Authorization: Bearer <key>`。只认 `agents` 配置中 id 属于
-`agent_bridge.allowed_agents`（默认 `["lyph"]`）且 `api_key` 非空的条目。
+`agent_bridge.allowed_agents`（默认 `["lyph"]`）且 `bridge_key` 或 `api_key`
+非空的条目；两者都存在时**只接受 `bridge_key`**，未配置 `bridge_key` 才回落到
+`api_key`。这是为了让工具凭证与 broker 凭证（`/agent/register|tasks|result`）分离。
 
 请求体就是工具参数对象（最大 32 KiB）：
 
@@ -93,7 +102,9 @@ curl -X POST http://router:9900/agent/tools/web_search \
   "service": "agent-bridge",
   "time": "2026-10-31T00:00:00+00:00",
   "agents": ["lyph"],
-  "tools": ["calculator", "weather", "web_fetch", "web_search"],
+  "tools": ["aggregate_companies", "calculator", "get_company", "get_public_content",
+            "get_public_profile", "search_companies", "search_public_content",
+            "weather", "web_fetch", "web_search"],
   "rate_limit_per_minute": 60
 }
 ```
@@ -106,7 +117,18 @@ curl -X POST http://router:9900/agent/tools/web_search \
 | `web_fetch` | `websearch__web_fetch` | ✅ |
 | `weather` | `websearch__weather` | ✅ |
 | `calculator` | `websearch__calculator` | ✅ |
+| `get_public_profile` | `lyph_tools__get_public_profile` | ✅ |
+| `search_public_content` | `lyph_tools__search_public_content` | ✅ |
+| `get_public_content` | `lyph_tools__get_public_content` | ✅ |
+| `search_companies` | `lyph_tools__search_companies` | ✅ |
+| `get_company` | `lyph_tools__get_company` | ✅ |
+| `aggregate_companies` | `lyph_tools__aggregate_companies` | ✅ |
 | 其他任意名称 | — | ❌ 403 |
+
+白名单的键是 lyph 侧工具名，值才是 Router 内部工具名。`FORBIDDEN_TOOL_NAMES` /
+`FORBIDDEN_TOOL_PREFIXES` 只检查**传入名**，所以把 `lyph_tools__*` 当作目标不会
+误伤；反过来，任何以 `site__`/`leetcode__`/`ops__`/`devtools__`/`admin__` 等
+前缀传入的请求一律 403，即使它出现在某个插件的注册表里。
 
 - 限流：滑动窗口 **60 次/分钟/Agent**（按 agent id 计数，默认 60）。
 - 审计：写入 `plugin_events`，`plugin_id="agent_bridge"`，action 为
@@ -114,6 +136,24 @@ curl -X POST http://router:9900/agent/tools/web_search \
   （截断 1000 字符）、耗时、成功与否，**不记录 api_key**。
 - `web_fetch` 的公网限制由 `plugins/websearch/plugin.py` 现有逻辑负责：
   仅 http/https、80/443、解析后必须是公网 IP，拒绝本机/内网/保留地址。
+
+## 3.1 数据来源与挂载
+
+六个 `lyph_tools__*` 工具直读 lyph 的公开数据，不经过 lyph 的 HTTP 接口：
+
+| 数据 | 路径（容器内） | 说明 |
+| --- | --- | --- |
+| 站点资料、已授权内容 | `/lyph-data/lyph.sqlite3` | `site_settings`、`contents`，只读连接 |
+| 企业公开快照 | `/lyph-src/public-apps/companies/data/web.sqlite` | `company`、`meta.built_at` |
+| 游戏公开条目 | 同一主库 `gaming_accounts` | 只读 `link_method` 派生列，**不读 `credential_enc`** |
+
+- 配置项：`lyph.db`、`lyph.enterprise_db`（见 `config.example.json`）。
+- compose：`/opt/lyph → /lyph-src`、lyph_business 卷 → `/lyph-data`，可用
+  `LYPH_SRC_PATH` / `LYPH_DATA_PATH` 覆盖。
+- 只读保障：`mode=ro` + `query_only` + `trusted_schema=OFF` + 禁用扩展加载 +
+  2 秒进度回调超时；模型参数只作为绑定值，永远不进 SQL 标识符。
+- `gaming_accounts.link_method` 由 lyph 在绑定/连接/同步时写入，lyph 启动时回填。
+  Router 只读该列；列为空时丢弃该平台的公开条目，而不是猜一个“已验证”标签。
 
 ## 4. 配置示例（占位，不要提交真实值）
 
@@ -127,10 +167,11 @@ Router `config.json` 片段（线上文件由主代理合并，本仓库示例�
       "name": "lyph 站点",
       "description": "lyph 公开站点与聊天 Agent",
       "transport": "http",
-      "callback_url": "http://api:8000/api/v1/agent/router-callback",
-      "health_url": "http://api:8000/health",
+      "callback_url": "http://lyph-api-1:8000/api/v1/internal/router/task",
+      "health_url": "http://lyph-api-1:8000/health",
       "callback_secret": "REPLACE_ROUTER_TO_LYPH_HMAC",
-      "api_key": "REPLACE_LYPH_TO_ROUTER_KEY"
+      "api_key": "REPLACE_BROKER_KEY",
+      "bridge_key": "REPLACE_LYPH_TO_ROUTER_KEY"
     }
   ],
   "agent_bridge": {
@@ -139,11 +180,14 @@ Router `config.json` 片段（线上文件由主代理合并，本仓库示例�
 }
 ```
 
-- `api_key`：Router 校验 lyph 调用 `/agent/tools/*` 的凭证，同时对应 lyph 的
-  `ROUTER_AGENT_TOKEN`。两处必须相同。bridge 读取运行时 `AGENTS` 映射，
-  后台改 key 或删除 Agent 后立即生效，无需重启。
-- `callback_url` / `callback_secret`：Router 调 lyph 用。lyph 需实现校验
-  `X-Router-Signature` 的接收端点；在实现前不要启用 `send_to_agent` 到 lyph。
+- `bridge_key`：Router 校验 lyph 调用 `/agent/tools/*` 的凭证，对应 lyph 的
+  `ROUTER_AGENT_TOKEN`。两处必须相同。未配置时回落 `api_key`；生产应只配
+  `bridge_key`，避免工具凭证同时具备 broker 权限。
+- `api_key`：`/agent/register|tasks|result|heartbeat` 的凭证，不应给 lyph 的工具调用使用。
+  bridge 读取运行时 `AGENTS` 映射，后台改 key 或删除 Agent 后立即生效，无需重启。
+- `callback_url` / `callback_secret`：Router 调 lyph 用，对应 lyph 的
+  `ROUTER_CALLBACK_SECRET`。端点已实现（`/api/v1/internal/router/task`），只接受
+  整轮问答；不要把它当工具级回调，也不要借它扩大权限。
 - `health_url`：供人工/监控探活，当前 Router 不自动轮询。
 - `agent_bridge.allowed_agents` 可省略，省略时默认只允许 `lyph`。
 
@@ -173,8 +217,9 @@ ROUTER_AGENT_TOKEN=
    `api_key` 与 lyph 的 `ROUTER_AGENT_TOKEN` 一致。
 4. lyph 部署环境注入 `ROUTER_URL`、`ROUTER_AGENT_TOKEN`；不需要新增 FastAPI 路由，
    四个工具直接由 `chat_agent` 调用。
-5. 若要从微信把任务转给 lyph，再实现 lyph 的 callback 接收端点（校验 HMAC），
-   然后把该 Agent 暴露给 `send_to_agent`。
+5. 若要从微信把任务转给 lyph：lyph 侧端点已存在，只需在两边配置
+   `callback_secret` / `ROUTER_CALLBACK_SECRET`（≥32 字符）并把该 Agent 暴露给
+   `send_to_agent`。注意该端点经 Nginx `/api/` 反代在公网可达，仅靠 HMAC 保护。
 
 ## 6. 测试
 
@@ -199,6 +244,9 @@ cd D:\xx\lyph\api
   该 key 同时能通过 Router 现有的 `/agent/register|tasks|result` 鉴权；lyph 只应使用
   `/agent/tools/*`。若要彻底隔离，后续应增加专用 bridge key 或在 broker 路由上按
   agent 限制。
+- **表结构耦合**：直读意味着 lyph 改 `site_settings`/`contents`/`company` 的
+  字段时 Router 必须同步改；快照缺列会返回 `unavailable` 而不是静默降级。
+  部署顺序应为先 lyph（完成 `link_method` 回填）再 Router。
 - **公网抓取是开放世界**：`web_fetch` 只允许公网 80/443，但目标内容不可信；
   lyph 侧把返回文本视为不可信数据，模型指令不能被网页内容覆盖。
 - **同步阻塞**：`web_fetch` 在 Router 最多 25 秒，桥接用线程池执行，仍会占用
@@ -207,5 +255,6 @@ cd D:\xx\lyph\api
   `ok` 与 HTTP 状态；只有鉴权/白名单/限流/body 错误使用 4xx。
 - **MCP 自动暴露**：lyph 的 `TOOL_DEFINITIONS` 同时供 MCP 使用，新增的四个工具
   会自动出现在 MCP 工具列表；MCP 凭证持有者也能调用，需在 lyph 侧按需限流/吊销。
-- **Router → lyph 未闭环**：lyph 尚无 `callback_url` 接收端点，`send_to_agent`
-  到 lyph 会失败；这是刻意保留的骨架，避免在未实现签名校验前开放写能力。
+- **Router → lyph 仅整轮问答**：`/api/v1/internal/router/task` 用 `chat_agent`
+  跑完整一轮并同步返回文本，没有工具级回传、取消或幂等；回调地址经公网 Nginx 暴露，
+  当前只有 HMAC 保护，不要在此基础上叠加新的写能力。

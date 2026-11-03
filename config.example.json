@@ -6,6 +6,7 @@
   },
   "lyph": {
     "db": "/lyph-data/lyph.sqlite3",
+    "enterprise_db": "/lyph-src/public-apps/companies/data/web.sqlite",
     "exclude_conversation_prefixes": ["unlimited-check-"],
     "exclude_visitor_ids": []
   },

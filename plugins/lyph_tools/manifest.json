@@ -1,0 +1,10 @@
+{
+  "id": "lyph_tools",
+  "name": "lyph 公开域工具",
+  "version": "1.0.0",
+  "api_version": "1",
+  "entry": "plugin.py",
+  "capabilities": ["tools"],
+  "permissions": ["read:lyph-public", "read:lyph-enterprise"],
+  "description": "lyph 公开资料、已授权内容与企业公开快照的只读查询"
+}

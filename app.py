@@ -64,6 +64,12 @@ GUEST_TOOLS = {
     "websearch__weather",
     "websearch__calculator",
     "show_help",
+    "lyph_tools__get_public_profile",
+    "lyph_tools__search_public_content",
+    "lyph_tools__get_public_content",
+    "lyph_tools__search_companies",
+    "lyph_tools__get_company",
+    "lyph_tools__aggregate_companies",
 }
 
 
