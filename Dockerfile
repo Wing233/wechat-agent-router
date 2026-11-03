@@ -1,11 +1,27 @@
-FROM lyph-api:0.1.0
-ENV PYTHONDONTWRITEBYTECODE=1
-ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
-USER root
+FROM python:3.12-slim
+
+ARG PIP_INDEX_URL=https://pypi.org/simple
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
-COPY requirements.txt /app/
-RUN uv pip install --python /opt/venv/bin/python --no-cache --index-url "$PIP_INDEX_URL" -r /app/requirements.txt
-COPY *.py /app/
-COPY vendor /app/vendor
-COPY plugins /app/plugins
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -i "$PIP_INDEX_URL" -r requirements.txt
+
+COPY *.py ./
+COPY plugins ./plugins
+COPY local-agent ./local-agent
+COPY vendor ./vendor
+COPY geodb ./geodb
+RUN mkdir -p /data /workspace /sandbox /lyph-src
+
+EXPOSE 9900
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9900/health', timeout=3)"
+
 CMD ["python", "-m", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "9900", "--no-access-log"]

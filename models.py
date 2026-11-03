@@ -163,6 +163,7 @@ class ModelCatalog:
             "tags": list(item.get("tags") or []),
             "enabled": bool(item.get("enabled", True)),
             "notes": item.get("notes") or "",
+            "headers": dict(item.get("headers") or {}),
         }
         if roles is not None:
             data["roles"] = roles
@@ -226,6 +227,19 @@ class ModelCatalog:
             item["api_key"] = key
         elif not item.get("api_key"):
             item["api_key"] = ""
+        headers = payload.get("headers")
+        if isinstance(headers, dict):
+            clean: dict[str, str] = {}
+            for header_name, header_value in headers.items():
+                name = str(header_name).strip()[:80]
+                value = str(header_value).strip()[:400]
+                if name and value:
+                    clean[name] = value
+            item["headers"] = clean
+        elif "headers" in payload and headers in (None, ""):
+            item["headers"] = {}
+        else:
+            item["headers"] = dict(item.get("headers") or {})
         for field in ("input_price_per_m", "output_price_per_m"):
             if field in payload and payload.get(field) is not None:
                 try:
@@ -339,6 +353,7 @@ class ModelCatalog:
                 "input_price_per_m": float(item.get("input_price_per_m") or 0),
                 "output_price_per_m": float(item.get("output_price_per_m") or 0),
                 "tags": list(item.get("tags") or []),
+                "headers": dict(item.get("headers") or {}),
             }]
         bindings = self._bindings()
         picked: list[str] = []
@@ -362,5 +377,6 @@ class ModelCatalog:
                 "input_price_per_m": float(item.get("input_price_per_m") or 0),
                 "output_price_per_m": float(item.get("output_price_per_m") or 0),
                 "tags": list(item.get("tags") or []),
+                "headers": dict(item.get("headers") or {}),
             })
         return providers

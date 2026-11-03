@@ -384,3 +384,40 @@ def test_canonicalizes_bare_tool_name(tmp_path: Path) -> None:
         assert result["tool"] == "toolbox__python_repl"
     finally:
         governance.set_mandate_store(None)
+
+
+def test_session_grant_allows_dev_tools(toolbox) -> None:
+    service, _ = toolbox
+    grant = service.session_grant("dev", 60, approved_by="owner-1")
+    assert grant["ok"] is True
+
+    allowed = service.require_mandate(
+        "toolbox__python_repl", {"code": "print(1)"})
+    assert allowed["ok"] is True
+    assert allowed["session"] is True
+
+    blocked = service.require_mandate("model_add", {"id": "x", "model": "y"})
+    assert blocked.get("error")
+
+    listed = service.list_sessions()
+    assert listed["items"][0]["preset"] == "dev"
+
+    revoked = service.revoke_sessions()
+    assert revoked["revoked"] == 1
+    blocked_again = service.require_mandate(
+        "toolbox__python_repl", {"code": "print(1)"})
+    assert blocked_again.get("error")
+
+
+def test_session_grant_all_and_path_scope(toolbox) -> None:
+    service, _ = toolbox
+    service.session_grant("all", 60, approved_by="owner-1")
+
+    assert service.require_mandate(
+        "model_add", {"id": "x", "model": "y"})["ok"] is True
+    assert service.require_mandate(
+        "ops__fs_write", {"path": "/workspace/x", "content": "x"})["ok"] is True
+
+    blocked = service.require_mandate(
+        "ops__fs_write", {"path": "/tmp/x", "content": "x"})
+    assert blocked.get("error")

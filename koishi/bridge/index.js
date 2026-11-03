@@ -7,6 +7,10 @@
  * This plugin only forwards a normalized message and sends the reply back.
  */
 
+const fs = require('node:fs')
+const path = require('node:path')
+const { h } = require('koishi')
+
 module.exports.name = 'router-bridge'
 
 module.exports.apply = (ctx, config = {}) => {
@@ -17,6 +21,34 @@ module.exports.apply = (ctx, config = {}) => {
   const timeoutMs = Number(config.timeoutMs || 90000)
   const outboundPollMs = Math.max(1000, Number(config.outboundPollMs || 2000))
   const logger = ctx.logger('router-bridge')
+
+  // QQ only accepts SILK audio for voice messages; decode the mp3 we generate
+  // and re-encode with silk-wasm so the adapter can send it as-is.
+  async function audioElement(file) {
+    const { MPEGDecoder } = require('mpg123-decoder')
+    const silk = require('silk-wasm')
+    const mp3 = fs.readFileSync(file)
+    const decoder = new MPEGDecoder()
+    await decoder.ready
+    try {
+      const decoded = decoder.decode(new Uint8Array(mp3))
+      const samples = decoded.samplesDecoded
+      const sampleRate = decoded.sampleRate
+      const channel = decoded.channelData[0] || new Float32Array(0)
+      const pcm = Buffer.alloc(samples * 2)
+      for (let i = 0; i < samples; i++) {
+        let value = channel[i] || 0
+        value = Math.max(-1, Math.min(1, value))
+        pcm.writeInt16LE(Math.round(value * 32767), i * 2)
+      }
+      const encoded = await silk.encode(new Uint8Array(pcm), sampleRate)
+      return h('audio', {
+        src: `data:audio/silk;base64,${Buffer.from(encoded.data).toString('base64')}`,
+      })
+    } finally {
+      decoder.free?.()
+    }
+  }
 
   if (!token) {
     logger.warn('ROUTER_CHANNEL_TOKEN is empty; messages will be rejected by Router')
@@ -64,7 +96,13 @@ module.exports.apply = (ctx, config = {}) => {
         }
         const target = stripPlatform(message.chat_id, message.platform)
         try {
-          await bot.sendMessage(target, String(message.text || ''))
+          let content = String(message.text || '')
+          if (message.media_type === 'audio' && message.media_path) {
+            const dataDir = String(config.dataDir || '/opt/wechat-agent-router/data')
+            const file = path.join(dataDir, String(message.media_path))
+            content = await audioElement(file)
+          }
+          await bot.sendMessage(target, content)
           await ackOutbound([message.id], true)
           logger.info('outbound %s -> %s', message.id, target)
         } catch (failure) {
@@ -141,6 +179,13 @@ module.exports.apply = (ctx, config = {}) => {
       }
       if (data.ignored) return
       if (data.reply) await session.send(String(data.reply))
+      if (data.voice_path) {
+        try {
+          await session.send(await audioElement(String(data.voice_path)))
+        } catch (failure) {
+          logger.warn('voice reply failed: %s', failure?.message || failure)
+        }
+      }
     } catch (error) {
       logger.warn('Router request failed: %s', error?.message || error)
       await session.send('Router 暂时连不上，请稍后再试。')

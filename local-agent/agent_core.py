@@ -469,6 +469,22 @@ class LocalAgent:
             self._current = {"task_id": task_id, "message": message, "started_at": int(started)}
             self._status = "busy"
         self.log.add("INFO", f"收到任务 {task_id[:8]}：{message[:120]}")
+        lease_token = str(task.get("lease_token") or "")
+        stop_beat = threading.Event()
+
+        def beat() -> None:
+            while not stop_beat.wait(60):
+                try:
+                    self._request("POST", "/agent/heartbeat",
+                                  {"task_id": task_id, "lease_token": lease_token},
+                                  timeout=15)
+                except Exception:
+                    pass
+
+        beater = None
+        if lease_token:
+            beater = threading.Thread(target=beat, daemon=True)
+            beater.start()
         try:
             engine, workspace = self.resolve(task)
             code, output = self.run_cli(engine, workspace, message)
@@ -479,6 +495,8 @@ class LocalAgent:
             workspace = str(task.get("workspace") or self.default_workspace)
             ok = False
             text = f"本地任务失败：{exc}"
+        finally:
+            stop_beat.set()
         elapsed = time.time() - started
         with self._lock:
             self._tasks_done += 1
@@ -491,7 +509,8 @@ class LocalAgent:
         self.log.add(level, f"任务 {task_id[:8]} 完成，exit={0 if ok else 1}，耗时 {elapsed:.1f}s")
         try:
             self._request("POST", "/agent/result",
-                          {"task_id": task_id, "ok": ok, "text": text[:8000]})
+                          {"task_id": task_id, "ok": ok, "text": text[:8000],
+                           "lease_token": lease_token})
         except Exception as exc:
             self.log.add("WARN", f"回传任务结果失败：{exc}")
         if elapsed > self.wait_seconds:

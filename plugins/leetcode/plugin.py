@@ -22,10 +22,20 @@ def apply(ctx) -> None:
 
     ctx.tools.register(
         "leetcode_stats",
-        "查询站主力扣（leetcode.cn）做题数据：通过题数（简单/中等/困难）、排名、最近提交。",
+        "查询站主力扣（leetcode.cn）做题数据：通过题数（简单/中等/困难）、排名、最近提交。仅用于总体刷题统计。",
         _schema({"limit": {"type": "integer", "minimum": 1, "maximum": 20}}),
         lambda a: adapter.get_stats(int(a.get("limit") or 10)),
         aliases=("leetcode_stats",),
+    )
+    ctx.tools.register(
+        "leetcode_question",
+        "查询站主力扣某道题的做题记录：首次提交、首次通过、最近一次提交、提交次数、通过次数和重刷天数。question 支持题号、中文/英文题名或 slug。",
+        _schema({
+            "question": {"type": "string", "minLength": 1, "maxLength": 120},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 20},
+        }, ["question"]),
+        lambda a: adapter.get_question_record(str(a.get("question") or "").strip(), int(a.get("limit") or 5)),
+        aliases=("leetcode_question",),
     )
 
     options = (ctx.root_config.get("jobs") or {}).get("leetcode_check", {})

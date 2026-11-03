@@ -1,0 +1,11 @@
+{
+  "id": "voice",
+  "name": "语音合成",
+  "version": "1.0.0",
+  "api_version": "1",
+  "entry": "plugin.py",
+  "capabilities": ["tools"],
+  "permissions": ["net:api.breeze.blue", "db:router"],
+  "secrets": [],
+  "description": "用 Breeze TTS 把文字合成为语音，并通过渠道 outbox 发送语音消息（QQ 等支持音频的渠道）"
+}

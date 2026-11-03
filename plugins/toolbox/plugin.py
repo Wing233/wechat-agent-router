@@ -490,6 +490,140 @@ class Toolbox:
             result["warning"] = "未绑定 tool，审批后不能执行高危工具；请重新调用并传 tool 和 args"
         return result
 
+    def session_grant(self, preset: str, minutes: int = 60,
+                      approved_by: str = "") -> dict:
+        spec = (governance.SESSION_PRESETS.get(preset)
+                if governance is not None else None)
+        if not spec:
+            return {"error": f"未知授权类型：{preset}"}
+        minutes = max(1, min(int(minutes or 60), 480))
+        max_uses = min(2000, max(100, minutes * 20))
+        expires_at = (datetime.now(CST) + timedelta(minutes=minutes)).isoformat(
+            timespec="seconds")
+        code = _code()
+        for _ in range(30):
+            with self._conn() as conn:
+                exists = conn.execute(
+                    "SELECT 1 FROM confirmations WHERE code=?", (code,)).fetchone()
+            if not exists:
+                break
+            code = _code()
+        scope = {
+            "session": True,
+            "preset": preset,
+            "label": spec["label"],
+            "tools": list(spec["tools"]),
+            "paths": list(spec["paths"]),
+            "agent_id": "",
+            "max_uses": max_uses,
+            "policy_version": self._policy_version(),
+        }
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT INTO confirmations
+                   (code,action,summary,status,created_at,decided_at,tool,scope_json,
+                    policy_version,approved_by,strength,expires_at,revoked_at,used_at,
+                    max_uses,uses,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (code, f"会话授权：{spec['label']}",
+                 f"{minutes} 分钟，{len(spec['tools'])} 个工具",
+                 "approved", _now(), _now(), f"session:{preset}",
+                 json.dumps(scope, ensure_ascii=False), self._policy_version(),
+                 approved_by or self.owner, "session", expires_at, "", "",
+                 max_uses, 0, _now()))
+        return {"ok": True, "code": code, "preset": preset,
+                "label": spec["label"], "minutes": minutes,
+                "tools": list(spec["tools"]), "paths": list(spec["paths"]),
+                "max_uses": max_uses, "expires_at": expires_at}
+
+    def revoke_sessions(self) -> dict:
+        now = _now()
+        with self._conn() as conn:
+            cursor = conn.execute(
+                "UPDATE confirmations SET status='revoked',revoked_at=?,updated_at=? "
+                "WHERE strength='session' AND status='approved' AND revoked_at=''",
+                (now, now))
+            return {"ok": True, "revoked": int(cursor.rowcount or 0)}
+
+    def list_sessions(self, limit: int = 10) -> dict:
+        limit = max(1, min(int(limit or 10), 50))
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM confirmations WHERE strength='session' "
+                "AND status='approved' AND revoked_at='' AND used_at='' "
+                "AND expires_at>? AND uses<max_uses "
+                "ORDER BY created_at DESC LIMIT ?", (_now(), limit)).fetchall()
+        items = []
+        for row in rows:
+            scope = json.loads(row["scope_json"] or "{}")
+            try:
+                expires = datetime.fromisoformat(row["expires_at"])
+                remaining_minutes = max(
+                    0, int((expires - datetime.now(CST)).total_seconds() // 60))
+            except Exception:
+                remaining_minutes = 0
+            items.append({
+                "code": row["code"],
+                "preset": scope.get("preset") or "",
+                "label": scope.get("label") or "",
+                "expires_at": row["expires_at"],
+                "remaining_minutes": remaining_minutes,
+                "max_uses": int(row["max_uses"] or 0),
+                "uses": int(row["uses"] or 0),
+                "remaining": max(0, int(row["max_uses"] or 0)
+                                 - int(row["uses"] or 0)),
+                "paths": scope.get("paths") or [],
+            })
+        return {"items": items}
+
+    @staticmethod
+    def _has_path_args(args: dict) -> bool:
+        return any(
+            isinstance(args.get(key), str) and str(args.get(key)).strip()
+            for key in ("path", "cwd", "target", "source", "src", "dst",
+                        "dest", "destination")
+        )
+
+    def _find_session(self, tool: str, args: dict) -> dict | None:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM confirmations WHERE strength='session' "
+                "AND status='approved' AND revoked_at='' AND used_at='' "
+                "AND expires_at>? AND uses<max_uses "
+                "ORDER BY created_at DESC", (_now(),)).fetchall()
+        for row in rows:
+            item = dict(row)
+            scope = json.loads(item.get("scope_json") or "{}")
+            tools = scope.get("tools") or []
+            if tool not in tools and "*" not in tools:
+                continue
+            if scope.get("agent_id") and str(args.get("agent_id") or "") != scope["agent_id"]:
+                continue
+            paths = [str(path) for path in (scope.get("paths") or []) if path]
+            if paths and self._has_path_args(args) and not self._paths_allowed(paths, args):
+                continue
+            return item
+        return None
+
+    def _consume_session(self, row: dict, tool: str, args: dict) -> dict:
+        with self._conn() as conn:
+            cursor = conn.execute(
+                "UPDATE confirmations SET uses=uses+1,"
+                "used_at=CASE WHEN uses+1>=max_uses THEN ? ELSE '' END,"
+                "status=CASE WHEN uses+1>=max_uses THEN 'used' ELSE 'approved' END,"
+                "updated_at=? WHERE code=? AND status='approved' "
+                "AND strength='session' AND revoked_at='' AND used_at='' "
+                "AND uses<max_uses", (_now(), _now(), row["code"]))
+            if cursor.rowcount != 1:
+                return {"error": "会话授权已被并发使用或已失效",
+                        "status": "used"}
+        fresh = self._mandate_row(row["code"]) or row
+        max_uses = int(fresh.get("max_uses") or 0)
+        uses = int(fresh.get("uses") or 0)
+        return {"ok": True, "session": True, "code": row["code"],
+                "tool": tool, "args": args, "uses": uses,
+                "max_uses": max_uses, "remaining": max(0, max_uses - uses)}
+
     def confirm_action(self, args: dict) -> dict:
         code = str(args.get("code") or "").strip().upper()
         row = self._refresh_mandate(self._mandate_row(code))
@@ -531,11 +665,15 @@ class Toolbox:
                   or args.pop("_mandate", ""))
         code = str(code or popped).strip().upper()
         if not code:
+            session = self._find_session(tool, args)
+            if session:
+                return self._consume_session(session, tool, args)
             return {
                 "error": "高危工具需要审批码 mandate",
                 "required": True,
                 "hint": ("先调用 ask_human_confirmation，并传 tool 和 args；"
-                         "主人 APPROVE 后把返回的 code 作为 mandate 传入"),
+                         "主人 APPROVE 后把返回的 code 作为 mandate 传入；"
+                         "也可以让主人用“开发模式 2 小时”开启会话授权"),
             }
         row = self._refresh_mandate(self._mandate_row(code))
         if not row:
@@ -639,7 +777,8 @@ class Toolbox:
                 "SELECT code,action,summary,tool,expires_at,max_uses,uses "
                 "FROM confirmations WHERE status='approved' AND used_at='' "
                 "AND revoked_at='' AND expires_at>? AND policy_version=? "
-                "AND uses<max_uses ORDER BY decided_at DESC LIMIT ?",
+                "AND uses<max_uses AND strength!='session' "
+                "ORDER BY decided_at DESC LIMIT ?",
                 (_now(), self._policy_version(), limit)).fetchall()
         items = []
         for row in rows:

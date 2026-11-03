@@ -44,7 +44,7 @@ import sso_routes
 from plugin_loader import PluginError, PluginLoader
 from registry import JobScheduler, ToolRegistry
 from settings_service import SettingsService
-from store import Store, now_iso
+from store import INBOUND_MAX_ATTEMPTS, Store, now_iso
 import traces
 import trace_ctx
 
@@ -57,6 +57,7 @@ GUEST_TOOLS = {
     "site__visit_stats",
     "site__realtime",
     "leetcode__leetcode_stats",
+    "leetcode__leetcode_question",
     "demo_time__now",
     "demo_weather__now",
     "websearch__web_search",
@@ -133,6 +134,7 @@ except Exception as exc:
 
 store = Store(CFG["db"])
 store.init()
+BROKER.attach_store(store)
 hub = Hub(BASE, CFG["hub"]["channel_key"], OWNER)
 geo = Geo(CFG["geo"]["vendor_dir"], CFG["geo"]["v4"], CFG["geo"].get("v6", ""))
 site = SiteData(
@@ -325,17 +327,25 @@ def call_agent(agent: dict, payload: dict, timeout: int = 20) -> dict:
 def _call_agent_impl(agent: dict, payload: dict, timeout: int = 20) -> dict:
     if agent.get("transport") == "poll":
         wait_seconds = int(CFG.get("agent_wait_seconds", 60))
-        result, task_id, done = BROKER.enqueue(agent["id"], {
+        online = BROKER.is_online(agent["id"])
+        result, task_id, status, _task = BROKER.enqueue(agent["id"], {
             "message": payload.get("reply", ""),
             "engine": payload.get("engine", ""),
             "workspace": payload.get("workspace", ""),
             "chat_id": payload.get("chat_id", OWNER),
             "meta": payload.get("meta") or {},
             "wait_seconds": wait_seconds,
-        }, wait_seconds)
-        if result:
-            return {"text": result.get("text", ""), "final": True}
-        return {"text": f"任务已交给 {agent.get('name', agent['id'])}，完成后会通知你。",
+        }, wait_seconds if online else 0)
+        name = agent.get("name", agent["id"])
+        short = task_id[:8]
+        if status == "completed" and isinstance(result, dict):
+            if BROKER.claim_delivery(task_id):
+                return {"text": result.get("text", ""), "final": True, "task_id": task_id}
+            return {"text": "", "final": True, "silent": True, "task_id": task_id}
+        if status in {"claimed", "running"}:
+            return {"text": f"任务 {short} 已被 {name} 领取，正在执行；完成后通知你。",
+                    "final": False, "task_id": task_id}
+        return {"text": f"任务已交给 {name}，完成后会通知你。",
                 "final": False, "task_id": task_id}
     timeout = max(1, int(agent.get("timeout") or timeout))
     body = json.dumps(payload, ensure_ascii=False).encode()
@@ -360,6 +370,8 @@ def agent_auth(request: Request) -> dict:
 
 
 def send_agent_result(result: dict) -> None:
+    if result.get("silent"):
+        return
     text = (result.get("text") or "").strip()
     image = result.get("image_base64")
     if image:
@@ -584,7 +596,7 @@ def build_system_prompt(origin: dict | None = None, role: str = "owner",
         "写入长期记忆或技能（memory_update / learn_skill）也属于高危操作，同样要先申请 mandate。",
         "需要跑代码用 python_repl 或 run_sandbox；改代码用 write_patch；回滚用 snapshot_checkpoint。这些工具没有 mandate 会被硬拒绝。",
         "复杂任务可用 delegate_to_subagent 派给已注册 Agent；定时任务用 schedule_cron。",
-        "力扣/LeetCode/刷题/做题相关的问题调用 leetcode_stats。",
+        "力扣/LeetCode/刷题/做题相关的问题调用 leetcode_stats；查某道题的首次/最近提交记录调用 leetcode_question。",
         "用户发图片或文件时，系统会把图片交给视觉模型、把文件文字附在消息里；只根据实际提供的内容回答，不要假装看到了没读到的东西。",
         "用户要求某个项目 Agent 做事时调用 send_to_agent，不要假装已经完成。",
         "用户消息以 @AgentID 开头时，系统会直接路由到该 Agent，不经过你；你可以按普通对话理解。",
@@ -627,7 +639,7 @@ def build_system_prompt(origin: dict | None = None, role: str = "owner",
         lines.extend([
             "",
             "## 本轮准入：明确动作",
-            "本轮是主人明确动作请求。可以调用工具；高危工具必须带 mandate 审批码。",
+            "本轮是主人明确动作请求。可以调用工具；高危工具必须带 mandate 审批码，或处于生效中的会话授权内。",
         ])
     if role == "owner" and SERVICES.get("toolbox"):
         try:
@@ -645,6 +657,22 @@ def build_system_prompt(origin: dict | None = None, role: str = "owner",
                     f"- {item.get('code', '')}：{item.get('tool') or item.get('action') or ''}，"
                     f"剩余 {item.get('remaining', 1)} 次，{item.get('expires_at', '')} 到期"
                 )
+        try:
+            sessions = SERVICES["toolbox"].list_sessions(limit=3)
+        except Exception:
+            sessions = {}
+        session_items = sessions.get("items") or []
+        if session_items:
+            lines.extend([
+                "",
+                "## 当前会话授权",
+                "以下授权已生效；高危工具可以直接调用，系统会自动按 scope 校验，不需要再申请 mandate。",
+            ])
+            for item in session_items:
+                lines.append(
+                    f"- {item.get('label') or item.get('preset')}：剩余 "
+                    f"{item.get('remaining_minutes')} 分钟，剩余 {item.get('remaining')} 次"
+                )
     if role != "owner":
         lines.extend([
             "",
@@ -658,6 +686,7 @@ def build_system_prompt(origin: dict | None = None, role: str = "owner",
             "## 主人权限（完整）",
             "对方是主人本人，不需要再确认身份。在明确动作轮次，能动手的事就直接动手做完，再汇报结果，不要只说做不到。",
             "- 高危工具（python_repl、run_sandbox、write_patch、snapshot restore、delegate_to_subagent、webhook_post、mcp_call、文件写入/删除、配置修改、记忆/技能写入、模型/渠道/预算变更、trace 读取等）必须带 mandate 审批码；没有审批码会被硬拒绝。",
+            "- 主人可以用“开发模式 2 小时”“运维 30 分钟”“模型 30 分钟”“授权全部 1 小时”开启会话授权；用“查看授权”“取消授权”管理。会话授权内高危工具直接执行，到期自动失效。",
             "- 服务器命令：run_command 可以在容器里执行 shell，用于装依赖、跑测试、git、看日志、处理文件；一次一条，别执行破坏性命令。",
             "- 文件：fs_list / fs_read / fs_write / fs_replace / fs_delete / fs_move 可读写 /app、/lyph-src、/workspace，默认立即生效。",
             "- 网络：web_search 搜实时信息，web_fetch 读网页正文，http_request 调任意公开 API。",
@@ -953,6 +982,69 @@ def answer_with_attachments(text: str, history: list[dict], bundle: dict,
                       classification=classification, allowed=allowed)
 
 
+def handle_session_command(text: str, role: str, chat_type: str,
+                           origin: dict | None, session_id: str,
+                           display: str) -> bool:
+    """Deterministic owner-only session grant commands. Never exposed to the LLM."""
+    if role != "owner" or chat_type != "private":
+        return False
+    command = governance.parse_session_command(text)
+    if not command:
+        return False
+    toolbox = SERVICES.get("toolbox")
+    if toolbox is None:
+        answer = "授权服务未加载，暂时不能开启会话授权。"
+    elif command["action"] == "grant":
+        result = toolbox.session_grant(
+            command["preset"], command["minutes"],
+            approved_by=str((origin or {}).get("user_id") or OWNER))
+        if result.get("ok"):
+            tools = result.get("tools") or []
+            shown = "、".join(tools[:8]) + ("…" if len(tools) > 8 else "")
+            answer = (f"已开启{result['label']}会话授权，有效期 {result['minutes']} 分钟。\n"
+                      f"工具：{shown}\n"
+                      f"路径：{'、'.join(result.get('paths') or []) or '不限'}\n"
+                      f"最多执行 {result['max_uses']} 次，到期 {result['expires_at']}。\n"
+                      "回复“查看授权”查看，回复“取消授权”立即撤销。")
+        else:
+            answer = f"授权失败：{result.get('error')}"
+    elif command["action"] == "revoke":
+        result = toolbox.revoke_sessions()
+        answer = f"已撤销 {result.get('revoked', 0)} 个生效中的会话授权。"
+    else:
+        result = toolbox.list_sessions()
+        items = result.get("items") or []
+        if not items:
+            answer = "当前没有生效中的会话授权。"
+        else:
+            lines = ["当前生效的会话授权："]
+            for item in items:
+                lines.append(
+                    f"- {item['label'] or item['preset']}：剩余 "
+                    f"{item['remaining_minutes']} 分钟，剩余 {item['remaining']} 次，"
+                    f"到期 {item['expires_at']}")
+            answer = "\n".join(lines)
+    try:
+        store.log_decision(
+            trace_id=trace_ctx.get_trace_id(),
+            role=role,
+            chat_id=str((origin or {}).get("chat_id") or OWNER),
+            text=text,
+            classification=governance.ACTION_EXPLICIT,
+            would_accept=True,
+            executed=True,
+            reason="会话授权命令",
+            rule="session_command",
+            meta={"command": command},
+        )
+    except Exception as exc:
+        log.warning("session command decision log failed: %s", exc)
+    store.log_route(session_id, display, "session", command["action"])
+    store.add_message(session_id, "assistant", answer)
+    send_text(answer)
+    return True
+
+
 def _handle_inbound(text: str, message: dict, origin: dict | None = None) -> None:
     """Set a trace id (and role) for every inbound message, then dispatch."""
     role = str((origin or {}).get("role") or "owner")
@@ -1022,6 +1114,10 @@ def _handle_inbound_impl(text: str, message: dict, origin: dict | None = None) -
         store.log_route(session_id, display, "help")
         store.add_message(session_id, "assistant", answer)
         send_text(answer)
+        return
+
+    if not has_attachments and handle_session_command(
+            text, role, chat_type, origin, session_id, display):
         return
 
     if origin is None and text in {"力扣登录", "更新力扣", "绑定力扣", "leetcode登录"}:
@@ -1198,13 +1294,35 @@ def poll_once(last_id: int) -> int:
         mid = int(message.get("id") or 0)
         if mid <= last_id:
             continue
-        last_id = mid
-        store.state_set("last_message_id", str(last_id))
         if message.get("direction") != "inbound":
+            last_id = mid
+            store.state_set("last_message_id", str(last_id))
             continue
         if message.get("from_user_id") != OWNER:
+            last_id = mid
+            store.state_set("last_message_id", str(last_id))
             continue
-        handle_inbound(parse_text(message), message)
+        text = parse_text(message)
+        journal = store.claim_inbound(
+            f"hub:{mid}", source="hub", message_id=str(mid),
+            chat_id=str(message.get("chat_id") or message.get("from_user_id") or ""),
+            user_id=str(message.get("from_user_id") or ""), text=text)
+        if journal is None:
+            # 已处理、处理中或已判死：跳过但仍推进游标，避免卡住轮询。
+            last_id = mid
+            store.state_set("last_message_id", str(last_id))
+            continue
+        try:
+            handle_inbound(text, message)
+        except Exception as exc:
+            attempts = store.fail_inbound(journal["id"], str(exc))
+            if attempts >= INBOUND_MAX_ATTEMPTS:
+                store.mark_inbound_dead(journal["id"], str(exc))
+            log.exception("inbound %s failed (attempt %s)", mid, attempts)
+        else:
+            store.finish_inbound(journal["id"])
+        last_id = mid
+        store.state_set("last_message_id", str(last_id))
     return last_id
 
 
@@ -1224,10 +1342,15 @@ async def maintenance_loop() -> None:
         try:
             store.expire_stale()
             flush_outbox()
+            for task in BROKER.requeue_expired():
+                log.warning("agent task %s failed: %s", task.get("id", "")[:8],
+                            task.get("error") or "")
             if time.time() - last_check > 6 * 3600:
                 last_check = time.time()
                 store.cleanup_channel_outbox(7)
                 store.prune_decisions(int(CFG.get("decision_retention_days") or 30))
+                store.prune_agent_tasks(30)
+                store.prune_inbound(30)
                 if LEETCODE is not None:
                     await asyncio.to_thread(LEETCODE.get_stats, 5)
         except Exception as exc:
@@ -1273,6 +1396,10 @@ class NotifyIn(BaseModel):
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     store.init()
+    recovered = store.recover_inbound()
+    requeued = BROKER.recover()
+    if recovered or requeued:
+        log.warning("startup recovery: inbound=%s agent_tasks=%s", recovered, len(requeued))
     tasks = [
         asyncio.create_task(poll_loop()),
         asyncio.create_task(maintenance_loop()),
@@ -1371,7 +1498,19 @@ async def agent_result(request: Request):
     task_id = str(body.get("task_id") or "")
     if not task_id:
         raise HTTPException(400, "task_id required")
-    ok = BROKER.complete(task_id, bool(body.get("ok")), str(body.get("text") or ""))
+    ok = BROKER.complete(task_id, bool(body.get("ok")), str(body.get("text") or ""),
+                         agent_id=agent["id"],
+                         lease_token=str(body.get("lease_token") or ""))
+    return {"ok": ok}
+
+
+@app.post("/agent/heartbeat")
+async def agent_heartbeat(request: Request):
+    agent = agent_auth(request)
+    body = await request.json()
+    ok = BROKER.heartbeat(str(body.get("task_id") or ""),
+                          str(body.get("lease_token") or ""),
+                          agent_id=agent["id"])
     return {"ok": ok}
 
 
@@ -1387,11 +1526,38 @@ def notify_cancel(nid: str, request: Request):
 
 
 @app.post("/internal/leetcode/stats")
-def leetcode_stats(request: Request):
+async def leetcode_stats(request: Request):
     service_auth(request)
     if LEETCODE is None:
         raise HTTPException(503, "leetcode plugin unavailable")
-    return LEETCODE.get_stats(10)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    limit = body.get("limit", 10) if isinstance(body, dict) else 10
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 20:
+        limit = 10
+    return await asyncio.to_thread(LEETCODE.get_stats, limit)
+
+
+@app.post("/internal/leetcode/question")
+async def leetcode_question(request: Request):
+    service_auth(request)
+    if LEETCODE is None:
+        raise HTTPException(503, "leetcode plugin unavailable")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        raise HTTPException(400, "invalid body")
+    question = body.get("question")
+    if not isinstance(question, str) or not 1 <= len(question.strip()) <= 120:
+        raise HTTPException(400, "question required")
+    limit = body.get("limit", 5)
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 20:
+        limit = 5
+    return await asyncio.to_thread(LEETCODE.get_question_record, question.strip(), limit)
 
 
 @app.post("/internal/ask")
