@@ -36,6 +36,7 @@ try {
         --hidden-import win32process `
         --hidden-import pywintypes `
         --hidden-import pythoncom `
+        --collect-all winsdk `
         --hidden-import win32ui `
         --hidden-import win32con `
         "$Entry"
