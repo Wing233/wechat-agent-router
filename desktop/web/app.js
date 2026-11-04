@@ -796,7 +796,7 @@ function renderWorklog() {
       <span>${esc(row.status || "unknown")} · ${esc(row.chars || 0)} 字 · ${esc(row.updated_at || "")}</span>
     </div>`).join("") : `<div class="empty">还没有上传记录</div>`;
   return `<div class="grid-2">
-    <section class="card"><div class="card-head"><div><h2 class="card-title">工作电脑采集</h2><p class="card-sub">随桌面端启动；每天 22:00 汇总当天上传，22:30 由 LYPH 生成 private 草稿待审（不自动公开）。</p></div>${badge(running ? "运行中" : "已停止", running ? "ok" : "muted")}</div>
+    <section class="card"><div class="card-head"><div><h2 class="card-title">工作电脑采集</h2><p class="card-sub">随桌面端启动；每天 22:00 汇总当天上传，22:30 由 LYPH 自动生成日报并 public 发布（无需人工审核，可在后台撤稿）。</p></div>${badge(running ? "运行中" : "已停止", running ? "ok" : "muted")}</div>
       <div class="card-body">
         <div class="summary-grid">
           <div class="summary-item"><strong>${esc(w.samples_today || 0)}</strong><span>今日采样</span></div>

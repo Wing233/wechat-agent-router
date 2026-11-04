@@ -7,8 +7,9 @@ Design:
 - store samples and OCR text locally in SQLite
 - at 22:00 build one structured note for the current day, upload it to LYPH as
   a ``source_kind=note`` capture, and keep a local Markdown copy
-- the server generates a private draft at 22:30 for review; it is never
-  published automatically
+- the server generates the daily report at 22:30 and publishes it publicly
+  automatically (no manual review; a published report can be withdrawn in the
+  LYPH admin console)
 
 Run as a current-user scheduled task at logon. See docs/worklog.md.
 """

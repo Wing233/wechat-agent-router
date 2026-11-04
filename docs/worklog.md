@@ -13,7 +13,7 @@ WeChatAgentDesktop
         ├─ 每天 22:00 汇总当天
         └─ 上传 LYPH device API（纯文字 note）
                 ↓
-        LYPH 22:30 生成 private 草稿待审（不自动 public）
+        LYPH 22:30 cron 自动生成日报并 public 发布（无人工审核环节，如需撤回在后台手动撤稿）
 ```
 
 ## 1. 在桌面端使用
@@ -77,13 +77,13 @@ D:\xx\wechatbot\agent-router\desktop\.runtime\worklog\
 
 ```text
 22:00  WorklogService 汇总当天并上传 [worklog] note（纯文字）
-22:30  LYPH 服务器 cron 生成日报（visibility=private 草稿，待人工审核，不自动 public）
+22:30  LYPH 服务器 cron 自动生成日报并 public 发布（无人工审核环节，如需撤回在后台手动撤稿）
 ```
 
 - 采集线程随桌面端启动，不需要单独任务。
 - 30s 前台采样与本机屏幕 OCR 在同一循环、同一节奏完成，只保留脱敏后的文字。
 - 如果 22:00 时电脑关机/休眠，下次桌面端启动会自动补跑当天/往日。
-- 草稿保持 private，需人工确认后才发布；采集端不会触发任何自动公开。
+- 服务器按 22:30 cron 自动生成日报并 public 发布，无人工审核环节（如需撤回在后台手动撤稿）。
 - 如果桌面端被关闭，采集也会停止；重新打开后继续。
 
 ## 5. 补全往日
@@ -112,7 +112,7 @@ python D:\xx\wechatbot\agent-router\worklog_collector.py `
   --backfill 30
 ```
 
-服务器端人工发布（cron 22:30 只调用 `--draft-only` 生成 private 草稿，不会自动执行下面的公开命令）：
+服务器默认按 22:30 cron 自动生成日报并 public 发布，无人工审核环节（如需撤回在后台手动撤稿）。以下命令仅用于手动重跑 / 补发：
 
 ```bash
 docker exec lyph-api-1 python /data/worklog_publish.py \
@@ -141,7 +141,7 @@ docker exec lyph-api-1 python /data/worklog_publish.py \
 - 浏览器只上传分类和次数，不上传 URL、查询参数、页面标题。
 - Codex 只上传 cwd 最后一级和消息数量，不上传提示词或回复正文。
 - 窗口标题会脱敏；浏览器标题统一隐藏。
-- 22:30 服务器只生成 private 草稿待人工审核，不自动 public；是否公开由人工决定。
+- 服务器按 22:30 cron 自动生成日报并 public 发布，无人工审核环节（如需撤回在后台手动撤稿）。
 - 设备 token 用 Windows DPAPI 加密，只有当前 Windows 用户能解密。
 - 采集进程只上传到 `https://123.57.153.49`，不访问其他地址。
 
