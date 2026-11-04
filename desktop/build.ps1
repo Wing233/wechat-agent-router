@@ -21,6 +21,7 @@ try {
     & (Join-Path $Venv "Scripts\pyinstaller.exe") `
         --noconfirm --clean --onefile --windowed `
         --name "WeChatAgentDesktop" `
+        --icon "$Here\assets\WeChatAgentDesktop.ico" `
         --distpath "desktop\dist" `
         --workpath "desktop\build" `
         --specpath "desktop" `
@@ -35,7 +36,6 @@ try {
         --hidden-import win32process `
         --hidden-import pywintypes `
         --hidden-import pythoncom `
-        --collect-all winsdk `
         --hidden-import win32ui `
         --hidden-import win32con `
         "$Entry"
