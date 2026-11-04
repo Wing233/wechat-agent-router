@@ -9,6 +9,8 @@ const state = {
   router: null,
   worklog: null,
   techStack: null,
+  update: null,
+  updateTimer: null,
   server: null,
   serverError: "",
   serverTried: false,
@@ -911,11 +913,51 @@ async function loadTechStack(force = false) {
 }
 
 /* ------------------------------------------------------------------ settings */
+function updateStatusText() {
+  const upd = state.update || {};
+  if (upd.state === "checking") return "正在检查最新版本…";
+  if (upd.state === "downloading") return `正在下载 ${upd.latest || "新版本"}（${Math.round((upd.progress || 0) * 100)}%）`;
+  if (upd.state === "applying") return "更新已就绪，程序即将重启…";
+  if (upd.state === "error") return `更新失败：${upd.error || "未知错误"}`;
+  if (upd.available) return `发现新版本 ${upd.latest}（当前 ${upd.current}）`;
+  if (upd.checked_at) return `已是最新版本 ${upd.current}`;
+  return `当前版本 ${upd.current || state.bootstrap?.app?.version || "1.3.0"}`;
+}
+
+function startUpdatePolling() {
+  if (state.updateTimer) return;
+  const tick = async () => {
+    try {
+      const data = await api("/api/update/status");
+      state.update = data;
+      if (state.page === "settings") renderPage();
+      if (data.state === "error") {
+        state.updateTimer = null;
+        toast(data.error || "更新失败", "error");
+        return;
+      }
+      if (data.state === "applying") {
+        state.updateTimer = null;
+        return;
+      }
+    } catch {
+      // The server is shutting down for the restart; stop polling quietly.
+      state.updateTimer = null;
+      return;
+    }
+    state.updateTimer = setTimeout(tick, 700);
+  };
+  state.updateTimer = setTimeout(tick, 400);
+}
+
 function renderSettings() {
   const boot = state.bootstrap || {};
   const app = boot.app || {};
   const paths = boot.paths || {};
   const auto = Boolean(boot.autostart);
+  const upd = state.update || {};
+  const updating = upd.state === "checking" || upd.state === "downloading" || upd.state === "applying";
+  const progress = Math.round((upd.progress || 0) * 100);
   const modeLabel = { auto: "自动（优先 WebView2）", webview: "WebView2 窗口", edge: "Edge 应用窗口", browser: "默认浏览器" }[boot.app?.window_mode] || boot.app?.window_mode || "自动";
   return `<div class="grid-2">
     <section class="card"><div class="card-head"><div><h2 class="card-title">启动与后台</h2><p class="card-sub">开机自启会用无窗口模式运行，再次双击会打开现有控制台。</p></div></div><div class="card-body">
@@ -939,6 +981,15 @@ function renderSettings() {
       <dt>数据目录</dt><dd class="mono">${esc(paths.data || "")}</dd>
       <dt>运行模式</dt><dd>${boot.app?.headless ? "后台服务（无窗口）" : "桌面窗口"}</dd>
     </dl>
+    <div class="divider"></div>
+    <div class="switch-row">
+      <div class="switch-copy"><strong>软件更新</strong><small id="update-status">${esc(updateStatusText())}</small></div>
+      <div class="form-actions">
+        <button class="btn btn-sm" type="button" data-action="update-check" ${updating ? "disabled" : ""}>${icon("refresh")}检查更新</button>
+        ${upd.available ? `<button class="btn btn-sm btn-primary" type="button" data-action="update-apply" ${updating ? "disabled" : ""}>${icon("package")}下载并更新</button>` : ""}
+      </div>
+    </div>
+    <div class="update-progress ${updating && progress > 0 ? "" : "hide"}" id="update-progress"><span style="width:${progress}%"></span></div>
     <div class="form-actions"><button class="btn btn-danger" type="button" data-action="quit">${icon("power")}退出整个程序</button></div>
   </div></section>`;
 }
@@ -1923,6 +1974,28 @@ document.addEventListener("click", async (event) => {
         if (state.bootstrap) state.bootstrap.autostart = result.enabled;
         toast(result.enabled ? "已开启开机自启" : "已关闭开机自启");
         renderPage();
+        break;
+      }
+      case "update-check": {
+        state.update = { ...(state.update || {}), state: "checking" };
+        renderPage();
+        state.update = await api("/api/update/check");
+        toast(
+          state.update.state === "error"
+            ? (state.update.error || "检查更新失败")
+            : (state.update.available ? `发现新版本 ${state.update.latest}` : "已是最新版本"),
+          state.update.state === "error" ? "error" : "ok",
+        );
+        renderPage();
+        break;
+      }
+      case "update-apply": {
+        if (!await confirmAction("下载并更新", "程序会下载最新版本，退出后自动替换并重启。更新期间请勿关闭电源。", "开始更新")) break;
+        const result = await api("/api/update/apply", { method: "POST" });
+        if (!result.started) { toast(result.error || "无法开始更新", "error"); break; }
+        state.update = { ...(state.update || {}), state: "downloading", progress: 0 };
+        renderPage();
+        startUpdatePolling();
         break;
       }
       case "toggle-log-scroll":

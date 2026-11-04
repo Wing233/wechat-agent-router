@@ -246,6 +246,12 @@ class ApiHandler(BaseHTTPRequestHandler):
             return {"enabled": app.autostart_status()}
         if method == "POST" and path == "/api/autostart":
             return {"enabled": app.set_autostart(bool(body.get("enabled")))}
+        if method == "GET" and path == "/api/update/check":
+            return app.update_check()
+        if method == "GET" and path == "/api/update/status":
+            return app.update_status()
+        if method == "POST" and path == "/api/update/apply":
+            return app.update_apply()
         if method == "GET" and path == "/api/worklog":
             return app.worklog_status()
         if method == "POST" and path == "/api/worklog/start":

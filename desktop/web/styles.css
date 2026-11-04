@@ -420,3 +420,7 @@ tbody tr:hover { background: #fbfcfd; }
   .form-grid .span-2 { grid-column: span 1; }
   .topbar-title h1 { font-size: 22px; }
 }
+
+.update-progress { height: 6px; margin-top: 10px; border-radius: 999px; background: var(--line); overflow: hidden; }
+.update-progress > span { display: block; height: 100%; width: 0; border-radius: inherit; background: linear-gradient(90deg, var(--brand), #14b8a6); transition: width .25s ease; }
+.update-progress.hide { display: none; }

@@ -428,6 +428,30 @@ class DesktopApp:
         return result
 
     # ------------------------------------------------------------------
+    def update_check(self) -> dict:
+        from updater import check
+        return check()
+
+    def update_status(self) -> dict:
+        from updater import snapshot
+        return snapshot()
+
+    def update_apply(self) -> dict:
+        from updater import apply_async
+        result = apply_async(self._finish_update)
+        if result.get("started"):
+            self.log.add("INFO", "开始下载桌面更新")
+        return result
+
+    def _finish_update(self) -> None:
+        self.shutdown()
+        if self.on_quit:
+            try:
+                self.on_quit()
+            except Exception:
+                pass
+
+    # ------------------------------------------------------------------
     def worklog_status(self) -> dict:
         return self.worklog.status()
 
