@@ -796,7 +796,7 @@ function renderWorklog() {
       <span>${esc(row.status || "unknown")} · ${esc(row.chars || 0)} 字 · ${esc(row.updated_at || "")}</span>
     </div>`).join("") : `<div class="empty">还没有上传记录</div>`;
   return `<div class="grid-2">
-    <section class="card"><div class="card-head"><div><h2 class="card-title">工作电脑采集</h2><p class="card-sub">随桌面端启动；每天 04:00 汇总前一天，04:30 由 LYPH 发布。</p></div>${badge(running ? "运行中" : "已停止", running ? "ok" : "muted")}</div>
+    <section class="card"><div class="card-head"><div><h2 class="card-title">工作电脑采集</h2><p class="card-sub">随桌面端启动；每天 22:00 汇总当天上传，22:30 由 LYPH 生成 private 草稿待审（不自动公开）。</p></div>${badge(running ? "运行中" : "已停止", running ? "ok" : "muted")}</div>
       <div class="card-body">
         <div class="summary-grid">
           <div class="summary-item"><strong>${esc(w.samples_today || 0)}</strong><span>今日采样</span></div>
@@ -806,7 +806,7 @@ function renderWorklog() {
         </div>
         <div class="form-actions">
           <button class="btn btn-sm ${running ? "btn-danger" : "btn-primary"}" data-action="worklog-toggle">${icon(running ? "stop" : "play")}${running ? "停止采集" : "启动采集"}</button>
-          <button class="btn btn-sm" data-action="worklog-finalize">${icon("clock")}立即补采昨天</button>
+          <button class="btn btn-sm" data-action="worklog-finalize">${icon("clock")}立即汇总当天</button>
           <button class="btn btn-sm" data-action="worklog-backfill">${icon("refresh")}补全最近 30 天</button>
           <button class="btn btn-sm btn-ghost" data-action="worklog-refresh">${icon("refresh")}刷新</button>
         </div>
@@ -828,8 +828,12 @@ function renderWorklog() {
       <div class="form-grid">
         <div class="field"><label>采样间隔（秒）</label><input class="input" id="worklog-sample" type="number" min="5" max="600" value="${esc(cfg.sample_seconds || 30)}"></div>
         <div class="field"><label>空闲跳过（秒）</label><input class="input" id="worklog-idle" type="number" min="60" max="7200" value="${esc(cfg.idle_skip_seconds || 300)}"></div>
-        <div class="field"><label>每日采集时间</label><input class="input" id="worklog-finalize" type="time" value="${esc(cfg.finalize_time || "04:00")}"></div>
+        <div class="field"><label>每日采集时间</label><input class="input" id="worklog-finalize" type="time" value="${esc(cfg.finalize_time || "22:00")}"></div>
         <div class="field"><label>本地日报目录</label><input class="input mono" id="worklog-dir" value="${esc(cfg.worklog_dir || "")}"></div>
+        <div class="field"><label>本地屏幕 OCR</label><label class="check-row"><input type="checkbox" id="worklog-screenshot" ${cfg.screenshot_enabled === false ? "" : "checked"}>仅识别文字，像素不出本机</label></div>
+        <div class="field"><label>OCR 语言</label><input class="input" id="worklog-ocr-language" value="${esc(cfg.ocr_language || "zh-CN")}"></div>
+        <div class="field"><label>OCR 线索上限（字）</label><input class="input" id="worklog-ocr-max" type="number" min="0" max="16000" value="${esc(cfg.ocr_max_chars ?? 4000)}"></div>
+        <div class="field"><label>每应用 OCR 行数</label><input class="input" id="worklog-ocr-lines" type="number" min="1" max="500" value="${esc(cfg.ocr_lines_per_app || 30)}"></div>
       </div>
       <div class="form-actions"><button class="btn btn-sm btn-primary" data-action="worklog-save">${icon("check")}保存设置</button></div>
       <div class="divider"></div>
@@ -961,7 +965,7 @@ const PAGES = {
   },
   worklog: {
     title: "工作日志", eyebrow: "WORKLOG",
-    subtitle: "前台窗口、Git、Codex、浏览器分类和文件改动，每天 04:00 汇总前一天。",
+    subtitle: "前台窗口、Git、Codex、浏览器分类、文件改动与本机屏幕文字线索，每天 22:00 汇总当天。",
     render: renderWorklog,
     actions: () => `<button class="btn btn-sm" data-action="worklog-refresh">${icon("refresh")}刷新</button>`,
     after: () => { if (!state.worklog) loadWorklog(true).then(renderPage); },
@@ -1880,8 +1884,12 @@ document.addEventListener("click", async (event) => {
         const payload = {
           sample_seconds: Number($("worklog-sample")?.value || 30),
           idle_skip_seconds: Number($("worklog-idle")?.value || 300),
-          finalize_time: $("worklog-finalize")?.value || "04:00",
+          finalize_time: $("worklog-finalize")?.value || "22:00",
           worklog_dir: $("worklog-dir")?.value || "",
+          screenshot_enabled: Boolean($("worklog-screenshot")?.checked),
+          ocr_language: $("worklog-ocr-language")?.value || "zh-CN",
+          ocr_max_chars: Number($("worklog-ocr-max")?.value ?? 4000),
+          ocr_lines_per_app: Number($("worklog-ocr-lines")?.value || 30),
         };
         state.worklog = await api("/api/worklog/config", { method: "PUT", body: payload });
         toast("工作日志设置已保存");

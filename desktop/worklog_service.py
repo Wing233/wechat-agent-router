@@ -149,7 +149,7 @@ class WorklogService:
 
     def finalize(self, day: str = "") -> dict:
         config = collector.load_config(self.config_path)
-        target = day or (datetime.now().astimezone().date() - timedelta(days=1)).isoformat()
+        target = day or datetime.now().astimezone().date().isoformat()
         client = collector._client(config, self.secrets)
         return self._start_job(
             "finalize", target,
@@ -181,6 +181,25 @@ class WorklogService:
                 else:
                     value = max(0, min(value, 16000))
                 config[key] = value
+        for key in ("ocr_max_chars", "ocr_lines_per_app"):
+            if key in payload:
+                try:
+                    value = int(payload[key])
+                except (TypeError, ValueError):
+                    raise ValueError(f"{key} 必须是数字") from None
+                if key == "ocr_max_chars":
+                    value = max(0, min(value, 16000))
+                else:
+                    value = max(1, min(value, 500))
+                config[key] = value
+        if "screenshot_enabled" in payload:
+            raw = payload["screenshot_enabled"]
+            config["screenshot_enabled"] = (
+                raw if isinstance(raw, bool)
+                else str(raw).lower() in ("1", "true", "yes", "on"))
+        if "ocr_language" in payload:
+            config["ocr_language"] = (
+                str(payload.get("ocr_language") or "zh-CN").strip() or "zh-CN")
         if "finalize_time" in payload:
             text = str(payload.get("finalize_time") or "").strip()
             try:
@@ -229,7 +248,7 @@ class WorklogService:
                 "ORDER BY day DESC LIMIT 10")]
         last_upload = next((row for row in rows
                             if row["status"] in ("uploaded", "published")), None)
-        hour, minute = collector._parse_time(str(config.get("finalize_time") or "04:00"))
+        hour, minute = collector._parse_time(str(config.get("finalize_time") or "22:00"))
         next_finalize = datetime.now().astimezone().replace(
             hour=hour, minute=minute, second=0, microsecond=0)
         if next_finalize <= datetime.now().astimezone():
@@ -244,6 +263,10 @@ class WorklogService:
                 "finalize_time": config.get("finalize_time"),
                 "min_note_chars": config.get("min_note_chars"),
                 "worklog_dir": config.get("worklog_dir"),
+                "screenshot_enabled": config.get("screenshot_enabled", True),
+                "ocr_language": config.get("ocr_language", "zh-CN"),
+                "ocr_max_chars": config.get("ocr_max_chars", 4000),
+                "ocr_lines_per_app": config.get("ocr_lines_per_app", 30),
             },
             "today": today,
             "samples_today": samples_today,

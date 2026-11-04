@@ -1,12 +1,14 @@
 """Windows work-activity collector for LYPH daily logs.
 
 Design:
-- sample the foreground window every 30s (no keystrokes, no clipboard, no screen)
-- store samples locally in SQLite
-- at 22:50 build one structured note for the day, upload it to LYPH as a
-  ``source_kind=note`` capture, and keep a local Markdown copy
-- a server-side publisher turns worklog-only days into public LYPH journal
-  entries through the existing daily pipeline
+- sample the foreground window every 30s (no keystrokes, no clipboard)
+- every 30s capture screen text via on-device OCR; only redacted text is kept,
+  pixels never leave the machine (no PNG on disk, no upload, no cloud vision)
+- store samples and OCR text locally in SQLite
+- at 22:00 build one structured note for the current day, upload it to LYPH as
+  a ``source_kind=note`` capture, and keep a local Markdown copy
+- the server generates a private draft at 22:30 for review; it is never
+  published automatically
 
 Run as a current-user scheduled task at logon. See docs/worklog.md.
 """
@@ -38,8 +40,12 @@ DEFAULT_CONFIG = {
     "device_name": "pc-home-worklog",
     "sample_seconds": 30,
     "idle_skip_seconds": 300,
-    "finalize_time": "04:00",
+    "finalize_time": "22:00",
     "min_note_chars": 100,
+    "screenshot_enabled": True,
+    "ocr_language": "zh-CN",
+    "ocr_max_chars": 4000,
+    "ocr_lines_per_app": 30,
     "worklog_dir": str(Path.home() / "Documents" / "worklog"),
     "browser_apps": ["chrome.exe", "msedge.exe", "firefox.exe", "brave.exe"],
     "redact_patterns": [
@@ -194,6 +200,11 @@ class WorklogDB:
             CREATE TABLE IF NOT EXISTS state(
               key TEXT PRIMARY KEY, value TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS ocr_samples(
+              ts TEXT NOT NULL, day TEXT NOT NULL, app TEXT NOT NULL,
+              ocr_text TEXT NOT NULL DEFAULT ''
+            );
+            CREATE INDEX IF NOT EXISTS ocr_samples_day ON ocr_samples(day);
             """)
 
     def sample(self, day: str, app: str, title: str, idle: int) -> None:
@@ -208,6 +219,21 @@ class WorklogDB:
         with self._conn() as conn:
             rows = conn.execute(
                 "SELECT app,title,idle FROM samples WHERE day=? ORDER BY id", (day,)
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def add_ocr_sample(self, day: str, app: str, text: str) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO ocr_samples(ts,day,app,ocr_text) VALUES(?,?,?,?)",
+                (datetime.now().astimezone().isoformat(timespec="seconds"),
+                 day, app[:80], text),
+            )
+
+    def ocr_samples(self, day: str) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT app,ocr_text FROM ocr_samples WHERE day=? ORDER BY rowid", (day,)
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -232,6 +258,7 @@ class WorklogDB:
         cutoff = (datetime.now().astimezone() - timedelta(days=days)).date().isoformat()
         with self._conn() as conn:
             conn.execute("DELETE FROM samples WHERE day < ?", (cutoff,))
+            conn.execute("DELETE FROM ocr_samples WHERE day < ?", (cutoff,))
 
 
 # ---------------------------------------------------------------------------
@@ -321,6 +348,14 @@ def sample_once(db: WorklogDB, config: dict) -> None:
     clean = redact_title(title, app, config)
     day = datetime.now().astimezone().date().isoformat()
     db.sample(day, app, clean, idle)
+    # 与 30s 采样同一循环、同一节奏：本机 OCR 只留脱敏文字，像素不出本机。
+    if config.get("screenshot_enabled", True):
+        import worklog_ocr
+        raw = worklog_ocr.capture_screen_text(config)
+        if raw:
+            redacted = worklog_ocr.redact_ocr_text(raw, config)
+            if redacted.strip():
+                db.add_ocr_sample(day, app, redacted)
 
 
 # ---------------------------------------------------------------------------
@@ -370,8 +405,47 @@ def _evidence_lines(evidence: dict) -> list[str]:
     return lines
 
 
+def _ocr_clue_lines(ocr_rows: list[dict], config: dict) -> list[str]:
+    """把 OCR 文字去重、按 app 聚合、整体限长后生成 note 章节（纯文字）。"""
+    if not ocr_rows:
+        return []
+    max_chars = max(0, int(config.get("ocr_max_chars") or 4000))
+    lines_per_app = max(1, int(config.get("ocr_lines_per_app") or 30))
+    grouped: dict[str, list[str]] = defaultdict(list)
+    seen: set[str] = set()
+    for row in ocr_rows:
+        app = str(row.get("app") or "").strip() or "unknown"
+        for raw_line in str(row.get("ocr_text") or "").splitlines():
+            line = raw_line.strip()
+            if not line or line in seen:
+                continue
+            seen.add(line)
+            if len(grouped[app]) < lines_per_app:
+                grouped[app].append(line)
+    if not grouped:
+        return []
+    lines = ["屏幕文字线索（本机 OCR 仅文字，已脱敏，像素不出本机）:"]
+    budget = max_chars
+    for app, texts in grouped.items():
+        if budget <= 0:
+            break
+        header = f"[{app}]"
+        lines.append(header)
+        budget -= len(header) + 1
+        for text in texts:
+            if budget <= 0:
+                break
+            piece = f"- {text}"
+            if len(piece) > budget:
+                piece = piece[:budget]
+            lines.append(piece)
+            budget -= len(piece) + 1
+    return lines
+
+
 def build_note(day: str, db: WorklogDB, config: dict) -> str:
     samples = db.samples(day)
+    ocr_rows = db.ocr_samples(day)
     sample_seconds = max(5, int(config.get("sample_seconds") or 30))
     idle_limit = max(1, int(config.get("idle_skip_seconds") or 300))
     app_seconds: Counter = Counter()
@@ -394,7 +468,7 @@ def build_note(day: str, db: WorklogDB, config: dict) -> str:
         or (evidence.get("codex") or {}).get("messages")
         or evidence.get("workbuddy")
     )
-    if not samples and not has_evidence:
+    if not samples and not has_evidence and not ocr_rows:
         return ""
     lines = [f"[worklog] {day} 工作活动"]
     lines.append("统计口径：浏览=访问次数，文件=修改文件数，AI 会话=消息数；没有活跃时长数据时不要写工时。")
@@ -409,6 +483,7 @@ def build_note(day: str, db: WorklogDB, config: dict) -> str:
         for (app, title), seconds in title_seconds.most_common(18):
             lines.append(f"- {format_duration(seconds)} {app}: {title}")
     lines.extend(_evidence_lines(evidence))
+    lines.extend(_ocr_clue_lines(ocr_rows, config))
     text = "\n".join(lines).strip()
     return text[:16000]
 
@@ -430,7 +505,8 @@ class LyphClient:
         response.raise_for_status()
         return response.json()
 
-    def upload_note(self, day: str, text: str) -> dict:
+    def upload_note(self, day: str, text: str,
+                    captured_hour: int = 22, captured_minute: int = 0) -> dict:
         import requests
         capture_id = f"worklog-{day}-v1"
         response = requests.post(
@@ -438,7 +514,7 @@ class LyphClient:
             headers=self._headers(),
             data={
                 "capture_id": capture_id,
-                "captured_at": f"{day}T22:50:00+08:00",
+                "captured_at": f"{day}T{captured_hour:02d}:{captured_minute:02d}:00+08:00",
                 "source_kind": "note",
                 "text": text,
             },
@@ -476,7 +552,9 @@ def finalize_day(day: str, db: WorklogDB, client: LyphClient | None,
     if client is None:
         db.save_day(day, note=note, status="local")
         return {"day": day, "status": "local", "chars": len(note)}
-    result = client.upload_note(day, note)
+    finalize_hour, finalize_minute = _parse_time(
+        str(config.get("finalize_time") or "22:00"))
+    result = client.upload_note(day, note, finalize_hour, finalize_minute)
     duplicate = bool(result.get("duplicate"))
     db.save_day(day, note=note, capture_id=f"worklog-{day}-v1",
                 status="uploaded" if not result.get("conflict") else "conflict")
@@ -489,7 +567,7 @@ def _parse_time(value: str) -> tuple[int, int]:
         hour, minute = str(value).split(":", 1)
         return max(0, min(23, int(hour))), max(0, min(59, int(minute)))
     except Exception:
-        return 22, 50
+        return 22, 0
 
 
 def _client(config: dict, secrets: SecretStore) -> LyphClient | None:
@@ -504,6 +582,8 @@ def backfill(days: int, db: WorklogDB, client: LyphClient | None, config: dict,
              *, dry_run: bool = False) -> None:
     worklog_sources.clear_caches()
     today = datetime.now().astimezone().date()
+    # 当天由 daemon/catch_up 在汇总时刻后处理，backfill 不碰当天，
+    # 避免白天点「补全」把半天数据 finalize 成终态锁死当天日报。
     for offset in range(1, max(1, days) + 1):
         day = (today - timedelta(days=offset)).isoformat()
         try:
@@ -514,15 +594,18 @@ def backfill(days: int, db: WorklogDB, client: LyphClient | None, config: dict,
             logging.warning("backfill %s failed: %s", day, exc)
 
 
-def _finalize_target(now: datetime, finalize_hour: int) -> date:
-    """At 04:00 collect yesterday; before 04:00 the latest complete day is two days ago."""
-    return now.date() - timedelta(days=1 if now.hour >= finalize_hour else 2)
+def _finalize_target(now: datetime, finalize_hour: int, finalize_minute: int) -> date:
+    """按 (时,分) 与汇总时刻比较：到达/超过则收当天，未到则最新完整日为昨天。"""
+    reached = (now.hour, now.minute) >= (finalize_hour, finalize_minute)
+    return now.date() - timedelta(days=0 if reached else 1)
 
 
 def catch_up(db: WorklogDB, client: LyphClient | None, config: dict,
-             finalize_hour: int, days: int = 7) -> None:
+             finalize_hour: int, finalize_minute: int, days: int = 7) -> None:
     now = datetime.now().astimezone()
-    newest = _finalize_target(now, finalize_hour)
+    # 随 _finalize_target 同步：汇总时刻后覆盖当天，之前只补昨天及往日，
+    # 避免半天数据被提前上传成当天日报。
+    newest = _finalize_target(now, finalize_hour, finalize_minute)
     for offset in range(max(1, days)):
         day = (newest - timedelta(days=offset)).isoformat()
         existing = db.day(day) or {}
@@ -540,16 +623,16 @@ def catch_up(db: WorklogDB, client: LyphClient | None, config: dict,
 def daemon(db: WorklogDB, client: LyphClient | None, config: dict,
            stop_event: threading.Event | None = None) -> None:
     sample_seconds = max(5, int(config.get("sample_seconds") or 30))
-    finalize_hour, finalize_minute = _parse_time(str(config.get("finalize_time") or "04:00"))
+    finalize_hour, finalize_minute = _parse_time(str(config.get("finalize_time") or "22:00"))
     logging.info("collector started: sample=%ss finalize=%02d:%02d",
                  sample_seconds, finalize_hour, finalize_minute)
-    catch_up(db, client, config, finalize_hour)
+    catch_up(db, client, config, finalize_hour, finalize_minute)
     while not (stop_event and stop_event.is_set()):
         try:
             sample_once(db, config)
             now = datetime.now().astimezone()
             if (now.hour, now.minute) >= (finalize_hour, finalize_minute):
-                day = (now.date() - timedelta(days=1)).isoformat()
+                day = now.date().isoformat()
                 existing = db.day(day) or {}
                 if existing.get("status") not in ("uploaded", "published", "conflict", "empty"):
                     finalize_day(day, db, client, config)

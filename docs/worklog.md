@@ -8,11 +8,12 @@ WeChatAgentDesktop
   ├─ 本地控制台 API / UI
   └─ WorklogService
         ├─ 前台窗口采样（30s）
+        ├─ 本机屏幕 OCR（30s，仅文字，像素不出本机）
         ├─ Git / Codex / 浏览器分类 / 文件改动
-        ├─ 每天 04:00 汇总前一天
-        └─ 上传 LYPH device API
+        ├─ 每天 22:00 汇总当天
+        └─ 上传 LYPH device API（纯文字 note）
                 ↓
-        LYPH 04:30 生成并发布日报
+        LYPH 22:30 生成 private 草稿待审（不自动 public）
 ```
 
 ## 1. 在桌面端使用
@@ -21,9 +22,9 @@ WeChatAgentDesktop
 
 - 查看采集状态、今日采样数、LYPH 设备是否已配对
 - 启动 / 停止采集
-- 立即补采昨天
+- 立即汇总当天
 - 补全最近 30 天
-- 修改采样间隔、空闲跳过、每日采集时间、本地日报目录
+- 修改采样间隔、空闲跳过、每日采集时间、本地日报目录，以及本地屏幕 OCR 开关 / 语言 / 线索上限
 - 保存 / 清除 LYPH 设备 token
 - 打开数据目录、本地日报目录、采集日志
 
@@ -39,10 +40,11 @@ WeChatAgentDesktop
 | Codex | 会话数、用户消息数、cwd 的最后一级项目名 | 是 |
 | 浏览器 | 按分类统计访问次数（代码托管/刷题/技术文档/云服务/邮件/学习/其他） | 是，只有分类和次数 |
 | 文件 | 指定根目录下当天修改文件数，按项目分组 | 是 |
-| 截图/键盘/剪贴板 | **不采集** | 否 |
+| 截图（本地） | 30s 截屏 → 本机 OCR + 打码 → 仅文字入 note；像素不出本机、原图不上传、不留存 | 仅文字 |
+| 键盘/剪贴板 | **不采集** | 否 |
 | 浏览器 URL/页面标题 | **不采集** | 否 |
 
-窗口标题命中 `password`、`token`、`密码`、`私钥`、`银行卡`、`验证码` 等词时，上传为 `[敏感窗口已隐藏]`。浏览器窗口标题统一为 `[浏览器页面已隐藏]`。
+窗口标题命中 `password`、`token`、`密码`、`私钥`、`银行卡`、`验证码` 等词时，上传为 `[敏感窗口已隐藏]`。浏览器窗口标题统一为 `[浏览器页面已隐藏]`。屏幕 OCR 文字逐行脱敏，命中敏感词整行替换为 `[敏感内容已隐藏]`；命中浏览器、敏感词、锁屏或空闲超时的帧直接跳过抓屏。
 
 ## 3. 数据位置
 
@@ -52,7 +54,7 @@ WeChatAgentDesktop
 D:\xx\wechatbot\agent-router\desktop\.runtime\worklog\
   config.json
   secrets.json          # DPAPI 加密的 LYPH 设备 token
-  worklog.sqlite3
+  worklog.sqlite3       # samples / ocr_samples / days / state
   collector.log
   notes\                # 如果配置里使用默认目录
 ```
@@ -74,13 +76,14 @@ D:\xx\wechatbot\agent-router\desktop\.runtime\worklog\
 ## 4. 每天的时间线
 
 ```text
-04:00  WorklogService 汇总前一天并上传 [worklog] note
-04:30  LYPH 服务器 cron 生成日报并发布
+22:00  WorklogService 汇总当天并上传 [worklog] note（纯文字）
+22:30  LYPH 服务器 cron 生成日报（visibility=private 草稿，待人工审核，不自动 public）
 ```
 
 - 采集线程随桌面端启动，不需要单独任务。
-- 如果 04:00 时电脑关机/休眠，下次桌面端启动会自动补跑前一天。
-- 如果 04:30 时还没上传，第二天 04:30 会回看最近 3 天。
+- 30s 前台采样与本机屏幕 OCR 在同一循环、同一节奏完成，只保留脱敏后的文字。
+- 如果 22:00 时电脑关机/休眠，下次桌面端启动会自动补跑当天/往日。
+- 草稿保持 private，需人工确认后才发布；采集端不会触发任何自动公开。
 - 如果桌面端被关闭，采集也会停止；重新打开后继续。
 
 ## 5. 补全往日
@@ -91,7 +94,7 @@ D:\xx\wechatbot\agent-router\desktop\.runtime\worklog\
 - Codex 会话（cwd/数量）
 - 浏览器分类（次数）
 - 文件修改数
-- 本地已有采样
+- 本地已有采样与屏幕文字线索
 
 每天生成一条 `[worklog]` note，上传到 LYPH。没有证据的日期会跳过；内容过短的日期也会跳过。
 
@@ -109,7 +112,7 @@ python D:\xx\wechatbot\agent-router\worklog_collector.py `
   --backfill 30
 ```
 
-服务器端发布：
+服务器端人工发布（cron 22:30 只调用 `--draft-only` 生成 private 草稿，不会自动执行下面的公开命令）：
 
 ```bash
 docker exec lyph-api-1 python /data/worklog_publish.py \
@@ -132,11 +135,13 @@ docker exec lyph-api-1 python /data/worklog_publish.py \
 
 ## 6. 隐私与边界
 
-- 不采集键盘输入、剪贴板、摄像头、麦克风、完整屏幕截图。
+- 屏幕截图只在内存中做本机 OCR：**不上传原图、像素不出本机、不送云端 vision**；内存 bitmap 用完即弃，不写 PNG/图片到磁盘、不入库图片。
+- OCR 文字逐行脱敏后只以纯文字写入 note；命中浏览器、敏感词、锁屏或空闲超时的帧直接跳过抓屏。
+- 不采集键盘输入、剪贴板、摄像头、麦克风。
 - 浏览器只上传分类和次数，不上传 URL、查询参数、页面标题。
 - Codex 只上传 cwd 最后一级和消息数量，不上传提示词或回复正文。
 - 窗口标题会脱敏；浏览器标题统一隐藏。
-- 公开日志默认只包含高层活动统计；如果不想公开，把发布命令改成 `--visibility private`，或改 `publish_daily.sh`。
+- 22:30 服务器只生成 private 草稿待人工审核，不自动 public；是否公开由人工决定。
 - 设备 token 用 Windows DPAPI 加密，只有当前 Windows 用户能解密。
 - 采集进程只上传到 `https://123.57.153.49`，不访问其他地址。
 

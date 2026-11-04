@@ -7,7 +7,7 @@
 - 本地工作区：路径白名单、目录选择、打开目录
 - 服务器：Agent 注册、插件启停/重载、定时任务、脱敏配置、联网搜索、DeepSeek 余额
 - 渠道：QQ / Telegram / Discord 等经 Koishi 接入，统一身份映射、群聊 @、访客只读
-- 工作日志：前台窗口、Git、Codex、浏览器分类、文件改动，每天 04:00 汇总前一天并上传 LYPH
+- 工作日志：前台窗口、本机屏幕文字线索（OCR）、Git、Codex、浏览器分类、文件改动，每天 22:00 汇总当天并上传 LYPH，22:30 生成 private 草稿待审
 - 本机日志：Agent 轮询、任务执行、配置修改
 
 ## 直接运行（源码）
@@ -42,11 +42,12 @@ python desktop\main.py --headless
 
 - 随桌面端启动/退出自动启停
 - 每 30 秒采样前台应用和窗口标题；空闲超过 5 分钟跳过
+- 每 30 秒本机截屏做 OCR：只保留脱敏文字，像素不出本机、不上传原图、不送云端 vision、不落盘、不留存
 - 汇总 Git 提交、Codex 会话数量、浏览器分类、文件修改数
-- 每天 04:00 生成前一天的 `[worklog]` note，上传到 LYPH
-- 支持「立即补采昨天」和「补全最近 30 天」
+- 每天 22:00 生成当天的 `[worklog]` note（纯文字），上传到 LYPH；22:30 服务器生成 private 草稿待审，不自动 public
+- 支持「立即汇总当天」和「补全最近 30 天」
 - 设备 token 用 Windows DPAPI 加密
-- 不采集键盘、剪贴板、截图、浏览器 URL
+- 不采集键盘、剪贴板、浏览器 URL；窗口标题脱敏
 
 数据目录在 `desktop\.runtime\worklog`（源码）或 `data\worklog`（exe）。完整说明见 [docs/worklog.md](../docs/worklog.md)。
 

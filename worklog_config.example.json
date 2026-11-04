@@ -3,7 +3,12 @@
   "device_name": "pc-home-worklog",
   "sample_seconds": 30,
   "idle_skip_seconds": 300,
-  "finalize_time": "04:00",
+  "finalize_time": "22:00",
+  "min_note_chars": 100,
+  "screenshot_enabled": true,
+  "ocr_language": "zh-CN",
+  "ocr_max_chars": 4000,
+  "ocr_lines_per_app": 30,
   "worklog_dir": "C:\\Users\\liubo\\Documents\\worklog",
   "browser_apps": ["chrome.exe", "msedge.exe", "firefox.exe", "brave.exe"],
   "redact_patterns": [
