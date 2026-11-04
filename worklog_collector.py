@@ -7,6 +7,9 @@ Design:
 - store samples and OCR text locally in SQLite
 - at 22:00 build one structured note for the current day, upload it to LYPH as
   a ``source_kind=note`` capture, and keep a local Markdown copy
+- the note ends with a structured sentinel (an HTML comment carrying redacted
+  text only, no images/pixels/ids) so the daily-report detail page can render
+  a real 30s timeline card
 - the server generates the daily report at 22:30 and publishes it publicly
   automatically (no manual review; a published report can be withdrawn in the
   LYPH admin console)
@@ -219,7 +222,7 @@ class WorklogDB:
     def samples(self, day: str) -> list[dict]:
         with self._conn() as conn:
             rows = conn.execute(
-                "SELECT app,title,idle FROM samples WHERE day=? ORDER BY id", (day,)
+                "SELECT ts,app,title,idle FROM samples WHERE day=? ORDER BY id", (day,)
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -444,6 +447,78 @@ def _ocr_clue_lines(ocr_rows: list[dict], config: dict) -> list[str]:
     return lines
 
 
+def _hhmmss(ts: str) -> str:
+    """从样本 ISO 时间戳取真实 30s 采样时刻 HH:MM:SS；无法解析返回空串。"""
+    text = str(ts or "").strip()
+    if "T" in text:
+        text = text.split("T", 1)[1]
+    elif " " in text:
+        text = text.split(" ", 1)[1]
+    match = re.match(r"^(\d{1,2}):(\d{2}):(\d{2})", text)
+    if not match:
+        return ""
+    return f"{int(match.group(1)):02d}:{match.group(2)}:{match.group(3)}"
+
+
+def sample_timeline(db: WorklogDB, day: str, limit: int = 48) -> list[dict]:
+    """按 app 切换边界抽取真实 30s 采样点（仅脱敏文字，最多 limit 条）。
+
+    相邻样本 app 变化才记一点；同 app 连续样本不逐点存储。l 取已脱敏窗口标题，
+    空标题跳过；t 取样本 ts 的时分秒。
+    """
+    cap = max(0, int(limit))
+    if cap == 0:
+        return []
+    result: list[dict] = []
+    prev_app = None
+    for item in db.samples(day):
+        app = str(item.get("app") or "").strip()[:80]
+        title = str(item.get("title") or "").strip()
+        if not title:
+            continue
+        if app == prev_app:
+            continue
+        t = _hhmmss(item.get("ts"))
+        if not t:
+            continue
+        result.append({"t": t, "app": app, "l": title[:120]})
+        prev_app = app
+        if len(result) >= cap:
+            break
+    return result
+
+
+def _compact_json(payload: dict) -> str:
+    """紧凑单行 JSON；顺带把 '--' 降级，保证塞进 HTML 注释不被提前截断。"""
+    text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    return text.replace("--", "- -")
+
+
+def _shrink_payload(payload: dict, max_bytes: int = 6000) -> dict:
+    """把哨兵 JSON 压到 max_bytes 字节内：先丢 pts 尾部，再压两个列表，最后截 hl。"""
+    def too_big() -> bool:
+        return len(_compact_json(payload).encode("utf-8")) > max_bytes
+
+    while too_big():
+        if payload["pts"]:
+            payload["pts"].pop()
+            continue
+        trimmed = False
+        for lst in (payload["stats"]["app_top"],
+                    payload["stats"]["browser_categories"]):
+            if lst:
+                lst.pop()
+                trimmed = True
+                break
+        if trimmed:
+            continue
+        if len(payload["hl"]) > 64:
+            payload["hl"] = payload["hl"][:64]
+            continue
+        break
+    return payload
+
+
 def build_note(day: str, db: WorklogDB, config: dict) -> str:
     samples = db.samples(day)
     ocr_rows = db.ocr_samples(day)
@@ -471,22 +546,88 @@ def build_note(day: str, db: WorklogDB, config: dict) -> str:
     )
     if not samples and not has_evidence and not ocr_rows:
         return ""
-    lines = [f"[worklog] {day} 工作活动"]
-    lines.append("统计口径：浏览=访问次数，文件=修改文件数，AI 会话=消息数；没有活跃时长数据时不要写工时。")
+
+    # 纯文字分段：head/evidence 受保护，窗口片段/OCR 是可优先裁剪的长段。
+    head_lines = [f"[worklog] {day} 工作活动"]
+    head_lines.append("统计口径：浏览=访问次数，文件=修改文件数，AI 会话=消息数；没有活跃时长数据时不要写工时。")
     if active:
-        lines.append(f"活跃时长: {format_duration(active)}")
+        head_lines.append(f"活跃时长: {format_duration(active)}")
     if app_seconds:
-        lines.append("应用:")
+        head_lines.append("应用:")
         for app, seconds in app_seconds.most_common(12):
-            lines.append(f"- {app}: {format_duration(seconds)}")
+            head_lines.append(f"- {app}: {format_duration(seconds)}")
+    evidence_lines = _evidence_lines(evidence)
+    window_lines: list[str] = []
     if title_seconds:
-        lines.append("窗口片段:")
+        window_lines.append("窗口片段:")
         for (app, title), seconds in title_seconds.most_common(18):
-            lines.append(f"- {format_duration(seconds)} {app}: {title}")
-    lines.extend(_evidence_lines(evidence))
-    lines.extend(_ocr_clue_lines(ocr_rows, config))
-    text = "\n".join(lines).strip()
-    return text[:16000]
+            window_lines.append(f"- {format_duration(seconds)} {app}: {title}")
+    ocr_lines = _ocr_clue_lines(ocr_rows, config)
+
+    # 哨兵 JSON：数据全部取自上面已算出的变量 / 已脱敏文字，无原图/像素/object_id。
+    top_app = app_seconds.most_common(1)[0][0] if app_seconds else ""
+    git_count = len(evidence.get("git") or [])
+    hl_parts = [f"活跃 {format_duration(active)}"]
+    if top_app:
+        hl_parts.append(f"主用 {top_app[:40]}")
+    hl_parts.append(f"Git {git_count} 次提交")
+    hl = "，".join(hl_parts)
+    stats = {
+        "active_human": format_duration(active),
+        "git_commits": git_count,
+        "ai_sessions": int((evidence.get("codex") or {}).get("sessions") or 0),
+        "ai_messages": int((evidence.get("codex") or {}).get("messages") or 0),
+        "files_changed": sum(int(it.get("files") or 0)
+                             for it in (evidence.get("files") or [])),
+        "app_top": [{"app": a, "seconds": s} for a, s in app_seconds.most_common(8)],
+        "browser_categories": [
+            {"category": it.get("category") or it.get("domain") or "",
+             "visits": int(it.get("visits") or 0)}
+            for it in (evidence.get("browser") or [])[:8]
+        ],
+    }
+    payload = {
+        "v": 1,
+        "day": day,
+        "pts": sample_timeline(db, day, 48),
+        "hl": hl,
+        "stats": stats,
+    }
+    _shrink_payload(payload, 6000)
+    data = _compact_json(payload)
+    sentinel = f"<!--WORKLOG_TL_V1 {data} -->"
+
+    # 纯文字预算：<=10000 字节，且给哨兵留位保证合并文本 <=16000 字符。
+    plain_bytes_cap = 10000
+    plain_chars_cap = max(0, 16000 - len(sentinel) - 1)
+
+    def assemble() -> str:
+        return "\n".join(head_lines + evidence_lines + window_lines + ocr_lines).strip()
+
+    def over_budget(value: str) -> bool:
+        return (len(value.encode("utf-8")) > plain_bytes_cap
+                or len(value) > plain_chars_cap)
+
+    plain = assemble()
+    while over_budget(plain) and (ocr_lines or window_lines):
+        if ocr_lines:
+            ocr_lines.pop()          # 先砍 OCR 线索尾部
+        else:
+            window_lines.pop()       # 再砍窗口片段尾部
+        plain = assemble()
+    if over_budget(plain):
+        # 极端兜底：从尾部裁剪（最前 [worklog] 头始终保留）
+        plain = plain[:plain_chars_cap]
+        raw = plain.encode("utf-8")
+        if len(raw) > plain_bytes_cap:
+            plain = raw[:plain_bytes_cap].decode("utf-8", errors="ignore")
+
+    text = plain + "\n" + sentinel
+    text = text[:16000]             # 原有 16000 兜底，从尾部截，[worklog] 头不受影响
+    if not text.endswith(sentinel):
+        # 截断若破坏哨兵闭合，则整体丢弃哨兵，纯文字仍合法
+        text = plain[:16000]
+    return text
 
 
 class LyphClient:

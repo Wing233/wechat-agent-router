@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -12,6 +13,27 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import worklog_collector as collector
 import worklog_ocr as ocr
 import worklog_sources as sources
+
+
+# 哨兵提取：严格正则（标记定位 + 单个 JSON 对象 + 注释结束符收尾 + 允许跨行），
+# 解析一律包 try/except，失败降级为空，绝不让页面报错。
+_SENTINEL_RE = re.compile(r"<!--\s*WORKLOG_TL_V1\s+(\{.*\})\s*-->", re.DOTALL)
+
+
+def _sentinel_json_text(note: str) -> str:
+    try:
+        match = _SENTINEL_RE.search(note or "")
+        return match.group(1) if match else ""
+    except Exception:
+        return ""
+
+
+def _extract_sentinel(note: str) -> dict:
+    try:
+        raw = _sentinel_json_text(note)
+        return json.loads(raw) if raw else {}
+    except Exception:
+        return {}
 
 
 def _ocr_config(**overrides):
@@ -102,7 +124,9 @@ def test_ocr_clues_respect_max_chars(tmp_path: Path) -> None:
     note = collector.build_note(day, db, _ocr_config(ocr_max_chars=200))
     assert "屏幕文字线索" in note
     assert len(note) <= 16000
-    section = note.split("屏幕文字线索", 1)[1]
+    # 哨兵段追加在末尾，不参与「OCR 章节限长」的测量（先剥离哨兵再看章节）。
+    plain = note.split("<!--WORKLOG_TL_V1", 1)[0]
+    section = plain.split("屏幕文字线索", 1)[1]
     assert len(section) <= 400  # 章节整体限长，不撞 16000 字上限
 
 
@@ -261,3 +285,110 @@ def test_file_index(tmp_path: Path) -> None:
     index = sources.FileIndex([str(root)], ["scratch"])
     assert index.day(day)[0]["project"] == "repo/project"
     assert index.day(day)[0]["files"] == 1
+
+
+# ---------------------------------------------------------------------------
+# 哨兵段（WORKLOG_TL_V1）测试
+# ---------------------------------------------------------------------------
+def test_sentinel_shape_marker_and_closing(tmp_path: Path) -> None:
+    db = collector.WorklogDB(tmp_path / "worklog.sqlite3")
+    db.init()
+    day = "2026-11-04"
+    db.sample(day, "code.exe", "main.py - VS Code", 0)
+    note = collector.build_note(day, db, _ocr_config())
+    assert "WORKLOG_TL_V1" in note
+    assert note.rstrip().endswith("-->")            # a) 以注释结束符收尾
+    assert "```" not in note                        # 不用三反引号围栏
+
+
+def test_sentinel_json_parseable_and_keys(tmp_path: Path) -> None:
+    db = collector.WorklogDB(tmp_path / "worklog.sqlite3")
+    db.init()
+    day = "2026-11-04"
+    db.sample(day, "code.exe", "main.py - VS Code", 0)
+    note = collector.build_note(day, db, _ocr_config())
+    payload = _extract_sentinel(note)               # b) 严格正则 + json.loads
+    assert isinstance(payload, dict) and payload
+    assert {"v", "day", "pts", "hl", "stats"} <= set(payload)
+    assert payload["v"] == 1
+    assert payload["day"] == day
+    assert isinstance(payload["pts"], list)
+    assert isinstance(payload["hl"], str)
+    stats = payload["stats"]
+    assert {"active_human", "git_commits", "ai_sessions", "ai_messages",
+            "files_changed", "app_top", "browser_categories"} <= set(stats)
+    assert isinstance(stats["app_top"], list)
+    assert isinstance(stats["browser_categories"], list)
+
+
+def test_sentinel_size_caps(tmp_path: Path) -> None:
+    db = collector.WorklogDB(tmp_path / "worklog.sqlite3")
+    db.init()
+    day = "2026-11-04"
+    for _ in range(10):
+        db.sample(day, "code.exe", "main.py - VS Code", 0)
+    note = collector.build_note(day, db, _ocr_config())
+    assert len(note) <= 16000                        # c) 合并文本上限（字符）
+    raw = _sentinel_json_text(note)
+    assert raw
+    assert len(raw.encode("utf-8")) <= 6000         # JSON <= 6000 字节
+    plain = note.split("<!--WORKLOG_TL_V1", 1)[0].rstrip("\n")
+    assert len(plain.encode("utf-8")) <= 10000      # 纯文字 <= 10000 字节
+
+
+def test_sample_timeline_app_switch_boundary(tmp_path: Path) -> None:
+    db = collector.WorklogDB(tmp_path / "worklog.sqlite3")
+    db.init()
+    day = "2026-11-04"
+    rows = [
+        ("2026-11-04T09:00:00+08:00", "code.exe", "a.py", 0),
+        ("2026-11-04T09:00:30+08:00", "code.exe", "a.py", 0),   # 同 app，跳过
+        ("2026-11-04T09:01:00+08:00", "msedge.exe", "page", 0), # 切换，记点
+        ("2026-11-04T09:01:30+08:00", "msedge.exe", "page", 0), # 同 app，跳过
+        ("2026-11-04T09:02:00+08:00", "code.exe", "b.py", 0),   # 切换，记点
+        ("2026-11-04T09:02:30+08:00", "code.exe", "", 0),       # 空标题，跳过
+    ]
+    with db._conn() as conn:
+        conn.executemany(
+            "INSERT INTO samples(ts,day,app,title,idle) VALUES(?,?,?,?,?)",
+            [(ts, day, app, title, idle) for ts, app, title, idle in rows],
+        )
+    pts = collector.sample_timeline(db, day, 48)    # d) 真实 ts / app 切换边界
+    assert pts == [
+        {"t": "09:00:00", "app": "code.exe", "l": "a.py"},
+        {"t": "09:01:00", "app": "msedge.exe", "l": "page"},
+        {"t": "09:02:00", "app": "code.exe", "l": "b.py"},
+    ]
+    note = collector.build_note(day, db, _ocr_config())
+    payload = _extract_sentinel(note)
+    assert payload["pts"] == pts
+    real_times = {ts.split("T", 1)[1][:8] for ts, *_ in rows}
+    for point in payload["pts"]:
+        assert point["t"] in real_times             # t 来自真实 ts 的时分秒
+
+
+def test_sentinel_extreme_long_title_and_ocr(tmp_path: Path) -> None:
+    db = collector.WorklogDB(tmp_path / "worklog.sqlite3")
+    db.init()
+    day = "2026-11-04"
+    for i in range(60):
+        db.sample(day, "code.exe", f"标题{i}-" + "窗口内容" * 30, 0)
+    for i in range(300):
+        db.add_ocr_sample(day, "code.exe", f"第{i}行 " + "屏幕文字线索" * 30)
+    note = collector.build_note(day, db, _ocr_config(ocr_max_chars=4000))
+    assert len(note) <= 16000                        # e) 极端长文本仍不超 16000
+    assert "[worklog]" in note
+    assert any(w in note for w in ("活跃时长", "浏览", "Git 提交", "文件改动", "AI 会话"))
+    payload = _extract_sentinel(note)
+    assert payload.get("v") == 1
+    assert len(_sentinel_json_text(note).encode("utf-8")) <= 6000
+    assert len(note.split("<!--WORKLOG_TL_V1", 1)[0].rstrip("\n").encode("utf-8")) <= 10000
+
+
+def test_sentinel_empty_data_is_safe(tmp_path: Path) -> None:
+    db = collector.WorklogDB(tmp_path / "worklog.sqlite3")
+    db.init()
+    note = collector.build_note("2026-11-04", db, _ocr_config())
+    # f) 空数据整体省略哨兵且不报错
+    assert note == ""
+    assert _extract_sentinel(note) == {}
