@@ -74,7 +74,12 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 def _page_tag(timeout: float) -> str:
     opener = urllib.request.build_opener(_NoRedirect)
-    request = urllib.request.Request(LATEST_PAGE, headers={"User-Agent": USER_AGENT}, method="HEAD")
+    url = f"{LATEST_PAGE}?t={int(time.time())}"
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": USER_AGENT, "Cache-Control": "no-cache"},
+        method="HEAD",
+    )
     try:
         with opener.open(request, timeout=timeout) as response:
             location = response.headers.get("Location") or ""
@@ -89,10 +94,19 @@ def _page_tag(timeout: float) -> str:
 def _release_info(timeout: float) -> tuple[str, str, str]:
     """Return (tag, exe_url, sha_url) for the latest release.
 
-    Prefer the API because it exposes the exact asset URLs for that tag. The
-    ``releases/latest/download`` URL is intentionally avoided: a CDN can keep
-    serving a stale asset for a short window after a new release is published.
+    Prefer the release page redirect: it is not subject to the unauthenticated
+    API rate limit and is the authoritative "latest" pointer. Exact per-tag
+    asset URLs are constructed from the tag, so a stale CDN response for
+    ``releases/latest/download`` cannot leak an older exe into the update.
+    The API is only a fallback.
     """
+    try:
+        tag = _page_tag(timeout)
+        base = f"{DOWNLOAD_BASE}/{urllib.parse.quote(tag)}"
+        return tag, f"{base}/{ASSET}", f"{base}/{ASSET}.sha256"
+    except Exception:
+        pass
+
     request = urllib.request.Request(
         API_URL,
         headers={
@@ -113,10 +127,7 @@ def _release_info(timeout: float) -> tuple[str, str, str]:
             return tag, assets[ASSET], assets.get(ASSET + ".sha256", "")
     except Exception:
         pass
-
-    tag = _page_tag(timeout)
-    base = f"{DOWNLOAD_BASE}/{urllib.parse.quote(tag)}"
-    return tag, f"{base}/{ASSET}", f"{base}/{ASSET}.sha256"
+    raise RuntimeError("无法读取最新版本号")
 
 
 def _latest_tag(timeout: float) -> str:
