@@ -7,7 +7,7 @@ import tempfile
 from pathlib import Path
 
 APP_NAME = "WeChatAgentDesktop"
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 
 
 def is_frozen() -> bool:

@@ -35,6 +35,7 @@ _state = {
     "latest": "",
     "tag": "",
     "available": False,
+    "relation": "",  # newer | same | older (local vs. latest release)
     "size": 0,
     "checked_at": 0,
 }
@@ -100,11 +101,15 @@ def check(timeout: float = 12) -> dict:
     try:
         tag = _latest_tag(timeout)
         latest = tag.lstrip("vV")
+        current_key = _version_key(VERSION)
+        latest_key = _version_key(latest)
+        relation = "newer" if latest_key > current_key else "same" if latest_key == current_key else "older"
         _set(
             state="idle",
             tag=tag,
             latest=latest,
-            available=_version_key(latest) > _version_key(VERSION),
+            available=relation == "newer",
+            relation=relation,
             checked_at=int(time.time()),
             error="",
         )

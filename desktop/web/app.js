@@ -611,6 +611,7 @@ function renderWorkspaces() {
 /* ------------------------------------------------------------------ server: connect */
 function renderServerConnect() {
   const url = state.config?.router || state.bootstrap?.server?.url || "";
+  const tokenCmd = `ssh root@123.57.153.49 "python3 -c \\"import json;print(json.load(open('/opt/wechat-agent-router/config.json'))['service_token'])\\""`;
   return `<div class="server-connect"><section class="card"><div class="card-body">
     <div class="connect-illustration">${icon("server")}</div>
     <h2 class="connect-title">连接你的 Router</h2>
@@ -624,7 +625,10 @@ function renderServerConnect() {
     </form>
     <div class="token-help" style="margin-top:14px">
       在服务器上读取令牌：
-      <code>ssh root@123.57.153.49 "python3 -c \"import json;print(json.load(open('/opt/wechat-agent-router/config.json'))['service_token'])\""</code>
+      <div class="copy-row copy-row-wrap" style="margin-top:6px">
+        <code>${esc(tokenCmd)}</code>
+        <button class="btn btn-sm" type="button" data-action="copy" data-copy="${esc(tokenCmd)}">${icon("copy")}复制命令</button>
+      </div>
       <div class="tiny muted" style="margin-top:6px">连接会同时把本机 Router 地址切换为上面的地址。</div>
     </div>
   </div></section></div>`;
@@ -920,6 +924,7 @@ function updateStatusText() {
   if (upd.state === "applying") return "更新已就绪，程序即将重启…";
   if (upd.state === "error") return `更新失败：${upd.error || "未知错误"}`;
   if (upd.available) return `发现新版本 ${upd.latest}（当前 ${upd.current}）`;
+  if (upd.relation === "older") return `当前 ${upd.current} 比线上发布 ${upd.tag || upd.latest} 新，暂无可更新版本`;
   if (upd.checked_at) return `已是最新版本 ${upd.current}`;
   return `当前版本 ${upd.current || state.bootstrap?.app?.version || "1.3.0"}`;
 }
@@ -1983,7 +1988,11 @@ document.addEventListener("click", async (event) => {
         toast(
           state.update.state === "error"
             ? (state.update.error || "检查更新失败")
-            : (state.update.available ? `发现新版本 ${state.update.latest}` : "已是最新版本"),
+            : state.update.available
+              ? `发现新版本 ${state.update.latest}`
+              : state.update.relation === "older"
+                ? `当前 ${state.update.current} 比线上 ${state.update.tag || state.update.latest} 新`
+                : "已是最新版本",
           state.update.state === "error" ? "error" : "ok",
         );
         renderPage();

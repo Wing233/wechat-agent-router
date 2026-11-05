@@ -201,6 +201,7 @@ data\              # 日志、实例状态、加密后的服务令牌
 「设置」→「关于」→「检查更新」会读取 GitHub Releases 的最新版本，与当前版本比较；有新版本时出现「下载并更新」：
 
 - 更新源：`Wing233/wechat-agent-router` 的 latest release，资产名固定为 `WeChatAgentDesktop.exe`。
+- 只比较 GitHub Releases 的版本号；如果本地版本比 latest release 还新（例如本地已构建 1.3.0、线上仍是 v1.2.1），会提示“暂无可更新版本”，不会降级。需要先发布一个更高的 release。
 - 下载完成后，程序会退出，由同目录的临时脚本把旧 exe 备份为 `.WeChatAgentDesktop.exe.previous`，替换成新 exe 并重新启动。
 - 只对打包后的 exe 生效；源码模式会提示手动下载。
 - 如果安装目录不可写（例如 Program Files），下载会失败并提示；请把 exe 放到可写目录后再更新。

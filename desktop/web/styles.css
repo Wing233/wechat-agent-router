@@ -330,6 +330,9 @@ tbody tr:hover { background: #fbfcfd; }
 .kv dd { margin: 0; word-break: break-all; }
 .copy-row { display: flex; align-items: center; gap: 8px; }
 .copy-row code { flex: 1; min-width: 0; background: var(--panel-soft); border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px; font-family: var(--mono); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.copy-row-wrap { align-items: flex-start; }
+.copy-row-wrap code { white-space: pre-wrap; overflow: visible; text-overflow: clip; word-break: break-all; }
+.copy-row-wrap .btn { flex: 0 0 auto; }
 .token-help { background: var(--panel-soft); border: 1px solid var(--line); border-radius: 10px; padding: 11px 12px; }
 .token-help code { display: block; font-family: var(--mono); font-size: 11px; color: var(--ink-2); margin-top: 6px; word-break: break-all; }
 .server-connect { max-width: 620px; margin: 8px auto 0; }
@@ -405,6 +408,10 @@ tbody tr:hover { background: #fbfcfd; }
   .grid-hero { grid-template-columns: 1fr; }
   .grid-3 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .stat-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 620px) {
+  .copy-row-wrap { flex-direction: column; align-items: stretch; }
+  .copy-row-wrap .btn { align-self: flex-start; }
 }
 @media (max-width: 900px) {
   .sidebar { width: 76px; flex-basis: 76px; padding: 20px 10px 12px; }
