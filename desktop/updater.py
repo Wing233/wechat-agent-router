@@ -152,7 +152,11 @@ def _updater_script(exe: Path) -> Path:
         "goto done\r\n"
         ":replace\r\n"
         'move /Y "%NEW%" "%EXE%" >nul 2>nul\r\n'
-        'start "" "%EXE%"\r\n'
+        "timeout /t 2 /nobreak >nul\r\n"
+        'set "_MEIPASS2="\r\n'
+        'set "_MEIPASS="\r\n'
+        'set "PYINSTALLER_RESET_ENVIRONMENT=1"\r\n'
+        'start "" /D "%DIR%" "%EXE%"\r\n'
         ":done\r\n"
         'del "%~f0"\r\n'
     )
