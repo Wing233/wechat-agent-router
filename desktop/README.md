@@ -71,6 +71,12 @@ python desktop\main.py --headless
 3. 打开「服务器」，填写服务令牌并连接：
 
 ```powershell
+ssh root@123.57.153.49 --% "python3 -c 'import json;print(json.load(open(\"/opt/wechat-agent-router/config.json\"))[\"service_token\"])'"
+```
+
+bash / WSL 使用：
+
+```bash
 ssh root@123.57.153.49 "python3 -c \"import json;print(json.load(open('/opt/wechat-agent-router/config.json'))['service_token'])\""
 ```
 

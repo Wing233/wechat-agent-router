@@ -611,7 +611,7 @@ function renderWorkspaces() {
 /* ------------------------------------------------------------------ server: connect */
 function renderServerConnect() {
   const url = state.config?.router || state.bootstrap?.server?.url || "";
-  const tokenCmd = `ssh root@123.57.153.49 "python3 -c \\"import json;print(json.load(open('/opt/wechat-agent-router/config.json'))['service_token'])\\""`;
+  const tokenCmd = `ssh root@123.57.153.49 --% "python3 -c 'import json;print(json.load(open(\\"/opt/wechat-agent-router/config.json\\"))[\\"service_token\\"])'"`;
   return `<div class="server-connect"><section class="card"><div class="card-body">
     <div class="connect-illustration">${icon("server")}</div>
     <h2 class="connect-title">连接你的 Router</h2>
@@ -624,7 +624,7 @@ function renderServerConnect() {
       <div class="form-actions"><button class="btn btn-primary" type="submit">${icon("wifi")}连接并读取配置</button></div>
     </form>
     <div class="token-help" style="margin-top:14px">
-      在服务器上读取令牌：
+      在 PowerShell 中读取令牌：
       <div class="copy-row copy-row-wrap" style="margin-top:6px">
         <code>${esc(tokenCmd)}</code>
         <button class="btn btn-sm" type="button" data-action="copy" data-copy="${esc(tokenCmd)}">${icon("copy")}复制命令</button>
