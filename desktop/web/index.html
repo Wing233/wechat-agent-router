@@ -84,7 +84,14 @@
           <h1 id="page-title">概览</h1>
           <p id="page-subtitle">本机 Agent 与服务器状态一眼看清。</p>
         </div>
-        <div class="top-actions" id="top-actions"></div>
+        <div class="topbar-right">
+          <button class="command-trigger" id="command-trigger" type="button" aria-label="打开命令面板 (Ctrl+K)" title="命令面板 (Ctrl+K)">
+            <svg class="icon"><use href="#i-search"/></svg>
+            <span>搜索</span>
+            <kbd>Ctrl K</kbd>
+          </button>
+          <div class="top-actions" id="top-actions"></div>
+        </div>
       </header>
       <section class="page" id="page"></section>
     </main>
@@ -102,6 +109,24 @@
   </div>
 
   <div class="toast-stack" id="toast-root"></div>
+
+  <div class="command-backdrop" id="command-backdrop" hidden>
+    <div class="command-card" role="dialog" aria-modal="true" aria-labelledby="command-title">
+      <h2 id="command-title" class="sr-only">命令面板</h2>
+      <div class="command-search">
+        <svg class="icon"><use href="#i-search"/></svg>
+        <input id="command-input" class="command-input" type="text" placeholder="搜索页面或操作…" autocomplete="off" aria-label="搜索页面或操作">
+        <kbd>ESC</kbd>
+      </div>
+      <div class="command-list" id="command-list" role="listbox" aria-label="命令列表"></div>
+      <div class="command-foot">
+        <span><kbd>↑</kbd><kbd>↓</kbd> 选择</span>
+        <span><kbd>↵</kbd> 打开</span>
+        <span><kbd>esc</kbd> 关闭</span>
+        <span class="command-brand">微桥 · Agent Console</span>
+      </div>
+    </div>
+  </div>
 
   <div class="boot" id="boot">
     <div class="boot-card">

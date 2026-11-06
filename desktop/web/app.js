@@ -177,12 +177,13 @@ function toast(message, kind = "ok") {
   const node = document.createElement("div");
   node.className = `toast ${kind}`;
   const iconName = kind === "error" ? "alert" : kind === "warn" ? "alert" : "check";
-  node.innerHTML = `${icon(iconName)}<div>${esc(message)}</div>`;
+  const duration = kind === "error" ? 5200 : 3200;
+  node.innerHTML = `${icon(iconName)}<div class="toast-copy">${esc(message)}</div><span class="toast-progress" style="animation-duration:${duration}ms"></span>`;
   $("toast-root").appendChild(node);
   setTimeout(() => {
     node.classList.add("out");
     setTimeout(() => node.remove(), 200);
-  }, kind === "error" ? 5200 : 3200);
+  }, duration);
 }
 
 function hideModal() {
@@ -2051,6 +2052,144 @@ document.addEventListener("click", (event) => {
 
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && !$("modal").hidden) closeModal();
+});
+
+/* ------------------------------------------------------------------ command palette */
+const PAGE_ICONS = {
+  overview: "grid",
+  local: "cpu",
+  worklog: "monitor",
+  techstack: "terminal",
+  engines: "terminal",
+  workspaces: "folder",
+  server: "server",
+  channels: "wifi",
+  logs: "list",
+  settings: "settings",
+};
+
+const commandState = { open: false, items: [], active: 0 };
+
+function commandItems() {
+  const pages = Object.entries(PAGES).map(([id, meta]) => ({
+    id: `page:${id}`,
+    group: "页面",
+    label: meta.title,
+    hint: meta.subtitle,
+    icon: PAGE_ICONS[id] || "grid",
+    run: () => navigate(id),
+  }));
+  return [
+    ...pages,
+    {
+      id: "action:refresh",
+      group: "操作",
+      label: "刷新当前页",
+      hint: "重新渲染当前页面",
+      icon: "refresh",
+      run: () => {
+        renderPage();
+        toast("已刷新当前页");
+      },
+    },
+    {
+      id: "action:reload",
+      group: "操作",
+      label: "重新加载界面",
+      hint: "完整刷新桌面控制台",
+      icon: "power",
+      run: () => location.reload(),
+    },
+  ];
+}
+
+function renderCommandList(query = "") {
+  const list = $("command-list");
+  const keyword = query.trim().toLowerCase();
+  const items = commandItems().filter((item) =>
+    !keyword || `${item.label} ${item.hint}`.toLowerCase().includes(keyword),
+  );
+  commandState.items = items;
+  if (!items.length) {
+    list.innerHTML = '<div class="command-empty">没有找到匹配的页面或操作。</div>';
+    return;
+  }
+  commandState.active = Math.max(0, Math.min(commandState.active, items.length - 1));
+  let html = "";
+  let group = "";
+  items.forEach((item, index) => {
+    if (item.group !== group) {
+      group = item.group;
+      html += `<div class="command-group-label">${esc(group)}</div>`;
+    }
+    html += `<button class="command-item${index === commandState.active ? " is-active" : ""}" type="button" role="option" aria-selected="${index === commandState.active}" data-command-index="${index}">${icon(item.icon)}<span class="command-item-copy"><strong>${esc(item.label)}</strong><small>${esc(item.hint)}</small></span><span class="command-item-arrow">↵</span></button>`;
+  });
+  list.innerHTML = html;
+}
+
+function openCommand() {
+  commandState.open = true;
+  commandState.active = 0;
+  $("command-backdrop").hidden = false;
+  $("command-input").value = "";
+  renderCommandList("");
+  setTimeout(() => $("command-input").focus(), 0);
+}
+
+function closeCommand() {
+  commandState.open = false;
+  $("command-backdrop").hidden = true;
+  $("command-input").value = "";
+}
+
+function runCommand(index) {
+  const item = commandState.items[index];
+  if (!item) return;
+  closeCommand();
+  setTimeout(() => item.run(), 0);
+}
+
+function moveCommand(delta) {
+  const count = commandState.items.length;
+  if (!count) return;
+  commandState.active = (commandState.active + delta + count) % count;
+  renderCommandList($("command-input").value);
+  const active = $("command-list").querySelector(".command-item.is-active");
+  if (active) active.scrollIntoView({ block: "nearest" });
+}
+
+$("command-trigger").addEventListener("click", openCommand);
+$("command-input").addEventListener("input", (event) => {
+  commandState.active = 0;
+  renderCommandList(event.target.value);
+});
+$("command-list").addEventListener("click", (event) => {
+  const target = event.target instanceof Element ? event.target.closest("[data-command-index]") : null;
+  if (target) runCommand(Number(target.dataset.commandIndex));
+});
+$("command-backdrop").addEventListener("click", (event) => {
+  if (event.target === $("command-backdrop")) closeCommand();
+});
+document.addEventListener("keydown", (event) => {
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+    event.preventDefault();
+    commandState.open ? closeCommand() : openCommand();
+    return;
+  }
+  if (!commandState.open) return;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeCommand();
+  } else if (event.key === "ArrowDown") {
+    event.preventDefault();
+    moveCommand(1);
+  } else if (event.key === "ArrowUp") {
+    event.preventDefault();
+    moveCommand(-1);
+  } else if (event.key === "Enter") {
+    event.preventDefault();
+    runCommand(commandState.active);
+  }
 });
 
 /* ------------------------------------------------------------------ init */
