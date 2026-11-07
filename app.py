@@ -2254,3 +2254,7 @@ sso_routes.register(app, CFG, SETTINGS, _koishi_page)
 
 # Narrow read-only tool bridge for the lyph site agent.
 agent_bridge.register(app)
+
+# OpenAI-compatible free-model gateway for lyph's chat backend.
+import openai_compat
+openai_compat.register(app, llm=llm, service_token=SERVICE_TOKEN)
