@@ -112,6 +112,29 @@ def register(app: FastAPI, *, llm, service_token: str) -> None:
             raise HTTPException(400, "tools must be an array")
         if tools and len(tools) > MAX_TOOLS:
             raise HTTPException(413, "too many tools")
+        if tools and any(
+            not isinstance(item, dict)
+            or not isinstance(item.get("function"), dict)
+            or not isinstance(item["function"].get("name"), str)
+            or not item["function"]["name"]
+            for item in tools
+        ):
+            raise HTTPException(400, "tools must contain named function definitions")
+        tool_choice = body.get("tool_choice", "auto")
+        if tool_choice == "none":
+            tools = None
+        elif tool_choice == "auto":
+            pass
+        elif tool_choice == "required":
+            if not tools:
+                raise HTTPException(400, "tool_choice required needs tools")
+        elif isinstance(tool_choice, dict) and isinstance(tool_choice.get("function"), dict):
+            wanted = tool_choice["function"].get("name")
+            tools = [item for item in (tools or []) if item["function"]["name"] == wanted]
+            if not tools:
+                raise HTTPException(400, "tool_choice names an unavailable tool")
+        else:
+            raise HTTPException(400, "unsupported tool_choice")
         max_tokens = body.get("max_tokens")
         if max_tokens is not None:
             try:
