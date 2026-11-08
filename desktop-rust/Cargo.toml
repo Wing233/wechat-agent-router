@@ -27,10 +27,10 @@ tiny_http = "0.12"
 uuid = { version = "1", features = ["v4"] }
 
 [build-dependencies]
-tauri-build = "=2.7.1"
+tauri-build = { version = "=2.7.1", features = [] }
 
 [target.'cfg(windows)'.dependencies]
-tauri = "=2.12.1"
+tauri = { version = "=2.12.1", features = [] }
 windows-dpapi = "0.2"
 
 [target.'cfg(not(windows))'.dependencies]

@@ -10,17 +10,7 @@
     "beforeBuildCommand": ""
   },
   "app": {
-    "windows": [
-      {
-        "label": "main",
-        "title": "微信 Agent 控制台",
-        "width": 1320,
-        "height": 900,
-        "minWidth": 1080,
-        "minHeight": 700,
-        "resizable": true
-      }
-    ],
+    "windows": [],
     "security": {
       "csp": null
     }
