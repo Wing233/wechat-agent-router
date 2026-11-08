@@ -271,7 +271,16 @@ impl DesktopApp {
         if base.is_empty() {
             anyhow::bail!("请填写服务器地址");
         }
-        let overview = self.router_json("GET", "/internal/settings/overview", None, Some(token))?;
+        let overview: Value = {
+            let request = self.service_client.get(format!("{base}/internal/settings/overview")).header("X-Service-Token", token);
+            let response = request.send().context("无法连接服务器")?;
+            let status = response.status();
+            let text = response.text().unwrap_or_default();
+            if !status.is_success() {
+                anyhow::bail!("HTTP {}: {}", status.as_u16(), text.chars().take(800).collect::<String>());
+            }
+            serde_json::from_str(&text).context("服务器返回非 JSON")?
+        };
         let mut cfg = self.config();
         if base != cfg.router {
             cfg.router = base.clone();
