@@ -31,9 +31,25 @@ impl TechStackService {
                 "output_dir": self.root.join("reports").to_string_lossy(),
                 "workbuddy_exports": self.root.join("workbuddy-exports").to_string_lossy()
             }));
+        let enabled = config.get("enabled").and_then(|value| value.as_bool()).unwrap_or(true);
+        let weekly_day = config.get("weekly_day").and_then(|value| value.as_u64()).unwrap_or(6);
+        let weekly_time = config.get("weekly_time").and_then(|value| value.as_str()).unwrap_or("10:00").to_string();
+        let project_roots = config.get("project_roots").cloned().unwrap_or(json!([]));
+        let technology_count = report.get("technologies").and_then(|value| value.as_array()).map(|items| items.len()).unwrap_or(0);
+        let summary = report.get("summary").cloned().unwrap_or(json!({}));
+        let public_baseline_status = summary.get("public_baseline_status").cloned().unwrap_or(json!(""));
         json!({
             "running": false,
+            "enabled": enabled,
+            "weekly_day": weekly_day,
+            "weekly_time": weekly_time,
+            "project_roots": project_roots,
+            "technology_count": technology_count,
+            "public_baseline_status": public_baseline_status,
+            "next_run_at": null,
+            "last_completed_at": report.get("generated_at").cloned().unwrap_or(Value::Null),
             "last_error": "",
+            "summary": summary,
             "config": config,
             "report": report,
             "paths": {
