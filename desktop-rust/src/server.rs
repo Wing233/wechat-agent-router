@@ -1,13 +1,11 @@
 use crate::app::DesktopApp;
 use crate::collector::CollectorService;
-use crate::logs::EventLog;
 use crate::paths;
 use crate::tech_stack::TechStackService;
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs;
-use std::io::Read;
 use std::net::TcpListener;
 use std::sync::Arc;
 use tiny_http::{Header, Method, Response, Server, StatusCode};
@@ -23,10 +21,10 @@ pub fn start(app: Arc<DesktopApp>, collector: Arc<CollectorService>, tech_stack:
     let port = listener.local_addr()?.port();
     let url = format!("http://127.0.0.1:{port}/");
     let ui_url = format!("{url}#t={}", app.token);
-    let server = Server::from_listener(listener, None).context("创建本地 HTTP 服务失败")?;
+    let server = Server::from_listener(listener, None).map_err(|error| anyhow::anyhow!("创建本地 HTTP 服务失败：{error}"))?;
     let static_files = load_static(&app);
     std::thread::spawn(move || {
-        for mut request in server.incoming_requests() {
+        for request in server.incoming_requests() {
             let _ = handle(request, &app, &collector, &tech_stack, &static_files);
         }
     });
@@ -53,7 +51,7 @@ fn load_static(app: &DesktopApp) -> HashMap<String, (Vec<u8>, &'static str)> {
     map
 }
 
-fn handle(request: tiny_http::Request, app: &DesktopApp, collector: &CollectorService, tech_stack: &TechStackService, static_files: &HashMap<String, (Vec<u8>, &'static str)>) -> Result<()> {
+fn handle(mut request: tiny_http::Request, app: &DesktopApp, collector: &CollectorService, tech_stack: &TechStackService, static_files: &HashMap<String, (Vec<u8>, &'static str)>) -> Result<()> {
     let host = request.headers().iter().find(|h| h.field.as_str().to_ascii_lowercase() == "host")
         .map(|h| h.value.as_str().to_string())
         .unwrap_or_default();
@@ -126,6 +124,7 @@ fn url_decode(text: &str) -> String {
 }
 
 fn read_body(request: &mut tiny_http::Request) -> Result<Value> {
+    use std::io::Read;
     let mut text = String::new();
     request.as_reader().read_to_string(&mut text)?;
     if text.trim().is_empty() {
@@ -162,7 +161,7 @@ fn route(method: Method, path: &str, query: &HashMap<String, String>, body: &Val
             (Method::Get, "/api/config") => app.config_for_ui(),
             (Method::Put, "/api/config") => app.update_config(body)?,
             (Method::Post, "/api/agent/start") => app.start_agent()?,
-            (Method::Post, "/api/agent/stop") => Ok(app.stop_agent()),
+            (Method::Post, "/api/agent/stop") => app.stop_agent(),
             (Method::Post, "/api/agent/restart") => { app.stop_agent(); app.start_agent()? }
             (Method::Post, "/api/agent/cancel") => json!({"cancelled": false}),
             (Method::Post, "/api/agent/test-engine") => app.test_engine(body.get("engine").and_then(|v| v.as_str()).unwrap_or(""), body.get("workspace").and_then(|v| v.as_str()).unwrap_or(""))?,
@@ -179,7 +178,7 @@ fn route(method: Method, path: &str, query: &HashMap<String, String>, body: &Val
             (Method::Post, "/api/update/apply") => crate::updater::apply(),
             (Method::Get, "/api/worklog") => collector.status(),
             (Method::Post, "/api/worklog/start") => collector.start()?,
-            (Method::Post, "/api/worklog/stop") => Ok(collector.stop()),
+            (Method::Post, "/api/worklog/stop") => collector.stop(),
             (Method::Post, "/api/worklog/pause") => collector.pause(body.get("paused").and_then(|v| v.as_bool()).unwrap_or(true))?,
             (Method::Post, "/api/worklog/action") => collector.action(body.get("command").and_then(|v| v.as_str()).unwrap_or(""))?,
             (Method::Post, "/api/worklog/note") => collector.note(body.get("text").and_then(|v| v.as_str()).unwrap_or(""))?,

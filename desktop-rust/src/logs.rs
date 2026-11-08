@@ -1,3 +1,4 @@
+use chrono::TimeZone;
 use serde_json::{json, Value};
 use std::collections::VecDeque;
 use std::fs::OpenOptions;
@@ -29,7 +30,7 @@ impl EventLog {
         *seq += 1;
         let record = json!({
             "id": *seq,
-            "ts": chrono::DateTime::<chrono::Local>::from(now.into()).format("%Y-%m-%dT%H:%M:%S").to_string(),
+            "ts": chrono::Local.timestamp_opt(now as i64, 0).single().map(|t| t.format("%Y-%m-%dT%H:%M:%S").to_string()).unwrap_or_default(),
             "level": level.to_uppercase(),
             "source": self.source,
             "message": message.chars().take(6000).collect::<String>()

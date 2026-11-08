@@ -23,8 +23,20 @@ fn main() -> anyhow::Result<()> {
     let tech_stack = Arc::new(TechStackService::new(paths::tech_stack_dir()));
     let api = server::start(app.clone(), collector.clone(), tech_stack.clone())?;
     log.add("INFO", &format!("桌面控制台已启动：{}", api.url));
+    let state_path = paths::state_file();
+    if let Some(parent) = state_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let instance = serde_json::json!({
+        "port": api.port,
+        "token": app.token,
+        "url": api.ui_url,
+        "pid": std::process::id(),
+        "headless": args.headless
+    });
+    let _ = std::fs::write(&state_path, serde_json::to_string_pretty(&instance).unwrap_or_default());
     if args.headless {
-        println!("微信 Agent 控制台后台运行中：{}", api.url);
+        println!("微信 Agent 控制台后台运行中：{}", api.ui_url);
         loop {
             std::thread::park();
         }

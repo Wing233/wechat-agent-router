@@ -6,7 +6,6 @@ use crate::logs::EventLog;
 use crate::paths;
 use crate::secrets::SecretStore;
 use crate::tech_stack::TechStackService;
-use crate::updater;
 use anyhow::{Context, Result};
 use rand::RngCore;
 use reqwest::blocking::Client;

@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use reqwest::blocking::Client;
 use serde_json::json;
 use std::sync::Mutex;
@@ -11,15 +11,6 @@ static STATE: Mutex<serde_json::Value> = Mutex::new(serde_json::Value::Null);
 
 fn set_state(value: serde_json::Value) {
     *STATE.lock().unwrap() = value;
-}
-
-fn current_state() -> serde_json::Value {
-    let guard = STATE.lock().unwrap();
-    if guard.is_null() {
-        status()
-    } else {
-        guard.clone()
-    }
 }
 
 pub fn status() -> serde_json::Value {

@@ -1,5 +1,4 @@
 use crate::logs::EventLog;
-use crate::paths;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use lyph_collector_core::{api::HttpApi, Config, Engine, Store};
@@ -17,11 +16,6 @@ pub struct CollectorService {
     log: Arc<EventLog>,
     running: Arc<AtomicBool>,
     handle: Mutex<Option<thread::JoinHandle<()>>>,
-}
-
-enum Work {
-    Capture,
-    Sync,
 }
 
 impl CollectorService {
@@ -106,20 +100,8 @@ impl CollectorService {
         let mut engine = Engine::new(store.clone(), config.clone(), HttpApi::new(config)?).context("初始化采集引擎失败")?;
         let running = self.running.clone();
         running.store(true, Ordering::Relaxed);
-        let (tx, rx) = std::sync::mpsc::channel::<Work>();
         let handle = thread::spawn(move || {
             while running.load(Ordering::Relaxed) {
-                while let Ok(work) = rx.try_recv() {
-                    match work {
-                        Work::Capture => {
-                            let _ = engine.capture_now();
-                        }
-                        Work::Sync => {
-                            let _ = store.make_due();
-                            let _ = engine.refresh_config();
-                        }
-                    }
-                }
                 if let Err(error) = engine.tick() {
                     let _ = store.set_state("last_error", &error.to_string());
                 }

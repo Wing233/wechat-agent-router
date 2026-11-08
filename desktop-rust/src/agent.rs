@@ -3,7 +3,6 @@ use crate::logs::EventLog;
 use anyhow::{Context, Result};
 use reqwest::blocking::Client;
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::{
@@ -37,7 +36,7 @@ pub struct LocalAgent {
     config: AgentConfig,
     log: Arc<EventLog>,
     client: Client,
-    state: Mutex<AgentState>,
+    state: Arc<Mutex<AgentState>>,
     running: Arc<AtomicBool>,
     handle: Mutex<Option<thread::JoinHandle<()>>>,
 }
@@ -52,7 +51,7 @@ impl LocalAgent {
             config: config.clone(),
             log,
             client,
-            state: Mutex::new(AgentState {
+            state: Arc::new(Mutex::new(AgentState {
                 status: "stopped".into(),
                 agent_id: config.agent_id.clone(),
                 router: config.router.clone(),
@@ -63,7 +62,7 @@ impl LocalAgent {
                 wait_seconds: config.wait_seconds,
                 poll_seconds: config.poll_seconds,
                 ..Default::default()
-            }),
+            })),
             running: Arc::new(AtomicBool::new(false)),
             handle: Mutex::new(None),
         })
@@ -129,7 +128,6 @@ impl LocalAgent {
         let running = self.running.clone();
         let state = self.state.clone();
         let handle = thread::spawn(move || {
-            let mut last_error = String::new();
             while running.load(Ordering::Relaxed) {
                 let result: Result<()> = (|| {
                     let url = format!("{}/agent/register", config.router);
@@ -212,14 +210,14 @@ impl LocalAgent {
                     Ok(())
                 })();
                 if let Err(error) = result {
-                    last_error = error.to_string();
+                    let message = error.to_string();
                     let mut guard = state.lock().unwrap();
                     if guard.status != "busy" {
                         guard.status = "error".into();
                     }
-                    guard.last_error = last_error.clone();
+                    guard.last_error = message.clone();
                     drop(guard);
-                    log.add("ERROR", &last_error);
+                    log.add("ERROR", &message);
                     std::thread::sleep(Duration::from_secs(5));
                     continue;
                 }
@@ -252,57 +250,7 @@ impl LocalAgent {
         self.log.add("INFO", "本地 Agent 已停止");
     }
 
-    fn request(&self, method: &str, path: &str, body: Option<Value>) -> Result<Value> {
-        let url = format!("{}{}", self.config.router, path);
-        let mut builder = match method {
-            "GET" => self.client.get(&url),
-            "POST" => self.client.post(&url),
-            other => anyhow::bail!("不支持的方法：{other}"),
-        };
-        builder = builder
-            .header("X-Agent-Key", &self.config.agent_key)
-            .header("Content-Type", "application/json")
-            .header("User-Agent", "wechat-local-agent/rust");
-        if let Some(payload) = body {
-            builder = builder.json(&payload);
-        }
-        let response = builder.send().context("无法连接 Router")?;
-        let status = response.status();
-        let text = response.text().unwrap_or_default();
-        if !status.is_success() {
-            anyhow::bail!("HTTP {}: {}", status.as_u16(), text.chars().take(300).collect::<String>());
-        }
-        if text.is_empty() {
-            return Ok(Value::Null);
-        }
-        serde_json::from_str(&text).context("Router 返回非 JSON")
-    }
 
-    fn register(&self) -> Result<()> {
-        self.request(
-            "POST",
-            "/agent/register",
-            Some(json!({
-                "version": "0.1.0",
-                "name": self.config.name,
-                "description": self.config.description,
-                "platform": std::env::consts::OS,
-                "engines": self.config.engines.keys().collect::<Vec<_>>(),
-                "workspaces": self.config.workspaces.keys().collect::<Vec<_>>(),
-                "default_engine": self.config.default_engine,
-                "default_workspace": self.config.default_workspace
-            })),
-        )?;
-        let mut guard = self.state.lock().unwrap();
-        guard.last_seen = Some(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-        );
-        guard.last_error.clear();
-        Ok(())
-    }
 
     fn resolve(&self, task: &Value) -> Result<(String, String)> {
         let engine = task.get("engine").and_then(|v| v.as_str()).unwrap_or(&self.config.default_engine).to_string();
