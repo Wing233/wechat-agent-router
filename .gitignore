@@ -22,6 +22,12 @@ desktop/build/
 desktop/dist/
 desktop/*.spec
 
+# Rust desktop build artifacts
+desktop-rust/target/
+desktop-rust/gen/
+desktop-rust/*.log
+desktop-rust/*.err.log
+
 koishi/node_modules/
 koishi/data/
 koishi/.env
@@ -33,3 +39,8 @@ app.py.broken*
 config.json.bak*
 *.orig
 *.rej
+
+# Code hygiene patrol local diagnostics
+code-hygiene-report.md
+code-hygiene-result.json
+code-hygiene-artifacts/
