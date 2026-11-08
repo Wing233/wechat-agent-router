@@ -264,8 +264,10 @@ button { cursor: pointer; }
 .switch.on::after { transform: translateX(16px); }
 .switch-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 11px 0; border-bottom: 1px solid var(--line); }
 .switch-row:last-child { border-bottom: 0; }
+.switch-copy { flex: 1 1 auto; min-width: 0; }
+.switch-row > .btn, .switch-row > .switch { flex: 0 0 auto; }
 .switch-copy strong { display: block; font-size: 12.5px; }
-.switch-copy small { display: block; color: var(--muted); font-size: 11.5px; margin-top: 2px; }
+.switch-copy small { display: block; color: var(--muted); font-size: 11.5px; margin-top: 2px; overflow-wrap: anywhere; word-break: break-all; }
 
 /* ------------------------------------------------------------------ badges / tables */
 .badge { display: inline-flex; align-items: center; gap: 5px; border-radius: 999px; padding: 2px 8px; font-size: 10.5px; font-weight: 600; background: #eef1f3; color: #5b6771; white-space: nowrap; }
