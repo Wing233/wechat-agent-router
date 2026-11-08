@@ -137,7 +137,7 @@ impl LocalAgent {
                         .header("Content-Type", "application/json")
                         .header("User-Agent", "wechat-local-agent/rust")
                         .json(&json!({
-                            "version": "0.1.0",
+                            "version": "0.2.2",
                             "name": config.name,
                             "description": config.description,
                             "platform": std::env::consts::OS,
