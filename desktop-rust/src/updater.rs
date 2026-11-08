@@ -129,5 +129,176 @@ pub fn check() -> serde_json::Value {
 }
 
 pub fn apply() -> serde_json::Value {
-    json!({"started": false, "error": "Rust 版 updater 下载后替换逻辑尚未实现；请使用 GitHub Releases 页面手动更新"})
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(error) => return json!({"started": false, "error": error.to_string()}),
+    };
+    if !exe.file_name().map(|name| name.to_string_lossy().eq_ignore_ascii_case("WeChatAgentDesktop.exe")).unwrap_or(false) {
+        return json!({"started": false, "error": "源码模式不支持自动更新，请下载最新 exe"});
+    }
+    {
+        let state = STATE.lock().unwrap();
+        if state.get("state").and_then(|value| value.as_str()) == Some("downloading")
+            || state.get("state").and_then(|value| value.as_str()) == Some("applying")
+        {
+            return json!({"started": false, "error": "更新正在进行"});
+        }
+        let exe_url = state.get("exe_url").and_then(|value| value.as_str()).unwrap_or("").to_string();
+        let sha_url = state.get("sha_url").and_then(|value| value.as_str()).unwrap_or("").to_string();
+        if exe_url.is_empty() {
+            return json!({"started": false, "error": "请先检查更新"});
+        }
+        set_state(json!({
+            "state": "downloading",
+            "progress": 0.0,
+            "error": "",
+            "current": crate::paths::VERSION,
+            "latest": state.get("latest"),
+            "tag": state.get("tag"),
+            "available": state.get("available"),
+            "relation": state.get("relation"),
+            "exe_url": exe_url,
+            "sha_url": sha_url,
+            "size": state.get("size").cloned().unwrap_or(json!(0)),
+            "checked_at": state.get("checked_at").cloned().unwrap_or(json!(0))
+        }));
+    }
+    std::thread::spawn(move || {
+        if let Err(error) = download_and_install(&exe, &exe_url_value(), &sha_url_value()) {
+            set_state_with_error(&error.to_string());
+        }
+    });
+    json!({"started": true})
+}
+
+fn exe_url_value() -> String {
+    STATE.lock().unwrap().get("exe_url").and_then(|value| value.as_str()).unwrap_or("").to_string()
+}
+
+fn sha_url_value() -> String {
+    STATE.lock().unwrap().get("sha_url").and_then(|value| value.as_str()).unwrap_or("").to_string()
+}
+
+fn set_state_with_error(error: &str) {
+    let mut state = STATE.lock().unwrap().clone();
+    if let Some(obj) = state.as_object_mut() {
+        obj.insert("state".into(), json!("error"));
+        obj.insert("error".into(), json!(error));
+    }
+    set_state(state);
+}
+
+fn download_and_install(exe: &std::path::Path, exe_url: &str, sha_url: &str) -> Result<()> {
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()?;
+    let exe_url = if exe_url.is_empty() { crate::paths::VERSION.to_string() } else { exe_url.to_string() };
+    let _ = exe_url;
+    let target = exe.with_extension("exe.new");
+    let expected = if sha_url.is_empty() {
+        String::new()
+    } else {
+        let response = client
+            .get(sha_url)
+            .header("User-Agent", format!("wechat-agent-desktop/{}", crate::paths::VERSION))
+            .send()?;
+        let text = response.text()?;
+        text.split_whitespace().next().unwrap_or("").to_lowercase()
+    };
+    let mut response = client
+        .get(exe_url_value())
+        .header("User-Agent", format!("wechat-agent-desktop/{}", crate::paths::VERSION))
+        .send()?;
+    let total = response.content_length().unwrap_or(0);
+    {
+        let mut state = STATE.lock().unwrap();
+        if let Some(obj) = state.as_object_mut() {
+            obj.insert("size".into(), json!(total));
+        }
+    }
+    use std::io::Read;
+    let mut downloaded: u64 = 0;
+    let mut file = std::fs::File::create(&target)?;
+    let mut buffer = [0u8; 262144];
+    loop {
+        let read = response.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        use std::io::Write;
+        file.write_all(&buffer[..read])?;
+        downloaded += read as u64;
+        if total > 0 {
+            let mut state = STATE.lock().unwrap();
+            if let Some(obj) = state.as_object_mut() {
+                let progress = ((downloaded as f64 / total as f64) * 100.0).min(99.0) / 100.0;
+                obj.insert("progress".into(), json!(progress));
+            }
+        }
+    }
+    drop(file);
+    if target.metadata()?.len() < 1_000_000 {
+        anyhow::bail!("下载文件过小，可能不是有效的安装包");
+    }
+    let bytes = std::fs::read(&target)?;
+    if !bytes.starts_with(b"MZ") {
+        anyhow::bail!("下载文件不是有效的 Windows 程序");
+    }
+    if !expected.is_empty() {
+        let digest = sha256_hex(&bytes);
+        if digest != expected {
+            anyhow::bail!("下载文件校验失败，请重试");
+        }
+    }
+    let script = updater_script(exe);
+    {
+        let mut state = STATE.lock().unwrap();
+        if let Some(obj) = state.as_object_mut() {
+            obj.insert("state".into(), json!("applying"));
+            obj.insert("progress".into(), json!(1.0));
+        }
+    }
+    std::process::Command::new("cmd")
+        .args(["/c", script.to_str().unwrap_or("")])
+        .current_dir(exe.parent().unwrap_or(std::path::Path::new(".")))
+        .spawn()?;
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    std::process::exit(0);
+}
+
+fn sha256_hex(data: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let hash = Sha256::digest(data);
+    hash.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn updater_script(exe: &std::path::Path) -> std::path::PathBuf {
+    let script = exe.with_file_name(".update-WeChatAgentDesktop.cmd");
+    let content = r#"@echo off
+setlocal
+set "DIR=%~dp0"
+set "EXE=%DIR%WeChatAgentDesktop.exe"
+set "NEW=%DIR%WeChatAgentDesktop.exe.new"
+set "BAK=%DIR%.WeChatAgentDesktop.exe.previous"
+:wait
+tasklist /FI "IMAGENAME eq WeChatAgentDesktop.exe" 2>nul | find /I "WeChatAgentDesktop.exe" >nul
+if not errorlevel 1 (
+  timeout /t 1 /nobreak >nul
+  goto wait
+)
+for /L %%i in (1,1,20) do (
+  move /Y "%EXE%" "%BAK%" >nul 2>nul
+  if not exist "%EXE%" goto replace
+  timeout /t 1 /nobreak >nul
+)
+goto done
+:replace
+move /Y "%NEW%" "%EXE%" >nul 2>nul
+timeout /t 2 /nobreak >nul
+start "" /D "%DIR%" "%EXE%"
+:done
+del "%~f0"
+"#;
+    let _ = std::fs::write(&script, content);
+    script
 }
