@@ -1008,7 +1008,7 @@ const PAGES = {
     render: renderOverview,
     actions: () => `${state.agent?.running
       ? `<button class="btn btn-sm btn-secondary" data-action="agent-stop">${icon("stop")}停止</button>`
-      : `<button class="btn btn-sm btn-primary" data-action="agent-start">${icon("play")}启动</button>`}<button class="btn btn-sm" data-action="refresh">${icon("refresh")}刷新</button>`,
+      : `<button class="btn btn-sm btn-primary" data-action="agent-start">${icon("play")}启动</button>`}<button class="btn btn-sm" data-action="toggle-autostart" data-enabled="${Boolean(state.bootstrap?.autostart)}">${icon("power")}开机自启：${state.bootstrap?.autostart ? "开" : "关"}</button><button class="btn btn-sm" data-action="refresh">${icon("refresh")}刷新</button>`,
     after: () => {
       updateRecentLogs();
       if (state.bootstrap?.server?.connected && !state.server && !state.serverTried) loadServer(true);
