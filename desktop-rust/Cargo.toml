@@ -1,0 +1,33 @@
+[package]
+name = "wechat-agent-desktop-rust"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Rust/Tauri unified desktop console: local agent + LYPH collector"
+
+[lib]
+name = "wechat_agent_desktop"
+path = "src/lib.rs"
+
+[[bin]]
+name = "WeChatAgentDesktop"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+base64 = "0.22"
+clap = { version = "4", features = ["derive"] }
+chrono = { version = "0.4", features = ["serde"] }
+lyph-collector-core = { path = "../../lyph/collectors/core", features = ["screen-capture"] }
+rand = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tiny_http = "0.12"
+uuid = { version = "1", features = ["v4"] }
+
+[target.'cfg(windows)'.dependencies]
+tauri = "=2.12.1"
+
+[target.'cfg(not(windows))'.dependencies]
+tauri = { version = "=2.12.1", default-features = false, features = ["tray-icon"] }
