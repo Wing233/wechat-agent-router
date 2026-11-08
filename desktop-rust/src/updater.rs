@@ -14,6 +14,10 @@ fn set_state(value: serde_json::Value) {
 }
 
 pub fn status() -> serde_json::Value {
+    let state = STATE.lock().unwrap().clone();
+    if !state.is_null() {
+        return state;
+    }
     json!({
         "state": "idle",
         "progress": 0.0,
