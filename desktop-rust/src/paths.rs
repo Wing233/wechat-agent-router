@@ -68,16 +68,36 @@ pub fn tech_stack_dir() -> PathBuf {
 }
 
 pub fn web_dir() -> PathBuf {
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|v| v.to_path_buf()));
-    if let Some(dir) = exe_dir {
-        let bundled = dir.join("web");
-        if bundled.is_dir() {
-            return bundled;
+    if let Some(path) = std::env::var_os("WECHAT_AGENT_WEB") {
+        let candidate = PathBuf::from(path);
+        if candidate.is_dir() {
+            return candidate;
         }
-        // Source layout: agent-router/desktop/web
-        let candidate = dir.join("../../desktop/web");
+    }
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|v| v.to_path_buf()))
+    {
+        let candidates = [
+            dir.join("web"),
+            dir.join("../desktop/web"),
+            dir.join("../../desktop/web"),
+            dir.join("../../../desktop/web"),
+            dir.join("../../../../desktop/web"),
+        ];
+        for candidate in candidates {
+            if candidate.is_dir() {
+                let canonical = std::fs::canonicalize(&candidate).unwrap_or(candidate);
+                return canonical;
+            }
+        }
+    }
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    for candidate in [
+        cwd.join("desktop/web"),
+        cwd.join("../desktop/web"),
+        cwd.join("../../desktop/web"),
+    ] {
         if candidate.is_dir() {
             return candidate;
         }
