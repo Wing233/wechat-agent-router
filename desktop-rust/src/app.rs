@@ -36,7 +36,7 @@ impl DesktopApp {
         let log = Arc::new(EventLog::new(800, Some(paths::log_file()), "desktop"));
         let mut token_bytes = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut token_bytes);
-        let token = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, token_bytes);
+        let token = base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, token_bytes);
         let settings = Settings::load(&paths::settings_file());
         let secrets = SecretStore::new(paths::secrets_file());
         let (config, config_error) = match load_config(&config_path) {

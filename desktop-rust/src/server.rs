@@ -20,7 +20,7 @@ pub fn start(app: Arc<DesktopApp>, collector: Arc<CollectorService>, tech_stack:
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let port = listener.local_addr()?.port();
     let url = format!("http://127.0.0.1:{port}/");
-    let ui_url = format!("{url}#t={}", app.token);
+    let ui_url = format!("{url}#t={}", percent_encode(&app.token));
     let server = Server::from_listener(listener, None).map_err(|error| anyhow::anyhow!("创建本地 HTTP 服务失败：{error}"))?;
     let static_files = load_static(&app);
     std::thread::spawn(move || {
