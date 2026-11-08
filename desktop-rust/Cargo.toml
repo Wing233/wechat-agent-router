@@ -33,6 +33,7 @@ tauri-build = { version = "=2.7.1", features = [] }
 
 [target.'cfg(windows)'.dependencies]
 tauri = { version = "=2.12.1", features = ["tray-icon"] }
+winapi = { version = "0.3", features = ["winerror", "errhandlingapi", "handleapi", "synchapi"] }
 windows-dpapi = "0.2"
 
 [target.'cfg(not(windows))'.dependencies]

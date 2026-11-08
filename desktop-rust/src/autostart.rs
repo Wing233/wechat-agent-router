@@ -24,10 +24,10 @@ pub fn set_enabled(enabled: bool) -> bool {
         let _ = std::fs::create_dir_all(parent);
     }
     let target = exe.to_string_lossy().replace('\'', "''");
-    let args = "--headless";
+    let args = "";
     let working = workdir.to_string_lossy().replace('\'', "''");
     let script = format!(
-        "$s=(New-Object -ComObject WScript.Shell).CreateShortcut('{path}');$s.TargetPath='{target}';$s.Arguments='{args}';$s.WorkingDirectory='{working}';$s.WindowStyle=7;$s.Description='微信 Agent 桌面控制台（后台服务）';$s.Save()",
+        "$s=(New-Object -ComObject WScript.Shell).CreateShortcut('{path}');$s.TargetPath='{target}';$s.Arguments='{args}';$s.WorkingDirectory='{working}';$s.WindowStyle=1;$s.Description='微信 Agent 桌面控制台（开机启动）';$s.Save()",
         path = path.to_string_lossy(),
         target = target,
         working = working

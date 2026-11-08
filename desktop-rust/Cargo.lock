@@ -5730,6 +5730,7 @@ dependencies = [
  "tauri-build",
  "tiny_http",
  "uuid",
+ "winapi",
  "windows-dpapi",
 ]
 

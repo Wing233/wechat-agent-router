@@ -15,8 +15,80 @@ struct Args {
     window: String,
 }
 
+#[cfg(windows)]
+struct SingleInstanceMutex {
+    handle: isize,
+}
+
+#[cfg(windows)]
+impl SingleInstanceMutex {
+    fn acquire() -> Option<Self> {
+        use std::os::windows::ffi::OsStrExt;
+        use winapi::{
+            shared::winerror::ERROR_ALREADY_EXISTS,
+            um::errhandlingapi::GetLastError,
+            um::handleapi::CloseHandle,
+            um::synchapi::CreateMutexW,
+        };
+        let name = std::ffi::OsString::from("Global\\WeChatAgentDesktopSingleInstance");
+        let wide = std::os::windows::ffi::OsStrExt::encode_wide(std::ffi::OsStr::new(&name)).collect::<Vec<u16>>();
+        unsafe {
+            let handle = CreateMutexW(std::ptr::null_mut(), 0, wide.as_ptr());
+            if handle.is_null() {
+                return None;
+            }
+            if GetLastError() == ERROR_ALREADY_EXISTS {
+                CloseHandle(handle);
+                return None;
+            }
+            Some(Self { handle: handle as isize })
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for SingleInstanceMutex {
+    fn drop(&mut self) {
+        unsafe {
+            winapi::um::handleapi::CloseHandle(self.handle as _);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+struct SingleInstanceMutex;
+
+#[cfg(not(windows))]
+impl SingleInstanceMutex {
+    fn acquire() -> Option<Self> {
+        Some(Self)
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    let _single_instance = match SingleInstanceMutex::acquire() {
+        Some(mutex) => mutex,
+        None => {
+            let state_path = paths::state_file();
+            let existing = instance::read_state(&state_path);
+            let url = instance::existing_url(&existing).unwrap_or_default();
+            if args.headless {
+                println!("桌面控制台已在后台运行");
+                return Ok(());
+            }
+            #[cfg(windows)]
+            {
+                run_tauri(url)?;
+            }
+            #[cfg(not(windows))]
+            {
+                println!("桌面控制台已在后台运行：{url}");
+                let _ = open::that(url);
+            }
+            return Ok(());
+        }
+    };
     let state_path = paths::state_file();
     let existing = instance::read_state(&state_path);
     if instance::is_alive(&existing) {
