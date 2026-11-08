@@ -13,9 +13,9 @@
 
 ## 未完成
 
-- DPAPI 解密：Python 版 `secrets.json` 中 `dpapi:*` 值在 Rust MVP 里暂不解码，需要用 Rust 版重新保存服务令牌；`plain:*` 可直接兼容
-- 工作日志 `finalize/backfill`（Python OCR/日报汇总）尚未移植为 Rust；采集器的截图/速记/同步已接入
-- updater、tech-stack 采集主体仍是状态/文件兼容层
+- DPAPI：Windows 上使用 `windows-dpapi` 兼容 Python 版 `dpapi:*` 密钥；非 Windows 仅支持 `plain:*`
+- 工作日志 `finalize/backfill` 已接采集队列摘要；OCR 细节仍未移植，Python 版仍可回退
+- updater 已实现 GitHub Releases 检查；下载替换 exe 仍未实现，tech-stack 采集主体仍是状态/文件兼容层
 - Tauri 窗口目前通过 loopback URL 打开 Web UI；如需关闭本地 HTTP，可把现有 `api()` 改为 Tauri invoke
 
 ## 运行

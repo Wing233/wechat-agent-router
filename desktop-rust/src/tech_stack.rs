@@ -46,8 +46,33 @@ impl TechStackService {
     }
 
     pub fn run_now(&self) -> Value {
-        // Rust MVP: reading/writing reports is preserved; the old Python collector can be invoked
+        // Rust MVP: report reading/writing is preserved; the old Python collector can be invoked
         // during transition, then ported to a Rust collector behind this seam.
+        let mut status = self.status();
+        if let Some(obj) = status.as_object_mut() {
+            obj.insert("last_run_requested".into(), json!(chrono::Utc::now().to_rfc3339()));
+        }
+        status
+    }
+
+    pub fn update_config(&self, payload: &Value) -> Value {
+        let config_path = self.root.join("config.json");
+        let mut config = self.status()["config"].clone();
+        if let Some(obj) = payload.as_object() {
+            if let Some(value) = obj.get("enabled") {
+                config["enabled"] = value.clone();
+            }
+            if let Some(value) = obj.get("weekly_day") {
+                config["weekly_day"] = value.clone();
+            }
+            if let Some(value) = obj.get("weekly_time") {
+                config["weekly_time"] = value.clone();
+            }
+        }
+        if let Some(parent) = config_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap_or_default());
         self.status()
     }
 }

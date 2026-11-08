@@ -183,16 +183,16 @@ fn route(method: Method, path: &str, query: &HashMap<String, String>, body: &Val
             (Method::Post, "/api/worklog/pause") => collector.pause(body.get("paused").and_then(|v| v.as_bool()).unwrap_or(true))?,
             (Method::Post, "/api/worklog/action") => collector.action(body.get("command").and_then(|v| v.as_str()).unwrap_or(""))?,
             (Method::Post, "/api/worklog/note") => collector.note(body.get("text").and_then(|v| v.as_str()).unwrap_or(""))?,
-            (Method::Post, "/api/worklog/finalize") => anyhow::bail!("Rust 版暂未实现日报汇总 finalize；请使用 Python 版或后端日报任务"),
-            (Method::Post, "/api/worklog/backfill") => anyhow::bail!("Rust 版暂未实现日报补全 backfill；请使用 Python 版或后端日报任务"),
-            (Method::Put, "/api/worklog/config") => collector.status(),
+            (Method::Post, "/api/worklog/finalize") => collector.finalize(body.get("day").and_then(|v| v.as_str()).unwrap_or(""))?,
+            (Method::Post, "/api/worklog/backfill") => collector.backfill(body.get("days").and_then(|v| v.as_u64()).unwrap_or(30))?,
+            (Method::Put, "/api/worklog/config") => collector.update_config(body)?,
             (Method::Post, "/api/worklog/device-token") => {
                 let token = body.get("token").and_then(|v| v.as_str()).unwrap_or("");
                 if token.trim().is_empty() { anyhow::bail!("设备 token 不能为空"); }
                 let base = body.get("base_url").and_then(|v| v.as_str()).unwrap_or("https://123.57.153.49");
                 collector.pair(base, token.trim())?
             }
-            (Method::Post, "/api/worklog/device-token/clear") => collector.pair("https://123.57.153.49", "")?,
+            (Method::Post, "/api/worklog/device-token/clear") => collector.clear_token()?,
             (Method::Post, "/api/worklog/open") => {
                 let kind = body.get("kind").and_then(|v| v.as_str()).unwrap_or("data");
                 match kind {
@@ -206,7 +206,7 @@ fn route(method: Method, path: &str, query: &HashMap<String, String>, body: &Val
             }
             (Method::Get, "/api/tech-stack") => tech_stack.status(),
             (Method::Post, "/api/tech-stack/run") => tech_stack.run_now(),
-            (Method::Put, "/api/tech-stack/config") => tech_stack.status(),
+            (Method::Put, "/api/tech-stack/config") => tech_stack.update_config(body),
             (Method::Post, "/api/tech-stack/open") => json!({"ok": true}),
             (Method::Post, "/api/server/connect") => app.server_connect(body.get("token").and_then(|v| v.as_str()).unwrap_or(""), body.get("url").and_then(|v| v.as_str()).unwrap_or(""))?,
             (Method::Post, "/api/server/disconnect") => { app.secrets.set("service_token", "")?; json!({"connected": false}) }

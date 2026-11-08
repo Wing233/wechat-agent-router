@@ -107,24 +107,135 @@ impl LocalAgent {
         if self.config.router.is_empty() {
             anyhow::bail!("请先填写 Router 地址");
         }
-        let mut handle = self.handle.lock().unwrap();
-        if handle.is_some() {
+        let mut guard = self.handle.lock().unwrap();
+        if guard.is_some() {
             return Ok(());
         }
         self.running.store(true, Ordering::Relaxed);
         self.set_status("connecting", "");
         {
-            let mut guard = self.state.lock().unwrap();
-            guard.started_at = Some(
+            let mut state = self.state.lock().unwrap();
+            state.started_at = Some(
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs(),
             );
-            guard.running = true;
+            state.running = true;
         }
-        // The polling loop is intentionally small: register, poll, run one CLI task, post result.
-        // Full parity with Python's heartbeat/cancel can be layered on this seam.
+        let config = self.config.clone();
+        let client = self.client.clone();
+        let log = self.log.clone();
+        let running = self.running.clone();
+        let state = self.state.clone();
+        let handle = thread::spawn(move || {
+            let mut last_error = String::new();
+            while running.load(Ordering::Relaxed) {
+                let result: Result<()> = (|| {
+                    let url = format!("{}/agent/register", config.router);
+                    let response = client
+                        .post(&url)
+                        .header("X-Agent-Key", &config.agent_key)
+                        .header("Content-Type", "application/json")
+                        .header("User-Agent", "wechat-local-agent/rust")
+                        .json(&json!({
+                            "version": "0.1.0",
+                            "name": config.name,
+                            "description": config.description,
+                            "platform": std::env::consts::OS,
+                            "engines": config.engines.keys().collect::<Vec<_>>(),
+                            "workspaces": config.workspaces.keys().collect::<Vec<_>>(),
+                            "default_engine": config.default_engine,
+                            "default_workspace": config.default_workspace
+                        }))
+                        .send()
+                        .context("无法连接 Router")?;
+                    if !response.status().is_success() {
+                        anyhow::bail!("HTTP {}", response.status().as_u16());
+                    }
+                    let task_url = format!("{}/agent/tasks?agent_id={}", config.router, config.agent_id);
+                    let task_response = client
+                        .get(&task_url)
+                        .header("X-Agent-Key", &config.agent_key)
+                        .send()
+                        .context("无法连接 Router")?;
+                    if !task_response.status().is_success() {
+                        anyhow::bail!("HTTP {}", task_response.status().as_u16());
+                    }
+                    let task = task_response.json::<Value>().unwrap_or(Value::Null);
+                    if !task.is_null() {
+                        let task_id = task.get("task_id").and_then(|v| v.as_str()).unwrap_or("");
+                        if !task_id.is_empty() {
+                            let message = task.get("message").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            let engine_name = task.get("engine").and_then(|v| v.as_str()).unwrap_or(&config.default_engine).to_string();
+                            let workspace_name = task.get("workspace").and_then(|v| v.as_str()).unwrap_or(&config.default_workspace).to_string();
+                            {
+                                let mut guard = state.lock().unwrap();
+                                guard.status = "busy".into();
+                                guard.current = Some(json!({"task_id": task_id, "message": message, "started_at": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()}));
+                            }
+                            log.add("INFO", &format!("收到任务 {}：{}", &task_id[..task_id.len().min(8)], &message[..message.len().min(120)]));
+                            let workspace_path = config.workspaces.get(&workspace_name).cloned().unwrap_or(workspace_name.clone());
+                            let command = config.engines.get(&engine_name).cloned().unwrap_or_default();
+                            let (code, output) = if command.is_empty() {
+                                (-1, format!("引擎不可用：{engine_name}"))
+                            } else {
+                                let mut cmd = Command::new(&command[0]);
+                                cmd.args(&command[1..]).arg(&message).current_dir(&workspace_path)
+                                    .stdout(Stdio::piped())
+                                    .stderr(Stdio::piped());
+                                #[cfg(windows)]
+                                {
+                                    use std::os::windows::process::CommandExt;
+                                    cmd.creation_flags(0x08000000);
+                                }
+                                match cmd.output() {
+                                    Ok(output) => (output.status.code().unwrap_or(-1), String::from_utf8_lossy(&output.stdout).to_string() + &String::from_utf8_lossy(&output.stderr)),
+                                    Err(error) => (-1, error.to_string()),
+                                }
+                            };
+                            let ok = code == 0;
+                            let text = format!("[{} @ {}] exit={}\n{}", engine_name, workspace_path, code, output.chars().rev().take(6000).collect::<String>().chars().rev().collect::<String>());
+                            {
+                                let mut guard = state.lock().unwrap();
+                                guard.tasks_done += 1;
+                                guard.last_task = Some(json!({"task_id": task_id, "ok": ok, "engine": engine_name, "workspace": workspace_path, "finished_at": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()}));
+                                guard.current = None;
+                                guard.status = "online".into();
+                            }
+                            let _ = client.post(format!("{}/agent/result", config.router))
+                                .header("X-Agent-Key", &config.agent_key)
+                                .json(&json!({"task_id": task_id, "ok": ok, "text": text.chars().take(8000).collect::<String>(), "lease_token": task.get("lease_token").and_then(|v| v.as_str()).unwrap_or("")}))
+                                .send();
+                        }
+                    }
+                    Ok(())
+                })();
+                if let Err(error) = result {
+                    last_error = error.to_string();
+                    let mut guard = state.lock().unwrap();
+                    if guard.status != "busy" {
+                        guard.status = "error".into();
+                    }
+                    guard.last_error = last_error.clone();
+                    drop(guard);
+                    log.add("ERROR", &last_error);
+                    std::thread::sleep(Duration::from_secs(5));
+                    continue;
+                }
+                {
+                    let mut guard = state.lock().unwrap();
+                    if guard.status != "busy" {
+                        guard.status = "online".into();
+                    }
+                    guard.last_seen = Some(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs());
+                    guard.last_error.clear();
+                }
+                std::thread::sleep(Duration::from_secs(config.poll_seconds.max(1)));
+            }
+            log.add("INFO", "本地 Agent 轮询已结束");
+        });
+        *guard = Some(handle);
         self.log.add("INFO", &format!("本地 Agent 启动：{} → {}", self.config.agent_id, self.config.router));
         Ok(())
     }

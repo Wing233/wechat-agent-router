@@ -28,6 +28,7 @@ uuid = { version = "1", features = ["v4"] }
 
 [target.'cfg(windows)'.dependencies]
 tauri = "=2.12.1"
+windows-dpapi = "0.2"
 
 [target.'cfg(not(windows))'.dependencies]
 tauri = { version = "=2.12.1", default-features = false, features = ["tray-icon"] }

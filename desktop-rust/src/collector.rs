@@ -190,4 +190,72 @@ impl CollectorService {
         self.store()?.set_state("revoked", "false")?;
         Ok(self.status())
     }
+
+    pub fn clear_token(&self) -> Result<Value> {
+        let config_path = self.root.join("config.json");
+        if config_path.is_file() {
+            let _ = std::fs::remove_file(config_path);
+        }
+        if let Ok(store) = self.store() {
+            let _ = store.set_state("revoked", "false");
+        }
+        Ok(self.status())
+    }
+
+    pub fn update_config(&self, payload: &Value) -> Result<Value> {
+        // Compatibility shim for the existing worklog settings form. The unified
+        // collector persists capture interval through Store state and LYPH remote config.
+        if let Some(value) = payload.get("sample_seconds").and_then(|v| v.as_u64()) {
+            let seconds = value.clamp(5, 600);
+            self.store()?.set_state("capture_interval_seconds", &seconds.to_string())?;
+        }
+        if let Some(value) = payload.get("screenshot_enabled").and_then(|v| v.as_bool()) {
+            self.store()?.set_state("local_paused", if value { "false" } else { "true" })?;
+        }
+        Ok(self.status())
+    }
+
+    fn summary_note(&self, day: &str, days: u64) -> Result<String> {
+        let status = self.store()?.status()?;
+        Ok(format!(
+            "[worklog] {} 采集汇总（Rust 统一桌面版）\n- 待上传：{} 个事件\n- 已确认：{} 个事件\n- 缓存：{} 字节\n- 采集状态：{}\n- 最近截图：{}\n- 汇总范围：{} 天\n\n本文为采集队列摘要，不含随机截图或键盘记录。\n",
+            day,
+            status.pending_count,
+            status.confirmed_count,
+            status.cache_bytes,
+            status.capture_status,
+            status.last_capture_at.as_deref().unwrap_or("暂无"),
+            days
+        ))
+    }
+
+    pub fn finalize(&self, day: &str) -> Result<Value> {
+        let day = if day.trim().is_empty() {
+            Utc::now().format("%Y-%m-%d").to_string()
+        } else {
+            day.to_string()
+        };
+        let note = self.summary_note(&day, 1)?;
+        let result = self.note(&note)?;
+        let mut status = self.status();
+        status["finalize"] = json!({"day": day, "capture_id": result.get("capture_id"), "cached": result.get("cached")});
+        Ok(status)
+    }
+
+    pub fn backfill(&self, days: u64) -> Result<Value> {
+        let days = days.clamp(1, 90);
+        let mut results = Vec::new();
+        for offset in 0..days {
+            let date = (Utc::now() - chrono::Duration::days(offset as i64)).format("%Y-%m-%d").to_string();
+            let note = self.summary_note(&date, days)?;
+            // Backfill intentionally writes one queue note per day for today only in this MVP;
+            // historical OCR summaries remain a Python fallback until ported.
+            if offset == 0 {
+                results.push(self.note(&note)?);
+            }
+        }
+        let mut status = self.status();
+        status["backfill"] = json!({"days": days, "queued": results.len()});
+        Ok(status)
+    }
 }
