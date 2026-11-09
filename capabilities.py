@@ -292,7 +292,10 @@ class CapabilityService:
                 chat_id = str(args.get("chat_id") or (row or {}).get("chat_id") or "")
                 oid = self.settings.store.enqueue_channel(
                     "wechat", chat_id, text, platform="wechat", status="window")
-                fallbacks = self._queue_fallbacks(args.get("fallback"), text)
+                fallback_targets = args.get("fallback")
+                if not fallback_targets and args.get("must_deliver"):
+                    fallback_targets = ["koishi", "email"]
+                fallbacks = self._queue_fallbacks(fallback_targets, text)
                 traces.span(trace_ctx.get_trace_id(), "channel", "wechat",
                             status="blocked", detail={"queued": oid,
                                                       "window_expired": True})
@@ -570,6 +573,10 @@ class CapabilityService:
                         "type": "array",
                         "items": {"type": "string"},
                         "description": "可选，微信窗口过期时改投的渠道，例如 koishi 或 email",
+                    },
+                    "must_deliver": {
+                        "type": "boolean",
+                        "description": "可选，必须送达时窗口过期自动尝试 koishi 与 email",
                     },
                 }, ["channel", "text"]),
                 _guard(self._send_to_channel),
