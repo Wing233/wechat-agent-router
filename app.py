@@ -612,6 +612,7 @@ def build_system_prompt(origin: dict | None = None, role: str = "owner",
         "需要跑代码用 python_repl 或 run_sandbox；改代码用 write_patch；回滚用 snapshot_checkpoint。这些工具没有 mandate 会被硬拒绝。",
         "复杂任务可用 delegate_to_subagent 派给已注册 Agent；定时任务用 schedule_cron。",
         "力扣/LeetCode/刷题/做题相关的问题调用 leetcode_stats；查某道题的首次/最近提交记录调用 leetcode_question。",
+        "用户问站主的学习、背单词、词汇量、墨墨背单词、每日完成量或学习计划时，调用 lyph_tools__get_public_profile（section=study）；只使用返回的公开汇总，不要把计划词数说成累计或已掌握词汇量。",
         "用户发图片或文件时，系统会把图片交给视觉模型、把文件文字附在消息里；只根据实际提供的内容回答，不要假装看到了没读到的东西。",
         "用户要求某个项目 Agent 做事时调用 send_to_agent，不要假装已经完成。",
         "用户消息以 @AgentID 开头时，系统会直接路由到该 Agent，不经过你；你可以按普通对话理解。",
@@ -693,7 +694,7 @@ def build_system_prompt(origin: dict | None = None, role: str = "owner",
             "",
             "## 只读权限",
             "当前用户是访客或群成员，只读。不能执行文件操作、Agent 任务、定时提醒、配置修改或任何写操作。",
-            "只能回答一般问题，以及公开的站点统计、力扣统计、时间、天气、网页搜索和网页正文抓取。",
+            "只能回答一般问题，以及公开的站点统计、站主公开资料与学习数据、力扣统计、时间、天气、网页搜索和网页正文抓取。",
         ])
     else:
         lines.extend([
