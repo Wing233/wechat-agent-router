@@ -176,6 +176,9 @@ class LyphPublicData:
                     continue
                 entries.append(clean)
             result[name] = {"items": entries[:limit], "total": len(entries)}
+        if section == "study":
+            return self._result(result, "墨墨开放 API · 学习数据（公开聚合）",
+                                (study or {}).get("updated_at") or row["updated_at"])
         return self._result(result, SITE_SOURCE, row["updated_at"])
 
     def _public_study(self, conn) -> dict:

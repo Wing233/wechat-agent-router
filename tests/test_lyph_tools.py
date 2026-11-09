@@ -117,11 +117,14 @@ def test_profile_merges_only_published_games_and_never_reads_credentials(public_
 
 
 def test_profile_study_returns_only_published_aggregates(public_data):
-    study = public_data.profile("study", "", 8)["data"]["study"]
+    result = public_data.profile("study", "", 8)
+    study = result["data"]["study"]
     assert study["enabled"] is True
     assert study["plan_words"] == 8315
     assert study["today"]["finished"] == 10
     assert study["trend"][-1]["day"] == "2026-11-09"
+    assert result["source"] == "墨墨开放 API · 学习数据（公开聚合）"
+    assert result["updated_at"] == STAMP
     encoded = json.dumps(study, ensure_ascii=False)
     assert "ENCRYPTED-MAIMEMO-TOKEN" not in encoded
     assert "不是累计或已掌握词汇量" in encoded
