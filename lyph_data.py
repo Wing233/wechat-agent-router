@@ -126,7 +126,7 @@ class LyphPublicData:
         with _readonly(self.db_path) as conn:
             row = conn.execute("SELECT payload_json,updated_at FROM site_settings WHERE id=1").fetchone()
             gaming_items = self._public_games(conn) if section in {"all", "interests"} else []
-            study = self._public_study(conn) if section in {"all", "study"} else None
+            study = self._public_study(conn) if section == "study" else None
         if not row:
             raise QueryError("unavailable", "公开站点资料暂时不可用。")
         try:
@@ -138,8 +138,6 @@ class LyphPublicData:
 
         result = {}
         sections = ["profile", "projects", "stack", "interests"] if section == "all" else [section]
-        if section == "all":
-            sections.append("study")
         needle = query.casefold()
         for name in sections:
             if name == "study":
@@ -152,6 +150,9 @@ class LyphPublicData:
                     for key in ("name", "bio", "introduction", "hero")
                     if isinstance(raw, dict) and isinstance(raw.get(key), str)
                 }
+                seo = site.get("seo")
+                if isinstance(seo, dict) and isinstance(seo.get("description"), str):
+                    result[name]["description"] = _text(seo["description"], 8000)
                 continue
             items = list(raw) if isinstance(raw, list) else []
             if name == "interests":
