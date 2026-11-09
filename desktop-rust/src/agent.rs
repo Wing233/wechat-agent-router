@@ -1,8 +1,10 @@
 use crate::config::AgentConfig;
 use crate::logs::EventLog;
 use anyhow::{Context, Result};
+use rand::Rng;
 use reqwest::blocking::Client;
 use serde_json::{json, Value};
+use std::fs;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::{
@@ -39,6 +41,189 @@ pub struct LocalAgent {
     state: Arc<Mutex<AgentState>>,
     running: Arc<AtomicBool>,
     handle: Mutex<Option<thread::JoinHandle<()>>>,
+}
+
+/// Keeps a long-running task's lease alive while the engine command blocks.
+struct TaskHeartbeat {
+    stop: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl TaskHeartbeat {
+    fn start(
+        task_id: String,
+        lease_token: String,
+        router: String,
+        agent_key: String,
+        client: Client,
+        log: Arc<EventLog>,
+    ) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let watch = stop.clone();
+        let handle = thread::spawn(move || {
+            let mut elapsed = 0u64;
+            while !watch.load(Ordering::Relaxed) {
+                thread::sleep(Duration::from_secs(1));
+                elapsed += 1;
+                if elapsed < 60 {
+                    continue;
+                }
+                elapsed = 0;
+                let url = format!("{}/agent/tasks/{}/heartbeat", router, task_id);
+                match client
+                    .post(&url)
+                    .header("X-Agent-Key", &agent_key)
+                    .json(&json!({"lease_token": lease_token}))
+                    .send()
+                {
+                    Ok(response) if response.status().is_success() => {}
+                    Ok(response) => {
+                        log.add(
+                            "WARN",
+                            &format!("任务心跳失败：HTTP {}", response.status().as_u16()),
+                        );
+                    }
+                    Err(error) => {
+                        log.add("WARN", &format!("任务心跳失败：{error}"));
+                    }
+                }
+            }
+        });
+        Self {
+            stop,
+            handle: Some(handle),
+        }
+    }
+
+    fn stop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl Drop for TaskHeartbeat {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+/// Result outbox: a task result is persisted before the network call so a
+/// Router outage at completion time cannot silently lose it.
+struct ResultOutbox {
+    path: std::path::PathBuf,
+    items: Vec<Value>,
+}
+
+impl ResultOutbox {
+    fn load(path: std::path::PathBuf, log: &EventLog) -> Self {
+        let items = match fs::read_to_string(&path) {
+            Ok(text) => serde_json::from_str::<Vec<Value>>(&text).unwrap_or_else(|error| {
+                log.add("WARN", &format!("任务结果暂存文件无法解析：{error}"));
+                Vec::new()
+            }),
+            Err(_) => Vec::new(),
+        };
+        Self { path, items }
+    }
+
+    fn save(&self, log: &EventLog) {
+        if let Some(parent) = self.path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let encoded = match serde_json::to_string_pretty(&self.items) {
+            Ok(text) => text,
+            Err(error) => {
+                log.add("ERROR", &format!("任务结果暂存失败：{error}"));
+                return;
+            }
+        };
+        if let Err(error) = fs::write(&self.path, encoded) {
+            log.add("ERROR", &format!("任务结果暂存失败：{error}"));
+        }
+    }
+
+    fn push(&mut self, item: Value, log: &EventLog) {
+        if let Some(task_id) = item.get("task_id").and_then(Value::as_str) {
+            self.items.retain(|value| {
+                value.get("task_id").and_then(Value::as_str) != Some(task_id)
+            });
+        }
+        self.items.push(item);
+        self.save(log);
+    }
+
+    fn remove(&mut self, task_id: &str, log: &EventLog) {
+        self.items.retain(|value| {
+            value.get("task_id").and_then(Value::as_str) != Some(task_id)
+        });
+        self.save(log);
+    }
+}
+
+fn post_result(
+    client: &Client,
+    router: &str,
+    agent_key: &str,
+    payload: &Value,
+) -> Result<bool> {
+    let response = client
+        .post(format!("{router}/agent/result"))
+        .header("X-Agent-Key", agent_key)
+        .header("Content-Type", "application/json")
+        .json(payload)
+        .send()
+        .context("提交任务结果失败")?;
+    if !response.status().is_success() {
+        anyhow::bail!("提交任务结果失败：HTTP {}", response.status().as_u16());
+    }
+    let body = response.json::<Value>().unwrap_or(Value::Null);
+    Ok(body.get("ok").and_then(Value::as_bool).unwrap_or(true))
+}
+
+fn flush_outbox(
+    client: &Client,
+    router: &str,
+    agent_key: &str,
+    outbox: &mut ResultOutbox,
+    log: &EventLog,
+) {
+    if outbox.items.is_empty() {
+        return;
+    }
+    let pending = outbox.items.clone();
+    for item in pending {
+        let task_id = item
+            .get("task_id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        if task_id.is_empty() {
+            continue;
+        }
+        match post_result(client, router, agent_key, &item) {
+            Ok(true) => outbox.remove(&task_id, log),
+            Ok(false) => {
+                // The Router already completed, requeued or cancelled this task.
+                log.add(
+                    "WARN",
+                    &format!("任务 {} 结果未被接受，已从暂存移除", &task_id[..task_id.len().min(8)]),
+                );
+                outbox.remove(&task_id, log);
+            }
+            Err(error) => {
+                log.add("WARN", &format!("{error}；结果已暂存，稍后重试"));
+                break;
+            }
+        }
+    }
+}
+
+fn retry_delay(failures: u32) -> Duration {
+    let base = 2u64.saturating_pow(failures.min(6)).min(60);
+    let jitter = rand::thread_rng().gen_range(0..=1000);
+    Duration::from_millis(base * 1000 + jitter)
 }
 
 impl LocalAgent {
@@ -128,7 +313,13 @@ impl LocalAgent {
         let running = self.running.clone();
         let state = self.state.clone();
         let handle = thread::spawn(move || {
+            let mut outbox = ResultOutbox::load(
+                crate::paths::data_dir().join("agent-outbox.json"),
+                &log,
+            );
+            let mut failures = 0u32;
             while running.load(Ordering::Relaxed) {
+                flush_outbox(&client, &config.router, &config.agent_key, &mut outbox, &log);
                 let result: Result<()> = (|| {
                     let url = format!("{}/agent/register", config.router);
                     let response = client
@@ -173,6 +364,15 @@ impl LocalAgent {
                                 guard.current = Some(json!({"task_id": task_id, "message": message, "started_at": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()}));
                             }
                             log.add("INFO", &format!("收到任务 {}：{}", &task_id[..task_id.len().min(8)], &message[..message.len().min(120)]));
+                            let lease_token = task.get("lease_token").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            let mut heartbeat = TaskHeartbeat::start(
+                                task_id.to_string(),
+                                lease_token.clone(),
+                                config.router.clone(),
+                                config.agent_key.clone(),
+                                client.clone(),
+                                log.clone(),
+                            );
                             let workspace_path = config.workspaces.get(&workspace_name).cloned().unwrap_or(workspace_name.clone());
                             let command = config.engines.get(&engine_name).cloned().unwrap_or_default();
                             let (code, output) = if command.is_empty() {
@@ -201,10 +401,15 @@ impl LocalAgent {
                                 guard.current = None;
                                 guard.status = "online".into();
                             }
-                            let _ = client.post(format!("{}/agent/result", config.router))
-                                .header("X-Agent-Key", &config.agent_key)
-                                .json(&json!({"task_id": task_id, "ok": ok, "text": text.chars().take(8000).collect::<String>(), "lease_token": task.get("lease_token").and_then(|v| v.as_str()).unwrap_or("")}))
-                                .send();
+                            let payload = json!({
+                                "task_id": task_id,
+                                "ok": ok,
+                                "text": text.chars().take(8000).collect::<String>(),
+                                "lease_token": lease_token
+                            });
+                            outbox.push(payload, &log);
+                            flush_outbox(&client, &config.router, &config.agent_key, &mut outbox, &log);
+                            heartbeat.stop();
                         }
                     }
                     Ok(())
@@ -217,10 +422,13 @@ impl LocalAgent {
                     }
                     guard.last_error = message.clone();
                     drop(guard);
-                    log.add("ERROR", &message);
-                    std::thread::sleep(Duration::from_secs(5));
+                    failures = failures.saturating_add(1);
+                    let delay = retry_delay(failures);
+                    log.add("ERROR", &format!("{message}；{:.1} 秒后重试", delay.as_secs_f64()));
+                    thread::sleep(delay);
                     continue;
                 }
+                failures = 0;
                 {
                     let mut guard = state.lock().unwrap();
                     if guard.status != "busy" {
@@ -310,6 +518,42 @@ impl LocalAgent {
 
     pub fn cancel(&self) -> bool {
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retry_delay_is_bounded_and_jittered() {
+        for failures in 1..=8 {
+            let millis = retry_delay(failures).as_millis() as u64;
+            assert!(millis >= 2_000, "delay too small: {millis}");
+            assert!(millis <= 61_000, "delay too large: {millis}");
+        }
+        assert!((2_000..=3_000).contains(&(retry_delay(1).as_millis() as u64)));
+        assert!((60_000..=61_000).contains(&(retry_delay(6).as_millis() as u64)));
+    }
+
+    #[test]
+    fn result_outbox_persists_and_removes_by_task() {
+        let path = std::env::temp_dir().join(format!(
+            "lyph-agent-outbox-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        let log = EventLog::new(20, None, "test");
+        let mut outbox = ResultOutbox::load(path.clone(), &log);
+        outbox.push(json!({"task_id": "task-1", "ok": true, "text": "done"}), &log);
+        assert!(path.is_file());
+        let mut reloaded = ResultOutbox::load(path.clone(), &log);
+        assert_eq!(reloaded.items.len(), 1);
+        assert_eq!(reloaded.items[0]["task_id"], "task-1");
+        reloaded.remove("task-1", &log);
+        assert!(reloaded.items.is_empty());
+        let again = ResultOutbox::load(path.clone(), &log);
+        assert!(again.items.is_empty());
+        let _ = fs::remove_file(path);
     }
 }
 
