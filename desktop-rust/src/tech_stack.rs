@@ -1123,9 +1123,58 @@ fn fetch_published_names(url: &str) -> (HashSet<String>, String) {
     }
 }
 
-fn proficiency(project_count: usize, session_sources: usize) -> u32 {
-    // 仅用于人工复核的证据估算；会话提及只占很小权重。
-    (22 + project_count.min(5) as u32 * 13 + session_sources.min(3) as u32 * 2).min(95)
+fn proficiency(project_count: usize, session_sources: usize, mentions: usize) -> u32 {
+    // 证据估算：工程广度（饱和于 20 个工程）+ 会话命中深度 + 来源广度。
+    // 命中次数按线性计入（每 30 次加 1 分，最多 30 分），因此每周活跃度变化
+    // 会体现在分数上；旧公式在工程数≥5、来源=2 时永久固定为 91。
+    let breadth = project_count.min(20) as u32 * 2;
+    let depth = ((mentions / 30) as u32).min(30);
+    let sources = session_sources.min(3) as u32 * 2;
+    (18 + breadth + depth + sources).clamp(18, 96)
+}
+
+/// Attach `progress_delta` by comparing with the previous report (same tech names).
+fn apply_progress_deltas(report: &mut Value, previous: &Value) {
+    // Only compare reports produced by the same scoring model; otherwise the
+    // first run after a formula change would report a misleading one-off swing.
+    if previous.get("scoring_version").and_then(|value| value.as_i64()) != Some(2) {
+        return;
+    }
+    let previous_map: HashMap<String, i64> = previous
+        .get("technologies")
+        .and_then(|value| value.as_array())
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| {
+                    let name = row.get("name").and_then(|value| value.as_str())?;
+                    let progress = row.get("suggested_progress").and_then(|value| value.as_i64())?;
+                    Some((name.to_string(), progress))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if previous_map.is_empty() {
+        return;
+    }
+    if let Some(rows) = report
+        .get_mut("technologies")
+        .and_then(|value| value.as_array_mut())
+    {
+        for row in rows {
+            let name = row
+                .get("name")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .to_string();
+            let progress = row
+                .get("suggested_progress")
+                .and_then(|value| value.as_i64())
+                .unwrap_or(0);
+            if let Some(previous_progress) = previous_map.get(&name) {
+                row["progress_delta"] = json!(progress - previous_progress);
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1183,7 +1232,15 @@ fn render_html(report: &Value) -> String {
             card.push_str(&progress.to_string());
             card.push_str("%\"></span></div><div class=\"foot\">实作证据估算 · ");
             card.push_str(&progress.to_string());
-            card.push_str("% · ");
+            card.push_str("%");
+            if let Some(delta) = item.get("progress_delta").and_then(|value| value.as_i64()) {
+                if delta > 0 {
+                    card.push_str(&format!(" · ↑{delta}"));
+                } else if delta < 0 {
+                    card.push_str(&format!(" · ↓{}", -delta));
+                }
+            }
+            card.push_str(" · ");
             card.push_str(publication);
             card.push_str(" · 待人工复核</div></article>");
             cards.push(card);
@@ -1391,7 +1448,7 @@ fn build_report(
             "icon": row.1,
             "description": row.2,
             "how": row.3,
-            "suggested_progress": proficiency(project_count, session_sources[index]),
+            "suggested_progress": proficiency(project_count, session_sources[index], mentions),
             "project_count": project_count,
             "agent_text_units_with_mention": mentions,
             "agent_sources": sources,
@@ -1431,6 +1488,7 @@ fn build_report(
 
     Ok(json!({
         "schema_version": 1,
+        "scoring_version": 2,
         "generated_at": generated_at,
         "status": "draft_only",
         "summary": {
@@ -1479,7 +1537,6 @@ fn collect_and_write(
     default_export_dir: &Path,
 ) -> Result<(PathBuf, PathBuf, Value)> {
     let now = Utc::now();
-    let report = build_report(config, now, default_export_dir)?;
     let output_dir = config
         .get("output_dir")
         .and_then(|value| value.as_str())
@@ -1488,13 +1545,24 @@ fn collect_and_write(
         .unwrap_or_else(|| default_report_dir.to_path_buf());
     fs::create_dir_all(&output_dir)?;
 
+    let latest_json = output_dir.join("latest.json");
+    let latest_html = output_dir.join("latest.html");
+    let previous = fs::read_to_string(&latest_json)
+        .ok()
+        .map(|text| serde_json::from_str::<Value>(strip_bom(&text)).unwrap_or(json!({})))
+        .unwrap_or_else(|| json!({}));
+
+    let mut report = build_report(config, now, default_export_dir)?;
+    apply_progress_deltas(&mut report, &previous);
+    if let Some(generated) = previous.get("generated_at") {
+        report["previous_generated_at"] = generated.clone();
+    }
+
     let serialized = serde_json::to_string_pretty(&report)?;
     let html = render_html(&report);
     let stamp = now.format("%Y%m%d-%H%M%S").to_string();
     let json_path = output_dir.join(format!("tech-stack-weekly-{stamp}.json"));
     let html_path = output_dir.join(format!("tech-stack-weekly-{stamp}.html"));
-    let latest_json = output_dir.join("latest.json");
-    let latest_html = output_dir.join("latest.html");
 
     fs::write(&json_path, serialized.as_bytes())?;
     fs::write(&html_path, html.as_bytes())?;
@@ -2305,12 +2373,51 @@ mod tests {
     }
 
     #[test]
-    fn proficiency_matches_python_formula() {
-        assert_eq!(proficiency(0, 0), 22);
-        assert_eq!(proficiency(1, 1), 37);
-        assert_eq!(proficiency(3, 2), 65);
-        assert_eq!(proficiency(5, 3), 93);
-        assert_eq!(proficiency(30, 30), 93);
+    fn proficiency_responds_to_evidence_volume() {
+        assert_eq!(proficiency(0, 0, 0), 18);
+        assert_eq!(proficiency(1, 1, 0), 22);
+        assert_eq!(proficiency(3, 2, 0), 28);
+        assert_eq!(proficiency(5, 3, 0), 34);
+        // 命中量直接参与：同样的工程与来源，命中越多分越高。
+        assert!(proficiency(5, 2, 120) > proficiency(5, 2, 30));
+        assert_eq!(proficiency(5, 2, 120) - proficiency(5, 2, 30), 3);
+        // 上限仍存在，避免把估算当成精确能力值。
+        assert_eq!(proficiency(999, 3, 100_000), 94);
+    }
+
+    #[test]
+    fn progress_delta_compares_with_previous_report() {
+        let previous = json!({
+            "scoring_version": 2,
+            "technologies": [
+                {"name": "Rust", "suggested_progress": 60},
+                {"name": "Docker", "suggested_progress": 70}
+            ]
+        });
+        let mut report = json!({
+            "technologies": [
+                {"name": "Rust", "suggested_progress": 63},
+                {"name": "Docker", "suggested_progress": 68},
+                {"name": "Vue", "suggested_progress": 40}
+            ]
+        });
+        apply_progress_deltas(&mut report, &previous);
+        assert_eq!(report["technologies"][0]["progress_delta"], 3);
+        assert_eq!(report["technologies"][1]["progress_delta"], -2);
+        assert!(report["technologies"][2].get("progress_delta").is_none());
+    }
+
+    #[test]
+    fn progress_delta_is_skipped_across_scoring_versions() {
+        let previous = json!({
+            "scoring_version": 1,
+            "technologies": [{"name": "Rust", "suggested_progress": 91}]
+        });
+        let mut report = json!({
+            "technologies": [{"name": "Rust", "suggested_progress": 70}]
+        });
+        apply_progress_deltas(&mut report, &previous);
+        assert!(report["technologies"][0].get("progress_delta").is_none());
     }
 
     #[test]
