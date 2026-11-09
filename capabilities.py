@@ -15,6 +15,7 @@ import insights
 import spend
 import traces
 import trace_ctx
+from channel_windows import WINDOWED_CHANNELS, is_open, window_state
 
 
 def _schema(properties: dict, required: list[str] | None = None) -> dict:
@@ -45,6 +46,7 @@ class CapabilityService:
                  reload_llm: Callable[[], None],
                  trace_path: str = "", eval_db: str = "",
                  channels=None, send_wechat: Callable[[str], bool] | None = None,
+                 send_email: Callable[[str], tuple[bool, str]] | None = None,
                  with_channels: bool = True):
         self.tools = tools
         self.settings = settings
@@ -56,6 +58,7 @@ class CapabilityService:
         self.reload_llm = reload_llm
         self.channels = channels
         self.send_wechat = send_wechat
+        self.send_email = send_email
         self.with_channels = with_channels
 
     def _audit(self, action: str, detail: str) -> None:
@@ -225,6 +228,8 @@ class CapabilityService:
             merged["recent"] = (self.channels.recent_logs(channel_id, 5)
                                 if self.channels else [])
             items.append(merged)
+        window_row = self.settings.store.window_get("wechat")
+        window = window_state(window_row)
         items.append({
             "id": "wechat",
             "name": "微信（Hub）",
@@ -233,8 +238,41 @@ class CapabilityService:
             "virtual": True,
             "last_chat_id": "owner",
             "note": "微信回复默认回到当前会话；send_to_channel 可主动发到站主微信",
+            "window": window,
+            "pending_window": len(
+                self.settings.store.list_channel_outbox_status("wechat", "window", 100)),
         })
         return {"channels": items}
+
+    def _queue_fallbacks(self, targets, text: str) -> list[dict]:
+        if isinstance(targets, str):
+            targets = [item.strip() for item in targets.split(",") if item.strip()]
+        results: list[dict] = []
+        for target in (targets or [])[:5]:
+            channel_id = str(target).strip().lower()
+            if not channel_id or channel_id in WINDOWED_CHANNELS:
+                continue
+            if channel_id == "email":
+                if not self.send_email:
+                    results.append({"channel": "email", "ok": False, "error": "未配置邮件通道"})
+                    continue
+                ok, error = self.send_email(text)
+                results.append({"channel": "email", "ok": ok, "error": error})
+                continue
+            if not self.channels:
+                results.append({"channel": channel_id, "ok": False, "error": "渠道服务不可用"})
+                continue
+            target_info = self.channels.target(channel_id)
+            chat_id = str(target_info.get("chat_id") or "")
+            if not chat_id:
+                results.append({"channel": channel_id, "ok": False, "error": "没有最近会话"})
+                continue
+            oid = self.settings.store.enqueue_channel(
+                channel_id, chat_id, text,
+                platform=str(target_info.get("platform") or ""),
+                user_id=str(target_info.get("user_id") or ""))
+            results.append({"channel": channel_id, "queued": oid})
+        return results
 
     def _send_to_channel(self, args: dict) -> dict:
         channel_id = str(args.get("channel") or "").strip().lower()
@@ -245,9 +283,25 @@ class CapabilityService:
             raise ValueError("缺少 text")
         if len(text) > 8000:
             raise ValueError("消息过长（最多 8000 字）")
-        if channel_id in ("wechat", "weixin", "hub"):
+        if channel_id in WINDOWED_CHANNELS:
             if not self.send_wechat:
                 raise ValueError("当前运行环境没有配置微信发送通道")
+            row = self.settings.store.window_get("wechat")
+            state = window_state(row)
+            if not state["open"]:
+                chat_id = str(args.get("chat_id") or (row or {}).get("chat_id") or "")
+                oid = self.settings.store.enqueue_channel(
+                    "wechat", chat_id, text, platform="wechat", status="window")
+                fallbacks = self._queue_fallbacks(args.get("fallback"), text)
+                traces.span(trace_ctx.get_trace_id(), "channel", "wechat",
+                            status="blocked", detail={"queued": oid,
+                                                      "window_expired": True})
+                return {
+                    "queued": oid,
+                    "window_expired": True,
+                    "fallback": fallbacks,
+                    "note": "微信 24 小时窗口已过期，消息已排队；用户下次发消息后自动补发。",
+                }
             ok = bool(self.send_wechat(text))
             traces.span(trace_ctx.get_trace_id(), "channel", "wechat",
                         status="ok" if ok else "error",
@@ -506,12 +560,17 @@ class CapabilityService:
             )
             tools.register(
                 "send_to_channel",
-                "把一条文字发到指定入口。channel 可用 list_channels 查看；不传 chat_id 时发到该入口最近活跃的会话。微信固定发到站主。",
+                "把一条文字发到指定入口。channel 可用 list_channels 查看；不传 chat_id 时发到该入口最近活跃的会话。微信固定发到站主；微信 24 小时窗口过期时会排队，等用户下次发消息后补发，可用 fallback 指定备用渠道。",
                 _schema({
                     "channel": {"type": "string", "description": "例如 koishi 或 wechat"},
                     "text": {"type": "string"},
                     "chat_id": {"type": "string", "description": "可选，目标会话 ID"},
                     "platform": {"type": "string", "description": "可选，例如 qq / telegram"},
+                    "fallback": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "可选，微信窗口过期时改投的渠道，例如 koishi 或 email",
+                    },
                 }, ["channel", "text"]),
                 _guard(self._send_to_channel),
             )

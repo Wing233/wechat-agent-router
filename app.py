@@ -35,6 +35,8 @@ from geo import Geo
 import governance
 import help_center
 from hub import Hub, HubError, parse_quote, parse_text
+from channel_windows import CHECKIN_AFTER_SECONDS, CHECKIN_TEXT, WINDOW_SECONDS, is_open, window_state
+from notify_email import send_text as send_email_text
 from imagegen import ImageGen
 import koishi_auth as ka
 from llm import LLM, LLMBudgetError, LLMError
@@ -506,6 +508,8 @@ CAPS = capabilities.CapabilityService(
     channels=CHANNELS,
     send_wechat=lambda text: send_payload(
         {"kind": "text", "text": text, "recipient": OWNER}),
+    send_email=lambda text: send_email_text(
+        text, (CFG.get("channel_window") or {}).get("email") or {}),
 )
 CAPS.register()
 
@@ -1309,6 +1313,54 @@ def handle_inbound(text: str, message: dict, origin: dict | None = None) -> None
 # ---------------------------------------------------------------------------
 # background loops
 # ---------------------------------------------------------------------------
+def flush_wechat_window() -> int:
+    """Deliver queued WeChat messages once a fresh inbound window exists."""
+    row = store.window_get("wechat")
+    if not row or not is_open(row):
+        return 0
+    sent = 0
+    for item in store.list_channel_outbox_status("wechat", "window"):
+        text = str(item.get("text") or "")
+        ok = bool(text) and send_payload({"kind": "text", "text": text, "recipient": OWNER})
+        store.ack_channel_outbox(
+            "wechat", [int(item["id"])], ok=ok,
+            error="" if ok else "window flush failed", from_status="window")
+        if not ok:
+            break
+        sent += 1
+    if sent:
+        log.info("flushed %s queued WeChat message(s)", sent)
+    return sent
+
+
+def window_tick() -> int:
+    """Send a 23h check-in while the 24h window is still open, then flush."""
+    now = datetime.now(timezone.utc).timestamp()
+    sent = 0
+    for row in store.list_windows("wechat"):
+        state = window_state(row, now)
+        if not state["open"] or not state["checkin_due"]:
+            continue
+        ok = send_payload({"kind": "text", "text": CHECKIN_TEXT, "recipient": OWNER})
+        if ok:
+            store.window_mark_checkin("wechat", str(row.get("chat_id") or ""))
+            sent += 1
+            log.info("sent WeChat 24h check-in to %s", row.get("chat_id"))
+        else:
+            log.warning("WeChat 24h check-in failed for %s", row.get("chat_id"))
+    flush_wechat_window()
+    return sent
+
+
+async def window_loop() -> None:
+    while True:
+        try:
+            await asyncio.to_thread(window_tick)
+        except Exception:
+            log.exception("channel window loop failed")
+        await asyncio.sleep(600)
+
+
 def poll_once(last_id: int) -> int:
     messages = hub.poll(last_id)
     for message in messages:
@@ -1319,6 +1371,10 @@ def poll_once(last_id: int) -> int:
             last_id = mid
             store.state_set("last_message_id", str(last_id))
             continue
+        chat_id = str(message.get("chat_id") or "")
+        store.window_inbound("wechat", chat_id, platform="wechat",
+                             user_id=str(message.get("from_user_id") or ""))
+        flush_wechat_window()
         text = parse_text(message)
         dedup = f"hub:{mid}"
         claim = store.claim_inbound(
@@ -1437,6 +1493,7 @@ async def lifespan(_: FastAPI):
         asyncio.create_task(maintenance_loop()),
         asyncio.create_task(job_loop()),
         asyncio.create_task(reminder_loop()),
+        asyncio.create_task(window_loop()),
     ]
     log.info("router started, owner=%s agents=%s plugins=%s services=%s tools=%s jobs=%s",
              OWNER, list(AGENTS), list(LOADER.loaded), list(SERVICES), TOOLS.names(), list(SCHEDULER.jobs))
@@ -1665,6 +1722,10 @@ async def channel_inbound(request: Request):
     CHANNELS.record(channel_id, "in", platform=platform, chat_id=chat_id,
                     user_id=user_id, text=text,
                     account_id=str(body.get("account_id") or ""))
+    store.window_inbound(channel_id, chat_id, platform=platform, user_id=user_id)
+    store.release_window_outbox(channel_id, chat_id)
+    if channel_id in {"wechat", "weixin", "hub"}:
+        await asyncio.to_thread(flush_wechat_window)
     store.state_set(f"channel:{channel_id}:last_target", json.dumps({
         "chat_id": chat_id, "platform": platform, "user_id": user_id,
         "account_id": str(body.get("account_id") or ""),

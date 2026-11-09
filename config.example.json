@@ -4,6 +4,17 @@
     "channel_key": "REPLACE",
     "owner_id": "REPLACE"
   },
+  "channel_window": {
+    "email": {
+      "enabled": false,
+      "host": "",
+      "port": 587,
+      "username": "",
+      "password": "",
+      "from": "",
+      "to": []
+    }
+  },
   "lyph": {
     "db": "/lyph-data/lyph.sqlite3",
     "enterprise_db": "/lyph-src/public-apps/companies/data/web.sqlite",

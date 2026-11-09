@@ -34,6 +34,30 @@ def test_channel_outbox_roundtrip(tmp_path: Path) -> None:
     assert recent[0]["error"] == "bot offline"
 
 
+def test_channel_window_tracks_inbound_and_releases_blocked(tmp_path: Path) -> None:
+    store = Store(str(tmp_path / "router.db"))
+    store.init()
+    store.window_inbound("wechat", "owner", platform="wechat", user_id="owner")
+    row = store.window_get("wechat", "owner")
+    assert row is not None
+    assert row["last_inbound_at"]
+    assert row["last_checkin_at"] is None
+
+    blocked = store.enqueue_channel("wechat", "owner", "窗口外通知",
+                                    platform="wechat", status="window")
+    assert store.list_channel_outbox("wechat") == []
+    assert [item["id"] for item in store.list_channel_outbox_status("wechat", "window")] == [blocked]
+
+    assert store.release_window_outbox("wechat", "owner") == 1
+    assert [item["id"] for item in store.list_channel_outbox("wechat")] == [blocked]
+    assert store.ack_channel_outbox("wechat", [blocked], ok=True) == 1
+
+    store.window_mark_checkin("wechat", "owner")
+    assert store.window_get("wechat", "owner")["last_checkin_at"] is not None
+    store.window_inbound("wechat", "owner", platform="wechat", user_id="owner")
+    assert store.window_get("wechat", "owner")["last_checkin_at"] is None
+
+
 def test_channel_manager_tracks_last_target(tmp_path: Path) -> None:
     manager = ChannelManager({"channels": {
         "koishi": {"id": "koishi", "name": "Koishi", "type": "koishi",
@@ -57,10 +81,24 @@ def test_channel_manager_tracks_last_target(tmp_path: Path) -> None:
 class FakeStore:
     def __init__(self):
         self.queued = []
+        self.window_open = True
 
-    def enqueue_channel(self, channel_id, chat_id, text, *, platform="", user_id=""):
+    def enqueue_channel(self, channel_id, chat_id, text, *, platform="", user_id="",
+                        media_type="", media_path="", status="pending"):
         self.queued.append((channel_id, chat_id, text, platform, user_id))
         return 7
+
+    def window_get(self, channel_id, chat_id=""):
+        if not self.window_open:
+            return {"channel_id": channel_id, "chat_id": "owner",
+                    "last_inbound_at": "2000-01-01T00:00:00+00:00",
+                    "last_checkin_at": None}
+        return {"channel_id": channel_id, "chat_id": "owner",
+                "last_inbound_at": "2999-01-01T00:00:00+00:00",
+                "last_checkin_at": None}
+
+    def list_channel_outbox_status(self, channel_id, status, limit=100):
+        return []
 
 
 class FakeSettings:
@@ -76,6 +114,34 @@ class FakeSettings:
         if channel_id not in self.channels:
             raise ValueError("渠道不存在")
         return self.channels[channel_id]
+
+
+def test_send_to_channel_queues_when_wechat_window_expired() -> None:
+    import capabilities
+
+    settings = FakeSettings()
+    settings.store.window_open = False
+    manager = ChannelManager({"channels": settings.channels})
+    manager.record("koishi", "in", platform="qq", chat_id="qq:group:1",
+                   user_id="qq:u1")
+    sent = []
+    emails = []
+    service = capabilities.CapabilityService(
+        None, settings=settings, catalog=None, llm=None, spend_path="",
+        reload_llm=lambda: None, channels=manager,
+        send_wechat=lambda text: sent.append(text) or True,
+        send_email=lambda text: (emails.append(text) or True, ""),
+    )
+    result = service._send_to_channel({
+        "channel": "wechat", "text": "窗口外通知",
+        "fallback": ["koishi", "email"],
+    })
+    assert result["window_expired"] is True
+    assert result["queued"] == 7
+    assert sent == []
+    assert emails == ["窗口外通知"]
+    assert ("wechat", "owner", "窗口外通知") == settings.store.queued[0][:3]
+    assert settings.store.queued[1][:3] == ("koishi", "qq:group:1", "窗口外通知")
 
 
 def test_send_to_channel_tool() -> None:

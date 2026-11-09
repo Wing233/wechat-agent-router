@@ -64,6 +64,19 @@ CREATE INDEX IF NOT EXISTS channel_outbox_pending
 CREATE INDEX IF NOT EXISTS channel_outbox_created
   ON channel_outbox(created_at);
 
+CREATE TABLE IF NOT EXISTS channel_windows (
+  channel_id TEXT NOT NULL,
+  chat_id TEXT NOT NULL,
+  platform TEXT NOT NULL DEFAULT '',
+  user_id TEXT NOT NULL DEFAULT '',
+  last_inbound_at TEXT NOT NULL,
+  last_checkin_at TEXT,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(channel_id, chat_id)
+);
+CREATE INDEX IF NOT EXISTS channel_windows_inbound
+  ON channel_windows(channel_id, last_inbound_at);
+
 CREATE TABLE IF NOT EXISTS state (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -376,14 +389,15 @@ class Store:
     # --- channel outbox -------------------------------------------------
     def enqueue_channel(self, channel_id: str, chat_id: str, text: str, *,
                         platform: str = "", user_id: str = "",
-                        media_type: str = "", media_path: str = "") -> int:
+                        media_type: str = "", media_path: str = "",
+                        status: str = "pending") -> int:
         with self._conn() as conn:
             cursor = conn.execute(
                 "INSERT INTO channel_outbox(channel_id,platform,chat_id,user_id,text,"
-                "media_type,media_path,status,created_at) VALUES(?,?,?,?,?,?,?,'pending',?)",
+                "media_type,media_path,status,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
                 (str(channel_id)[:40], str(platform)[:40], str(chat_id)[:200],
                  str(user_id)[:200], str(text)[:8000], str(media_type)[:20],
-                 str(media_path)[:400], now_iso()),
+                 str(media_path)[:400], str(status)[:20], now_iso()),
             )
             return int(cursor.lastrowid)
 
@@ -398,7 +412,8 @@ class Store:
         return [dict(row) for row in rows]
 
     def ack_channel_outbox(self, channel_id: str, ids: list[int], *,
-                           ok: bool = True, error: str = "") -> int:
+                           ok: bool = True, error: str = "",
+                           from_status: str = "pending") -> int:
         clean = [int(value) for value in ids if str(value).isdigit()][:100]
         if not clean:
             return 0
@@ -406,9 +421,9 @@ class Store:
         with self._conn() as conn:
             cursor = conn.execute(
                 f"UPDATE channel_outbox SET status=?, sent_at=?, error=? "
-                f"WHERE channel_id=? AND status='pending' AND id IN ({placeholders})",
+                f"WHERE channel_id=? AND status=? AND id IN ({placeholders})",
                 [("sent" if ok else "error"), now_iso(),
-                 str(error or "")[:500], str(channel_id), *clean],
+                 str(error or "")[:500], str(channel_id), str(from_status), *clean],
             )
             return int(cursor.rowcount or 0)
 
@@ -423,6 +438,87 @@ class Store:
         args.append(max(1, min(int(limit), 200)))
         with self._conn() as conn:
             rows = conn.execute(sql, args).fetchall()
+        return [dict(row) for row in rows]
+
+    # --- channel 24h windows -------------------------------------------
+    def window_inbound(self, channel_id: str, chat_id: str, *,
+                       platform: str = "", user_id: str = "") -> None:
+        """A new user message refreshes the reply window and clears check-in state."""
+        stamp = now_iso()
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT INTO channel_windows(channel_id,chat_id,platform,user_id,
+                     last_inbound_at,last_checkin_at,updated_at)
+                   VALUES(?,?,?,?,?,NULL,?)
+                   ON CONFLICT(channel_id,chat_id) DO UPDATE SET
+                     platform=excluded.platform,user_id=excluded.user_id,
+                     last_inbound_at=excluded.last_inbound_at,
+                     last_checkin_at=NULL,updated_at=excluded.updated_at""",
+                (str(channel_id)[:40], str(chat_id)[:200], str(platform)[:40],
+                 str(user_id)[:200], stamp, stamp),
+            )
+
+    def window_get(self, channel_id: str, chat_id: str = "") -> dict | None:
+        with self._conn() as conn:
+            if chat_id:
+                row = conn.execute(
+                    "SELECT * FROM channel_windows WHERE channel_id=? AND chat_id=?",
+                    (str(channel_id), str(chat_id)),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT * FROM channel_windows WHERE channel_id=? "
+                    "ORDER BY last_inbound_at DESC LIMIT 1",
+                    (str(channel_id),),
+                ).fetchone()
+        return dict(row) if row else None
+
+    def list_windows(self, channel_id: str = "", limit: int = 50) -> list[dict]:
+        sql = "SELECT * FROM channel_windows"
+        args: list = []
+        if channel_id:
+            sql += " WHERE channel_id=?"
+            args.append(str(channel_id))
+        sql += " ORDER BY last_inbound_at DESC LIMIT ?"
+        args.append(max(1, min(int(limit), 200)))
+        with self._conn() as conn:
+            rows = conn.execute(sql, args).fetchall()
+        return [dict(row) for row in rows]
+
+    def window_mark_checkin(self, channel_id: str, chat_id: str) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE channel_windows SET last_checkin_at=?,updated_at=? "
+                "WHERE channel_id=? AND chat_id=?",
+                (now_iso(), now_iso(), str(channel_id), str(chat_id)),
+            )
+
+    def release_window_outbox(self, channel_id: str, chat_id: str = "") -> int:
+        """Move blocked messages back to pending after the user refreshes the window."""
+        with self._conn() as conn:
+            if chat_id:
+                cursor = conn.execute(
+                    "UPDATE channel_outbox SET status='pending',error=NULL "
+                    "WHERE channel_id=? AND chat_id=? AND status='window'",
+                    (str(channel_id), str(chat_id)),
+                )
+            else:
+                cursor = conn.execute(
+                    "UPDATE channel_outbox SET status='pending',error=NULL "
+                    "WHERE channel_id=? AND status='window'",
+                    (str(channel_id),),
+                )
+            return int(cursor.rowcount or 0)
+
+    def list_channel_outbox_status(self, channel_id: str, status: str,
+                                   limit: int = 100) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT id,channel_id,platform,chat_id,user_id,text,media_type,"
+                "media_path,status,created_at FROM channel_outbox "
+                "WHERE channel_id=? AND status=? ORDER BY id LIMIT ?",
+                (str(channel_id), str(status), max(1, min(int(limit), 200))),
+            ).fetchall()
         return [dict(row) for row in rows]
 
     def cleanup_channel_outbox(self, days: int = 7) -> int:
