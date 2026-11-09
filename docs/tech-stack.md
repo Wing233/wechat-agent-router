@@ -45,6 +45,17 @@ tech-stack\
 - `already_published` 只有在成功读取公网基线时才判定；读取失败记为「公网基线未读取」，不会当作新增
 - 报告默认只写本机，发布仍需站主在 Lyph 后台确认
 
+## 同步到 LYPH 公网站点
+
+- 默认开启（`lyph_sync_enabled: true`），每次采集完成后用工作日志的同一枚设备 token
+  调用 `PUT /api/v1/device/site-stack`，只更新站点的技术栈列表
+- 合并规则：手工维护的条目（没有 `source` 字段）永远保留；自动条目带
+  `source: "tech-stack"`，每次同步整批替换；匹配时忽略 emoji 和标点，
+  所以「💻 Java」不会被自动生成的「Java」重复添加
+- 站点其它内容（简介、项目、兴趣、SEO、导航）不受影响
+- 同步失败不影响本地报告，错误会显示在状态 `lyph_sync.last_error` 和桌面端日志里
+- 关闭自动同步：把 `config.json` 的 `lyph_sync_enabled` 改为 `false`
+
 ## 接口
 
 | 方法 | 路径 | 说明 |

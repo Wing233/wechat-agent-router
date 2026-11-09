@@ -1477,7 +1477,7 @@ fn collect_and_write(
     config: &Value,
     default_report_dir: &Path,
     default_export_dir: &Path,
-) -> Result<(PathBuf, PathBuf)> {
+) -> Result<(PathBuf, PathBuf, Value)> {
     let now = Utc::now();
     let report = build_report(config, now, default_export_dir)?;
     let output_dir = config
@@ -1501,7 +1501,7 @@ fn collect_and_write(
     fs::write(&latest_json, serialized.as_bytes())?;
     fs::write(&latest_html, html.as_bytes())?;
     prune_reports(&output_dir);
-    Ok((latest_json, latest_html))
+    Ok((latest_json, latest_html, report))
 }
 
 // ---------------------------------------------------------------------------
@@ -1569,6 +1569,8 @@ fn default_config(report_dir: &Path, export_dir: &Path) -> Map<String, Value> {
     );
     config.insert("history_days".to_string(), json!(365));
     config.insert("max_depth".to_string(), json!(7));
+    config.insert("lyph_base_url".to_string(), json!("https://123.57.153.49"));
+    config.insert("lyph_sync_enabled".to_string(), json!(true));
     config
 }
 
@@ -1695,10 +1697,14 @@ struct Inner {
     report_dir: PathBuf,
     export_dir: PathBuf,
     config_path: PathBuf,
+    /// Device token shared with the worklog uploader (`<data>/worklog/secrets.json`).
+    token_path: PathBuf,
     log: Arc<EventLog>,
     config: Mutex<Map<String, Value>>,
     running: AtomicBool,
     last_error: Mutex<String>,
+    sync_at: Mutex<String>,
+    sync_error: Mutex<String>,
     stopped: Mutex<bool>,
     wake: Condvar,
     scheduler: Mutex<Option<JoinHandle<()>>>,
@@ -1865,13 +1871,157 @@ impl Inner {
             "report": report,
             "project_roots": project_roots,
             "public_baseline_status": public_baseline_status,
+            "lyph_sync": {
+                "enabled": config
+                    .get("lyph_sync_enabled")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(true),
+                "last_at": lock_or_recover(&self.sync_at).clone(),
+                "last_error": lock_or_recover(&self.sync_error).clone(),
+            },
         })
     }
 
     fn collect_body(&self) -> Result<()> {
         let config = self.config_value();
-        collect_and_write(&config, &self.report_dir, &self.export_dir)?;
+        let (_json, _html, report) =
+            collect_and_write(&config, &self.report_dir, &self.export_dir)?;
+        // Site sync is best effort: a network failure must not fail the local report.
+        self.sync_to_lyph(&config, &report);
         Ok(())
+    }
+
+    /// Replace the machine-synced slice of the public LYPH tech stack.
+    ///
+    /// The desktop never stores owner cookies; it authenticates with the same
+    /// device token used for worklog uploads.
+    fn sync_to_lyph(&self, config: &Value, report: &Value) {
+        if !config
+            .get("lyph_sync_enabled")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(true)
+        {
+            return;
+        }
+        let base = config
+            .get("lyph_base_url")
+            .and_then(|value| value.as_str())
+            .unwrap_or("https://123.57.153.49")
+            .trim_end_matches('/')
+            .to_string();
+        let token = crate::secrets::SecretStore::new(self.token_path.clone()).get("device_token");
+        if token.is_empty() {
+            *lock_or_recover(&self.sync_error) =
+                "未找到设备 token（先在工作日志页配对）".to_string();
+            return;
+        }
+        let items: Vec<Value> = report
+            .get("technologies")
+            .and_then(|value| value.as_array())
+            .map(|rows| {
+                rows.iter()
+                    .take(100)
+                    .filter_map(|row| {
+                        let name = row.get("name").and_then(|value| value.as_str())?.trim();
+                        if name.is_empty() {
+                            return None;
+                        }
+                        let name: String = name.chars().take(100).collect();
+                        let description: String = row
+                            .get("description")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("")
+                            .trim()
+                            .chars()
+                            .take(300)
+                            .collect();
+                        let how: String = row
+                            .get("how")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("")
+                            .trim()
+                            .chars()
+                            .take(300)
+                            .collect();
+                        let icon: String = row
+                            .get("icon")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("")
+                            .trim()
+                            .chars()
+                            .take(16)
+                            .collect();
+                        let mut item = json!({
+                            "name": name,
+                            "description": description,
+                            "how": how,
+                            "icon": icon,
+                        });
+                        if let Some(progress) = row
+                            .get("suggested_progress")
+                            .and_then(|value| value.as_i64())
+                        {
+                            item["progress"] = json!(progress.clamp(0, 100));
+                        }
+                        Some(item)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if items.is_empty() {
+            return;
+        }
+        let count = items.len();
+        let payload = json!({
+            "items": items,
+            "generated_at": report.get("generated_at").cloned().unwrap_or(Value::Null),
+        });
+        let request = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(20))
+            .build()
+            .and_then(|client| {
+                client
+                    .put(format!("{base}/api/v1/device/site-stack"))
+                    .bearer_auth(&token)
+                    .json(&payload)
+                    .send()
+            });
+        match request {
+            Ok(response) => {
+                let status = response.status();
+                let body = response.text().unwrap_or_default();
+                if status.is_success() {
+                    *lock_or_recover(&self.sync_error) = String::new();
+                    *lock_or_recover(&self.sync_at) =
+                        Local::now().format("%Y-%m-%dT%H:%M").to_string();
+                    let updated = serde_json::from_str::<Value>(&body)
+                        .ok()
+                        .and_then(|value| value.get("updated").and_then(|item| item.as_bool()))
+                        .unwrap_or(false);
+                    self.log.add(
+                        "INFO",
+                        &format!(
+                            "技术栈已同步到 LYPH：{count} 项（{}）",
+                            if updated { "站点已更新" } else { "内容无变化" }
+                        ),
+                    );
+                } else {
+                    let message = format!(
+                        "HTTP {} {}",
+                        status.as_u16(),
+                        body.chars().take(200).collect::<String>()
+                    );
+                    *lock_or_recover(&self.sync_error) = message.clone();
+                    self.log
+                        .add("WARN", &format!("技术栈同步 LYPH 失败：{message}"));
+                }
+            }
+            Err(error) => {
+                *lock_or_recover(&self.sync_error) = error.to_string();
+                self.log
+                    .add("WARN", &format!("技术栈同步 LYPH 失败：{error}"));
+            }
+        }
     }
 
     fn record_error_text(&self, kind: &str) {
@@ -1975,15 +2125,23 @@ impl TechStackService {
         let _ = fs::create_dir_all(&export_dir);
         let config_path = root.join("config.json");
         let config = load_or_create_config(&config_path, &report_dir, &export_dir);
+        let token_path = root
+            .parent()
+            .unwrap_or(&root)
+            .join("worklog")
+            .join("secrets.json");
         Self {
             inner: Arc::new(Inner {
                 report_dir,
                 export_dir,
                 config_path,
+                token_path,
                 log,
                 config: Mutex::new(config),
                 running: AtomicBool::new(false),
                 last_error: Mutex::new(String::new()),
+                sync_at: Mutex::new(String::new()),
+                sync_error: Mutex::new(String::new()),
                 stopped: Mutex::new(false),
                 wake: Condvar::new(),
                 scheduler: Mutex::new(None),
