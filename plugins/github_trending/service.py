@@ -6,7 +6,7 @@ import json
 import re
 import sqlite3
 import urllib.parse
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +15,9 @@ from data import CST
 
 USER_AGENT = "WeChatAgentRouter/1.0 (+https://github.com/Wing233/wechat-agent-router)"
 TRENDING_URL = "https://github.com/trending?since=daily"
+# Try the explicit daily view first, then the default trending page. Both are
+# ranked by the recent star gain (comprehensive heat), not by total stars.
+TRENDING_URLS = [TRENDING_URL, "https://github.com/trending"]
 API = "https://api.github.com"
 
 
@@ -252,33 +255,28 @@ class TrendingService:
     # --- fetching ------------------------------------------------------
     def fetch_trending(self) -> list[dict]:
         items: list[dict] = []
-        try:
-            status, body = self.ctx.http_request(
-                "GET", TRENDING_URL,
-                headers={"User-Agent": USER_AGENT, "Accept": "text/html"},
-                timeout=45, limit=2_000_000)
-            if status == 200:
-                items = parse_trending_html(body)
-        except Exception as exc:
-            self.ctx.log.warning("github trending html failed: %s", exc)
+        for url in TRENDING_URLS:
+            try:
+                status, body = self.ctx.http_request(
+                    "GET", url,
+                    headers={"User-Agent": USER_AGENT, "Accept": "text/html"},
+                    timeout=45, limit=2_000_000)
+                if status == 200:
+                    parsed = parse_trending_html(body)
+                    if len(parsed) > len(items):
+                        items = parsed
+                    if len(items) >= 3:
+                        break
+            except Exception as exc:
+                self.ctx.log.warning("github trending html failed: %s", exc)
         if len(items) < 3:
             try:
                 items = self._search_fallback()
             except Exception as exc:
                 self.ctx.log.warning("github trending fallback failed: %s", exc)
-        elif len(items) < self.count:
-            try:
-                extra = self._search_fallback()
-                known = {str(item.get("repo") or "").lower() for item in items}
-                for item in extra:
-                    repo = normalize_repo(str(item.get("repo") or ""))
-                    if repo and repo.lower() not in known:
-                        items.append(item)
-                        known.add(repo.lower())
-                    if len(items) >= self.count:
-                        break
-            except Exception as exc:
-                self.ctx.log.warning("github trending fill fallback failed: %s", exc)
+        # Once the trending page returns a usable list, keep it as-is and in
+        # page order (recent star gains). Never pad it with Search results
+        # sorted by total stars, which drags in big old repositories.
         deduped: list[dict] = []
         seen: set[str] = set()
         for item in items:
@@ -296,15 +294,55 @@ class TrendingService:
         return deduped
 
     def _search_fallback(self) -> list[dict]:
-        since = (datetime.now(CST) - timedelta(days=7)).strftime("%Y-%m-%d")
-        query = urllib.parse.urlencode({
-            "q": f"created:>={since} stars:>50",
-            "sort": "stars", "order": "desc", "per_page": self.count,
-        })
-        body = self._api_get(f"/search/repositories?{query}", limit=300_000)
-        data = json.loads(body)
+        """Approximate the trending rise list when the HTML page fails.
+
+        GitHub has no Trending API, so gather the recent candidates and
+        rank them by star velocity (stars / age in days) instead of by
+        total stars. That keeps fast-rising new projects on top and
+        stops big old repositories from dominating the digest.
+        """
+        now = datetime.now(CST)
+        new_since = (now - timedelta(days=7)).strftime("%Y-%m-%d")
+        active_since = (now - timedelta(days=2)).strftime("%Y-%m-%d")
+        queries: list[tuple[str, str]] = [
+            (f"created:>={new_since} stars:>20", "stars"),
+            (f"pushed:>={active_since} stars:>100 archived:false", "updated"),
+        ]
+        candidates: dict[str, dict] = {}
+        for q, sort in queries:
+            query = urllib.parse.urlencode({
+                "q": q,
+                "sort": sort, "order": "desc",
+                "per_page": max(self.count * 3, 30),
+            })
+            try:
+                body = self._api_get(
+                    f"/search/repositories?{query}", limit=300_000)
+                data = json.loads(body)
+            except Exception as exc:
+                self.ctx.log.warning("github trending fallback query failed: %s", exc)
+                continue
+            for row in data.get("items") or []:
+                repo = normalize_repo(str(row.get("full_name") or ""))
+                if not repo or repo.lower() in candidates:
+                    continue
+                candidates[repo.lower()] = row
+        if not candidates:
+            return []
+        now_utc = datetime.now(timezone.utc)
+        scored: list[tuple[float, dict]] = []
+        for row in candidates.values():
+            stars = int(row.get("stargazers_count") or 0)
+            try:
+                created = datetime.fromisoformat(
+                    str(row.get("created_at") or "").replace("Z", "+00:00"))
+                age_days = max(1, (now_utc - created).days + 1)
+            except Exception:
+                age_days = 1
+            scored.append((stars / age_days, row))
+        scored.sort(key=lambda pair: pair[0], reverse=True)
         items = []
-        for row in data.get("items") or []:
+        for _score, row in scored[: self.count]:
             items.append({
                 "repo": row.get("full_name") or "",
                 "url": row.get("html_url") or "",

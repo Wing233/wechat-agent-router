@@ -1,11 +1,11 @@
 use crate::agent::LocalAgent;
 use crate::autostart;
-use crate::collector::CollectorService;
 use crate::config::{load_config, save_config, AgentConfig, Settings};
 use crate::logs::EventLog;
 use crate::paths;
 use crate::secrets::SecretStore;
 use crate::tech_stack::TechStackService;
+use crate::worklog::WorklogService;
 use anyhow::{Context, Result};
 use rand::RngCore;
 use reqwest::blocking::Client;
@@ -163,6 +163,13 @@ impl DesktopApp {
         self.agent_status()
     }
 
+    pub fn cancel_agent_task(&self) -> Value {
+        match self.agent.lock().unwrap().as_ref() {
+            Some(agent) => json!({"cancelled": agent.cancel()}),
+            None => json!({"cancelled": false}),
+        }
+    }
+
     pub fn test_engine(&self, engine: &str, workspace: &str) -> Result<Value> {
         let cfg = self.config();
         let agent = LocalAgent::new(cfg, self.log.clone())?;
@@ -296,7 +303,7 @@ impl DesktopApp {
         Ok(json!({"overview": overview, "server": {"url": base, "connected": true}, "agent": self.agent_status(), "config": self.config_for_ui()}))
     }
 
-    pub fn bootstrap(&self, collector: &CollectorService, tech_stack: &TechStackService) -> Value {
+    pub fn bootstrap(&self, worklog: &WorklogService, tech_stack: &TechStackService) -> Value {
         json!({
             "app": {"name": paths::APP_NAME, "version": paths::VERSION, "started_at": self.started_at, "headless": false, "window_mode": self.settings.window_mode},
             "config": self.config_for_ui(),
@@ -307,21 +314,21 @@ impl DesktopApp {
             "router": self.router_health(3),
             "server": {"url": self.effective_server_url(), "connected": self.secrets.has("service_token")},
             "autostart": autostart::is_enabled(),
-            "worklog": collector.status(),
-            "collector": collector.status(),
+            "worklog": worklog.status(),
+            "collector": worklog.status(),
             "tech_stack": tech_stack.status(),
             "paths": {"config": self.config_path.to_string_lossy(), "data": self.data_dir.to_string_lossy(), "log": paths::log_file().to_string_lossy()}
         })
     }
 
-    pub fn status(&self, collector: &CollectorService, tech_stack: &TechStackService) -> Value {
+    pub fn status(&self, worklog: &WorklogService, tech_stack: &TechStackService) -> Value {
         json!({
             "time": SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
             "agent": self.agent_status(),
             "router": self.router_health(2),
             "server_connected": self.secrets.has("service_token"),
-            "worklog": collector.status(),
-            "collector": collector.status(),
+            "worklog": worklog.status(),
+            "collector": worklog.status(),
             "tech_stack": tech_stack.status()
         })
     }

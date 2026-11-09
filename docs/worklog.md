@@ -1,20 +1,24 @@
 # 工作电脑活动采集与 LYPH 日报
 
-工作日志采集已经集成到 **WeChatAgentDesktop** 桌面端，不再单独安装计划任务。桌面端启动时自动启动采集线程，退出时自动停止。
+工作日志采集已经集成到 **WeChatAgentDesktop** 桌面端（Rust/Tauri 版），不再单独安装计划任务。桌面端启动时自动启动采集线程，退出时自动停止。
 
 ```text
 WeChatAgentDesktop
   ├─ 本机 Agent（pc-home）
   ├─ 本地控制台 API / UI
-  └─ WorklogService
-        ├─ 前台窗口采样（30s）
-        ├─ 本机屏幕 OCR（30s，仅文字，像素不出本机）
+  └─ WorklogService（Rust）
+        ├─ 前台窗口采样（默认 30s）
+        ├─ 本机屏幕 OCR（Windows.Media.Ocr，仅文字，像素不出本机）
         ├─ Git / Codex / 浏览器分类 / 文件改动
         ├─ 每天 22:00 汇总当天
-        └─ 上传 LYPH device API（纯文字 note）
+        └─ 上传 LYPH device API（纯文字 note，source_kind=note）
                 ↓
         LYPH 22:30 cron 自动生成日报并 public 发布（无人工审核环节，如需撤回在后台手动撤稿）
 ```
+
+> 汇总/发布时刻是可配置的：桌面端「每日采集时间」对应 `finalize_time`（默认 22:00，本机当前配置为 04:00），服务器发布任务按自己的 cron 运行。
+
+> 2026-11-10 起 Rust 桌面端不再上传任何截图。旧 MVP 会把截图（`source_kind=screenshot`）写进同一个设备，而 `worklog_publish.py` 只接受纯 `note`，导致日报停摆；清理脚本见 `scripts/lyph_cleanup_screenshot_captures.py`。
 
 ## 1. 在桌面端使用
 
@@ -48,27 +52,23 @@ WeChatAgentDesktop
 
 ## 3. 数据位置
 
-源码模式：
+Rust 桌面端（`%LOCALAPPDATA%\WeChatAgentDesktop\worklog\`）：
 
 ```text
-D:\xx\wechatbot\agent-router\desktop\.runtime\worklog\
+%LOCALAPPDATA%\WeChatAgentDesktop\worklog\
   config.json
   secrets.json          # DPAPI 加密的 LYPH 设备 token
   worklog.sqlite3       # samples / ocr_samples / days / state
   collector.log
-  notes\                # 如果配置里使用默认目录
+  notes\                # 本地 Markdown 日报（worklog_dir 默认指向这里）
 ```
 
-打包 exe 模式：
+首次启动会自动迁移旧位置（按顺序查找，找到即复制）：
 
 ```text
-<exe 同目录>\data\worklog\
-```
-
-旧版独立采集器如果存在，桌面端首次启动会自动迁移：
-
-```text
-%LOCALAPPDATA%\WeChatAgentWorklog
+%LOCALAPPDATA%\WeChatAgentWorklog\          # 旧版独立采集器
+<exe 同目录>\data\worklog\                  # 旧 PyInstaller 便携版
+agent-router\desktop\.runtime\worklog\      # 旧源码模式
 ```
 
 迁移后旧目录保留作备份，不再写入。
@@ -97,6 +97,19 @@ D:\xx\wechatbot\agent-router\desktop\.runtime\worklog\
 - 本地已有采样与屏幕文字线索
 
 每天生成一条 `[worklog]` note，上传到 LYPH。没有证据的日期会跳过；内容过短的日期也会跳过。
+
+### 修复被截图污染的历史日期
+
+Rust MVP 时期上传过截图，`worklog_publish.py` 只接受纯 note，所以这些日期无法发布。先预演、再删除：
+
+```bash
+docker cp scripts/lyph_cleanup_screenshot_captures.py lyph-api-1:/tmp/
+docker exec lyph-api-1 python /tmp/lyph_cleanup_screenshot_captures.py --since 2026-11-08
+docker exec lyph-api-1 python /tmp/lyph_cleanup_screenshot_captures.py --since 2026-11-08 --apply
+docker exec lyph-api-1 python /data/worklog_publish.py --date 2026-11-09 --visibility public
+```
+
+脚本默认只预演，`--apply` 才删除；只删 `source_kind='screenshot'` 的行及其存储对象。
 
 也可以命令行补全（路径以桌面端数据目录为准）：
 

@@ -1,7 +1,6 @@
 pub mod agent;
 pub mod app;
 pub mod autostart;
-pub mod collector;
 pub mod config;
 pub mod instance;
 pub mod logs;
@@ -10,3 +9,4 @@ pub mod secrets;
 pub mod server;
 pub mod tech_stack;
 pub mod updater;
+pub mod worklog;

@@ -2,7 +2,7 @@
 
 use clap::Parser;
 use std::sync::Arc;
-use wechat_agent_desktop::{app::DesktopApp, collector::CollectorService, instance, paths, server, tech_stack::TechStackService};
+use wechat_agent_desktop::{app::DesktopApp, instance, paths, server, tech_stack::TechStackService, worklog::WorklogService};
 
 #[derive(Parser, Debug)]
 #[command(name = "WeChatAgentDesktop", about = "微信 Agent 桌面控制台（Rust/Tauri 版）")]
@@ -23,7 +23,6 @@ struct SingleInstanceMutex {
 #[cfg(windows)]
 impl SingleInstanceMutex {
     fn acquire() -> Option<Self> {
-        use std::os::windows::ffi::OsStrExt;
         use winapi::{
             shared::winerror::ERROR_ALREADY_EXISTS,
             um::errhandlingapi::GetLastError,
@@ -113,21 +112,17 @@ fn main() -> anyhow::Result<()> {
     }
     let app = Arc::new(DesktopApp::new(args.config)?);
     let log = app.log.clone();
-    let collector = Arc::new(CollectorService::new(paths::collector_dir(), log.clone()));
-    let tech_stack = Arc::new(TechStackService::new(paths::tech_stack_dir()));
-    let api = server::start(app.clone(), collector.clone(), tech_stack.clone())?;
+    let worklog = Arc::new(WorklogService::new(paths::worklog_dir(), log.clone()));
+    let tech_stack = Arc::new(TechStackService::new(paths::tech_stack_dir(), log.clone()));
+    let api = server::start(app.clone(), worklog.clone(), tech_stack.clone())?;
     log.add("INFO", &format!("桌面控制台已启动：{}", api.url));
     if let Err(error) = app.start_agent() {
         log.add("WARN", &format!("本机 Agent 未启动：{error}"));
     }
-    if collector.status().get("device_configured").and_then(|value| value.as_bool()).unwrap_or(false) {
-        if let Err(error) = collector.start() {
-            log.add("WARN", &format!("采集服务未启动：{error}"));
-        }
+    if let Err(error) = worklog.start() {
+        log.add("WARN", &format!("工作日志采集未启动：{error}"));
     }
-    if tech_stack.status().get("enabled").and_then(|value| value.as_bool()).unwrap_or(false) {
-        tech_stack.run_now();
-    }
+    tech_stack.start();
     let _ = instance::write_state(&state_path, api.port, &app.token, &api.ui_url, args.headless);
     if args.headless {
         println!("微信 Agent 控制台后台运行中：{}", api.ui_url);

@@ -63,6 +63,10 @@ pub fn collector_dir() -> PathBuf {
     data_dir().join("collector")
 }
 
+pub fn worklog_dir() -> PathBuf {
+    data_dir().join("worklog")
+}
+
 pub fn tech_stack_dir() -> PathBuf {
     data_dir().join("tech-stack")
 }

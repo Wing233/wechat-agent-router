@@ -31,7 +31,7 @@
 - `daily_at` 是本地时间（UTC+8），插件会在首次加载时把 `job:github_trending:next` 设到下一个 09:00。
 - `count` 是每次保留的项目数，默认 12，范围 5–20。
 - 如果当天已经推送过，任务会跳过，避免重启后重复发送。
-- 抓取顺序：GitHub Trending 页面 → 失败时回退到 GitHub Search API（最近 7 天新建、stars > 50）。
+- 抓取顺序：GitHub Trending 页面（`?since=daily` → 默认页）→ 失败时回退到 GitHub Search API，并按涨星速度（`stars / 创建天数`）排序，而不是总 stars 排名。Trending 页已返回 ≥3 项时直接按页内排名推送，不再补齐，避免掺入总 Star 最多的老项目。
 - 简报包含：序号、`owner/repo`、stars、语言、描述、今日新增 stars；最近 7 天出现过的项目会标“再次上榜”。
 - 简报顶部有一段 2–3 句的 LLM 趋势总结；LLM 不可用时自动省略，不影响列表。
 

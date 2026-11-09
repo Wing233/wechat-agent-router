@@ -1,7 +1,7 @@
 use crate::app::DesktopApp;
-use crate::collector::CollectorService;
 use crate::paths;
 use crate::tech_stack::TechStackService;
+use crate::worklog::WorklogService;
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -16,7 +16,7 @@ pub struct ApiServer {
     pub ui_url: String,
 }
 
-pub fn start(app: Arc<DesktopApp>, collector: Arc<CollectorService>, tech_stack: Arc<TechStackService>) -> Result<ApiServer> {
+pub fn start(app: Arc<DesktopApp>, worklog: Arc<WorklogService>, tech_stack: Arc<TechStackService>) -> Result<ApiServer> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let port = listener.local_addr()?.port();
     let url = format!("http://127.0.0.1:{port}/");
@@ -25,7 +25,7 @@ pub fn start(app: Arc<DesktopApp>, collector: Arc<CollectorService>, tech_stack:
     let static_files = load_static(&app);
     std::thread::spawn(move || {
         for request in server.incoming_requests() {
-            let _ = handle(request, &app, &collector, &tech_stack, &static_files);
+            let _ = handle(request, &app, &worklog, &tech_stack, &static_files);
         }
     });
     Ok(ApiServer { port, url, ui_url })
@@ -52,7 +52,7 @@ fn load_static(app: &DesktopApp) -> HashMap<String, (Vec<u8>, &'static str)> {
     map
 }
 
-fn handle(mut request: tiny_http::Request, app: &DesktopApp, collector: &CollectorService, tech_stack: &TechStackService, static_files: &HashMap<String, (Vec<u8>, &'static str)>) -> Result<()> {
+fn handle(mut request: tiny_http::Request, app: &DesktopApp, worklog: &WorklogService, tech_stack: &TechStackService, static_files: &HashMap<String, (Vec<u8>, &'static str)>) -> Result<()> {
     let host = request.headers().iter().find(|h| h.field.as_str().to_ascii_lowercase() == "host")
         .map(|h| h.value.as_str().to_string())
         .unwrap_or_default();
@@ -76,7 +76,7 @@ fn handle(mut request: tiny_http::Request, app: &DesktopApp, collector: &Collect
     }
     let method = request.method().clone();
     let body = read_body(&mut request)?;
-    let result = route(method, &path_only, &query, &body, app, collector, tech_stack);
+    let result = route(method, &path_only, &query, &body, app, worklog, tech_stack);
     match result {
         Ok((status, value)) => send_json(request, status, &value),
         Err((status, message)) => send_json(request, status, &json!({"detail": message})),
@@ -125,7 +125,6 @@ fn url_decode(text: &str) -> String {
 }
 
 fn read_body(request: &mut tiny_http::Request) -> Result<Value> {
-    use std::io::Read;
     let mut text = String::new();
     request.as_reader().read_to_string(&mut text)?;
     if text.trim().is_empty() {
@@ -153,18 +152,18 @@ fn send_bytes(request: tiny_http::Request, status: u16, data: &[u8], mime: &str)
     Ok(())
 }
 
-fn route(method: Method, path: &str, query: &HashMap<String, String>, body: &Value, app: &DesktopApp, collector: &CollectorService, tech_stack: &TechStackService) -> std::result::Result<(u16, Value), (u16, String)> {
+fn route(method: Method, path: &str, query: &HashMap<String, String>, body: &Value, app: &DesktopApp, worklog: &WorklogService, tech_stack: &TechStackService) -> std::result::Result<(u16, Value), (u16, String)> {
     let result: Result<Value> = (|| {
         Ok(match (method.clone(), path) {
             (Method::Get, "/api/ping") => json!({"ok": true, "app": "wechat-agent-desktop-rust", "pid": std::process::id(), "time": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()}),
-            (Method::Get, "/api/bootstrap") => app.bootstrap(collector, tech_stack),
-            (Method::Get, "/api/status") => app.status(collector, tech_stack),
+            (Method::Get, "/api/bootstrap") => app.bootstrap(worklog, tech_stack),
+            (Method::Get, "/api/status") => app.status(worklog, tech_stack),
             (Method::Get, "/api/config") => app.config_for_ui(),
             (Method::Put, "/api/config") => app.update_config(body)?,
             (Method::Post, "/api/agent/start") => app.start_agent()?,
             (Method::Post, "/api/agent/stop") => app.stop_agent(),
             (Method::Post, "/api/agent/restart") => { app.stop_agent(); app.start_agent()? }
-            (Method::Post, "/api/agent/cancel") => json!({"cancelled": false}),
+            (Method::Post, "/api/agent/cancel") => app.cancel_agent_task(),
             (Method::Post, "/api/agent/test-engine") => app.test_engine(body.get("engine").and_then(|v| v.as_str()).unwrap_or(""), body.get("workspace").and_then(|v| v.as_str()).unwrap_or(""))?,
             (Method::Get, "/api/router/test") => app.router_health(5),
             (Method::Get, "/api/logs") => {
@@ -177,37 +176,66 @@ fn route(method: Method, path: &str, query: &HashMap<String, String>, body: &Val
             (Method::Get, "/api/update/check") => crate::updater::check(),
             (Method::Get, "/api/update/status") => crate::updater::status(),
             (Method::Post, "/api/update/apply") => crate::updater::apply(),
-            (Method::Get, "/api/worklog") => collector.status(),
-            (Method::Post, "/api/worklog/start") => collector.start()?,
-            (Method::Post, "/api/worklog/stop") => collector.stop(),
-            (Method::Post, "/api/worklog/pause") => collector.pause(body.get("paused").and_then(|v| v.as_bool()).unwrap_or(true))?,
-            (Method::Post, "/api/worklog/action") => collector.action(body.get("command").and_then(|v| v.as_str()).unwrap_or(""))?,
-            (Method::Post, "/api/worklog/note") => collector.note(body.get("text").and_then(|v| v.as_str()).unwrap_or(""))?,
-            (Method::Post, "/api/worklog/finalize") => collector.finalize(body.get("day").and_then(|v| v.as_str()).unwrap_or(""))?,
-            (Method::Post, "/api/worklog/backfill") => collector.backfill(body.get("days").and_then(|v| v.as_u64()).unwrap_or(30))?,
-            (Method::Put, "/api/worklog/config") => collector.update_config(body)?,
+            (Method::Get, "/api/worklog") => worklog.status(),
+            (Method::Post, "/api/worklog/start") => worklog.start()?,
+            (Method::Post, "/api/worklog/stop") => worklog.stop(),
+            (Method::Post, "/api/worklog/pause") => worklog.pause(body.get("paused").and_then(|v| v.as_bool()).unwrap_or(true))?,
+            (Method::Post, "/api/worklog/action") => worklog.action(body.get("command").and_then(|v| v.as_str()).unwrap_or(""))?,
+            (Method::Post, "/api/worklog/note") => worklog.note(body.get("text").and_then(|v| v.as_str()).unwrap_or(""))?,
+            (Method::Post, "/api/worklog/finalize") => worklog.finalize(body.get("day").and_then(|v| v.as_str()).unwrap_or(""))?,
+            (Method::Post, "/api/worklog/backfill") => worklog.backfill(body.get("days").and_then(|v| v.as_u64()).unwrap_or(30))?,
+            (Method::Put, "/api/worklog/config") => worklog.update_config(body)?,
             (Method::Post, "/api/worklog/device-token") => {
                 let token = body.get("token").and_then(|v| v.as_str()).unwrap_or("");
                 if token.trim().is_empty() { anyhow::bail!("设备 token 不能为空"); }
                 let base = body.get("base_url").and_then(|v| v.as_str()).unwrap_or("https://123.57.153.49");
-                collector.pair(base, token.trim())?
+                worklog.pair(base, token.trim())?
             }
-            (Method::Post, "/api/worklog/device-token/clear") => collector.clear_token()?,
+            (Method::Post, "/api/worklog/device-token/clear") => worklog.clear_token()?,
             (Method::Post, "/api/worklog/open") => {
                 let kind = body.get("kind").and_then(|v| v.as_str()).unwrap_or("data");
+                let notes = worklog.status()["paths"]["notes"].as_str().unwrap_or("").to_string();
                 match kind {
-                    "data" => open_path(&collector.root().to_path_buf()),
-                    "config" => open_path(&collector.root().join("config.json")),
-                    "log" => open_path(&collector.root().join("collector.log")),
-                    "notes" => open_path(&collector.root().join("notes")),
+                    "data" => open_path(&worklog.root().to_path_buf()),
+                    "config" => open_path(&worklog.root().join("config.json")),
+                    "log" => open_path(&worklog.root().join("collector.log")),
+                    "notes" if !notes.is_empty() => open_path(std::path::Path::new(&notes)),
+                    "notes" => open_path(&worklog.root().join("notes")),
                     _ => anyhow::bail!("未知路径"),
                 }
                 json!({"ok": true})
             }
             (Method::Get, "/api/tech-stack") => tech_stack.status(),
             (Method::Post, "/api/tech-stack/run") => tech_stack.run_now(),
-            (Method::Put, "/api/tech-stack/config") => tech_stack.update_config(body),
-            (Method::Post, "/api/tech-stack/open") => json!({"ok": true}),
+            (Method::Put, "/api/tech-stack/config") => tech_stack.update_config(body)?,
+            (Method::Post, "/api/tech-stack/open") => {
+                let kind = body.get("kind").and_then(|v| v.as_str()).unwrap_or("report");
+                tech_stack.open_path(kind)?;
+                json!({"ok": true})
+            }
+            (Method::Get, "/api/dialog/folder") => {
+                let initial = query.get("initial").cloned().unwrap_or_default();
+                json!({"path": pick_folder(&initial)})
+            }
+            (Method::Get, "/api/dialog/file") => {
+                let initial = query.get("initial").cloned().unwrap_or_default();
+                json!({"path": pick_file(&initial)})
+            }
+            (Method::Post, "/api/open-path") => {
+                let kind = body.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+                let explicit = body.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                if !explicit.is_empty() {
+                    open_path(std::path::Path::new(explicit));
+                } else {
+                    match kind {
+                        "config" => open_path(&app.config_path.clone()),
+                        "data" => open_path(&app.data_dir.clone()),
+                        "log" => open_path(&paths::log_file()),
+                        _ => anyhow::bail!("未知路径"),
+                    }
+                }
+                json!({"ok": true})
+            }
             (Method::Post, "/api/server/connect") => app.server_connect(body.get("token").and_then(|v| v.as_str()).unwrap_or(""), body.get("url").and_then(|v| v.as_str()).unwrap_or(""))?,
             (Method::Post, "/api/server/disconnect") => { app.secrets.set("service_token", "")?; json!({"connected": false}) }
             (Method::Get, "/api/server/overview") => app.router_json("GET", "/internal/settings/overview", None, None)?,
@@ -260,8 +288,72 @@ fn percent_encode(text: &str) -> String {
 }
 
 fn open_path(path: &std::path::Path) {
+    // `open::that` launches the default handler; Explorer is used for folders.
     #[cfg(windows)]
-    { let _ = std::process::Command::new("explorer").arg(path).spawn(); }
+    {
+        if path.is_dir() {
+            let _ = std::process::Command::new("explorer").arg(path).spawn();
+        } else {
+            let _ = open::that(path);
+        }
+    }
     #[cfg(not(windows))]
-    { let _ = std::process::Command::new("xdg-open").arg(path).spawn(); }
+    {
+        let _ = open::that(path);
+    }
+}
+
+/// Native folder picker for the "select workspace" button.
+fn pick_folder(initial: &str) -> String {
+    #[cfg(windows)]
+    {
+        let initial = initial.replace('\'', "''");
+        let script = format!(
+            "Add-Type -AssemblyName System.Windows.Forms | Out-Null;\
+             $d = New-Object System.Windows.Forms.FolderBrowserDialog;\
+             $d.Description = '选择目录';\
+             if ('{initial}' -ne '') {{ $d.SelectedPath = '{initial}' }};\
+             if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ [Console]::Out.Write($d.SelectedPath) }}"
+        );
+        return run_powershell(&script);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = initial;
+        String::new()
+    }
+}
+
+/// Native file picker used for importing a device token JSON.
+fn pick_file(initial: &str) -> String {
+    #[cfg(windows)]
+    {
+        let initial = initial.replace('\'', "''");
+        let script = format!(
+            "Add-Type -AssemblyName System.Windows.Forms | Out-Null;\
+             $f = New-Object System.Windows.Forms.OpenFileDialog;\
+             if ('{initial}' -ne '') {{ $f.InitialDirectory = '{initial}' }};\
+             if ($f.ShowDialog() -eq 'OK') {{ [Console]::Out.Write($f.FileName) }}"
+        );
+        return run_powershell(&script);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = initial;
+        String::new()
+    }
+}
+
+#[cfg(windows)]
+fn run_powershell(script: &str) -> String {
+    use std::os::windows::process::CommandExt;
+    // CREATE_NO_WINDOW hides the console; the WinForms dialog still shows.
+    let output = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-STA", "-Command", script])
+        .creation_flags(0x0800_0000)
+        .output();
+    match output {
+        Ok(output) => String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        Err(_) => String::new(),
+    }
 }
