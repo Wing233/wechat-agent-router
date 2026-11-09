@@ -12,8 +12,10 @@ import os
 import sqlite3
 import time
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote, urlsplit
+from zoneinfo import ZoneInfo
 
 QUERY_TIMEOUT_SECONDS = 2.0
 SITE_SOURCE = "lyph 公开站点资料"
@@ -124,6 +126,7 @@ class LyphPublicData:
         with _readonly(self.db_path) as conn:
             row = conn.execute("SELECT payload_json,updated_at FROM site_settings WHERE id=1").fetchone()
             gaming_items = self._public_games(conn) if section in {"all", "interests"} else []
+            study = self._public_study(conn) if section in {"all", "study"} else None
         if not row:
             raise QueryError("unavailable", "公开站点资料暂时不可用。")
         try:
@@ -135,8 +138,13 @@ class LyphPublicData:
 
         result = {}
         sections = ["profile", "projects", "stack", "interests"] if section == "all" else [section]
+        if section == "all":
+            sections.append("study")
         needle = query.casefold()
         for name in sections:
+            if name == "study":
+                result["study"] = study or {"enabled": False}
+                continue
             raw = site.get(name)
             if name == "profile":
                 result[name] = {
@@ -169,6 +177,60 @@ class LyphPublicData:
                 entries.append(clean)
             result[name] = {"items": entries[:limit], "total": len(entries)}
         return self._result(result, SITE_SOURCE, row["updated_at"])
+
+    def _public_study(self, conn) -> dict:
+        """Published MaiMemo aggregates. The token column is never selected."""
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='maimemo_config'"
+        ).fetchone()
+        if not exists:
+            return {"enabled": False}
+        try:
+            config = conn.execute(
+                "SELECT publish_enabled,synced_at FROM maimemo_config WHERE id=1"
+            ).fetchone()
+        except sqlite3.DatabaseError:
+            return {"enabled": False}
+        if not config or not config["publish_enabled"]:
+            return {"enabled": False}
+        try:
+            latest = conn.execute(
+                "SELECT day,finished,study_time_ms,new_words,unfinished,plan_words,truncated"
+                " FROM maimemo_daily ORDER BY day DESC LIMIT 1"
+            ).fetchone()
+            rows = conn.execute(
+                "SELECT day,finished,study_time_ms FROM maimemo_daily ORDER BY day DESC LIMIT 14"
+            ).fetchall()
+        except sqlite3.DatabaseError:
+            return {"enabled": False}
+        if not latest:
+            return {"enabled": False}
+        today = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
+        trend = [
+            {"day": row["day"], "finished": row["finished"],
+             "study_minutes": round(row["study_time_ms"] / 60000, 1)}
+            for row in reversed(rows)
+        ]
+        return {
+            "enabled": True,
+            "updated_at": config["synced_at"],
+            "stale": latest["day"] != today,
+            "today": {
+                "day": latest["day"],
+                "finished": latest["finished"],
+                "study_minutes": round(latest["study_time_ms"] / 60000, 1),
+                "new_words": latest["new_words"],
+                "unfinished": latest["unfinished"],
+                "truncated": bool(latest["truncated"]),
+            },
+            "plan_words": latest["plan_words"],
+            "trend": trend,
+            "trend_since": trend[0]["day"] if trend else latest["day"],
+            "source": "墨墨开放 API · 学习数据（公测）",
+            "note": ("学习计划词数来自墨墨当前计划，不是累计或已掌握词汇量；"
+                     "趋势只统计本站开始保存每日快照之后的日期。学习数据接口为墨墨公测能力，"
+                     "需要 App 开启自动同步。"),
+        }
 
     def _public_games(self, conn) -> list:
         """Published game snapshots; credentials and keys never leave lyph."""

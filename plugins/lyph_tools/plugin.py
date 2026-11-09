@@ -25,7 +25,7 @@ class Arguments(BaseModel):
 
 
 class ProfileArguments(Arguments):
-    section: Literal["all", "profile", "projects", "stack", "interests"] = "all"
+    section: Literal["all", "profile", "projects", "stack", "interests", "study"] = "all"
     query: str = Field(default="", max_length=200)
     limit: int = Field(default=8, ge=1, le=20)
 
@@ -80,9 +80,9 @@ SEARCH_PROPS = {
 TOOL_SPECS = (
     (
         "get_public_profile",
-        "查询站主公开介绍、项目、技术栈或兴趣；只能读取已公开站点资料。",
+        "查询站主公开介绍、项目、技术栈、兴趣或墨墨背单词学习数据；只能读取已公开资料。",
         _schema({
-            "section": {"type": "string", "enum": ["all", "profile", "projects", "stack", "interests"]},
+            "section": {"type": "string", "enum": ["all", "profile", "projects", "stack", "interests", "study"]},
             "query": {"type": "string", "maxLength": 200},
             "limit": {"type": "integer", "minimum": 1, "maximum": 20},
         }),

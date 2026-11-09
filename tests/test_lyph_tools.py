@@ -26,6 +26,11 @@ def public_data(tmp_path):
             CREATE TABLE gaming_accounts(platform TEXT PRIMARY KEY,account_id TEXT NOT NULL,display_name TEXT NOT NULL,
               credential_enc TEXT NOT NULL,snapshot_json TEXT,publish_enabled INTEGER NOT NULL DEFAULT 0,
               connected_at TEXT NOT NULL,synced_at TEXT,link_method TEXT);
+            CREATE TABLE maimemo_config(id INTEGER PRIMARY KEY CHECK(id=1),token_enc TEXT NOT NULL,
+              publish_enabled INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL,synced_at TEXT,last_error TEXT);
+            CREATE TABLE maimemo_daily(day TEXT PRIMARY KEY,finished INTEGER NOT NULL,target INTEGER NOT NULL,
+              study_time_ms INTEGER NOT NULL,new_words INTEGER NOT NULL,unfinished INTEGER NOT NULL,
+              plan_words INTEGER NOT NULL,truncated INTEGER NOT NULL DEFAULT 0,captured_at TEXT NOT NULL);
         """)
         site = {
             "profile": {"name": "lyph", "bio": "公开介绍", "secret": "hidden-profile-key"},
@@ -57,6 +62,15 @@ def public_data(tmp_path):
         conn.execute(
             "INSERT INTO gaming_accounts VALUES('steam','1','站主',?,?,1,?,?,?)",
             ("ENCRYPTED-BLOB", json.dumps(snapshot), STAMP, STAMP, "manual_unverified"))
+        conn.execute(
+            "INSERT INTO maimemo_config VALUES(1,'ENCRYPTED-MAIMEMO-TOKEN',1,?,?,NULL)",
+            (STAMP, STAMP))
+        conn.execute(
+            "INSERT INTO maimemo_daily VALUES('2026-11-09',10,32405,66365,4,144,8315,0,?)",
+            (STAMP,))
+        conn.execute(
+            "INSERT INTO maimemo_daily VALUES('2026-11-08',12,0,80000,3,120,8310,0,?)",
+            (STAMP,))
     with sqlite3.connect(enterprise_db) as conn:
         conn.executescript("""
             CREATE TABLE company(id INTEGER PRIMARY KEY,name TEXT,name_en TEXT,status TEXT,province TEXT,
@@ -100,6 +114,25 @@ def test_profile_merges_only_published_games_and_never_reads_credentials(public_
     assert "未验证档案" in game["category"]
     assert game["recent_minutes"] == 120 and game["total_minutes"] == 600
     assert "ENCRYPTED-BLOB" not in json.dumps(data, ensure_ascii=False)
+
+
+def test_profile_study_returns_only_published_aggregates(public_data):
+    study = public_data.profile("study", "", 8)["data"]["study"]
+    assert study["enabled"] is True
+    assert study["plan_words"] == 8315
+    assert study["today"]["finished"] == 10
+    assert study["trend"][-1]["day"] == "2026-11-09"
+    encoded = json.dumps(study, ensure_ascii=False)
+    assert "ENCRYPTED-MAIMEMO-TOKEN" not in encoded
+    assert "不是累计或已掌握词汇量" in encoded
+
+
+def test_profile_study_hides_when_not_published(public_data):
+    database = public_data.db_path
+    with sqlite3.connect(database) as conn:
+        conn.execute("UPDATE maimemo_config SET publish_enabled=0 WHERE id=1")
+    study = public_data.profile("study", "", 8)["data"]["study"]
+    assert study == {"enabled": False}
 
 
 def test_content_search_only_returns_published_and_rag_enabled(public_data):
