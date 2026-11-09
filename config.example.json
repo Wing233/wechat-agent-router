@@ -106,6 +106,14 @@
     "github_trending": {
       "db": "/data/github_trending.db",
       "count": 12
+    },
+    "music": {
+      "transport": "http",
+      "bridge_url": "http://host.docker.internal:18888",
+      "bridge_token": "REPLACE_MUSIC_BRIDGE_TOKEN",
+      "bin": "ncm-cli",
+      "timeout": 30,
+      "max_items": 20
     }
   },
   "jobs": {

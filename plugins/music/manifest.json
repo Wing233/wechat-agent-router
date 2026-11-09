@@ -1,0 +1,15 @@
+{
+  "id": "music",
+  "name": "网易云音乐只读",
+  "version": "1.0.0",
+  "api_version": "1",
+  "entry": "plugin.py",
+  "capabilities": ["tools"],
+  "permissions": [
+    "net:host.docker.internal",
+    "net:music-bridge",
+    "net:127.0.0.1",
+    "net:localhost"
+  ],
+  "description": "通过官方 ncm-cli 读取网易云音乐搜索、账号、歌单、推荐、歌词、云盘、播客和评论；仅只读，不含播放和写入"
+}
