@@ -37,6 +37,7 @@ fn load_static(app: &DesktopApp) -> HashMap<String, (Vec<u8>, &'static str)> {
     for (name, mime) in [
         ("index.html", "text/html; charset=utf-8"),
         ("app.js", "application/javascript; charset=utf-8"),
+        ("theme.js", "application/javascript; charset=utf-8"),
         ("styles.css", "text/css; charset=utf-8"),
         ("favicon.svg", "image/svg+xml"),
     ] {

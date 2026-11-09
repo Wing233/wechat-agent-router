@@ -35,6 +35,44 @@ const state = {
 
 const $ = (id) => document.getElementById(id);
 
+/* ------------------------------------------------------------------ theme */
+const THEME_KEY = "wechat-agent-theme";
+const themeMedia = window.matchMedia("(prefers-color-scheme: dark)");
+
+function applyTheme(theme, persist = true) {
+  const next = theme === "dark" ? "dark" : "light";
+  document.documentElement.dataset.theme = next;
+  if (persist) {
+    try { localStorage.setItem(THEME_KEY, next); } catch (error) { /* storage may be unavailable */ }
+  }
+  const button = $("theme-toggle");
+  if (button) {
+    const dark = next === "dark";
+    button.setAttribute("aria-pressed", String(dark));
+    button.setAttribute("aria-label", dark ? "切换到浅色模式" : "切换到夜间模式");
+    button.title = dark ? "切换到浅色模式" : "切换到夜间模式";
+  }
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.setAttribute("content", next === "dark" ? "#0b0b0d" : "#f5f5f7");
+}
+
+function initTheme() {
+  applyTheme(document.documentElement.dataset.theme === "dark" ? "dark" : "light", false);
+  const button = $("theme-toggle");
+  if (button) {
+    button.addEventListener("click", () => {
+      applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
+    });
+  }
+  const onSystemChange = (event) => {
+    let saved = null;
+    try { saved = localStorage.getItem(THEME_KEY); } catch (error) { /* ignore */ }
+    if (saved !== "dark" && saved !== "light") applyTheme(event.matches ? "dark" : "light", false);
+  };
+  if (themeMedia.addEventListener) themeMedia.addEventListener("change", onSystemChange);
+  else if (themeMedia.addListener) themeMedia.addListener(onSystemChange);
+}
+
 /* ------------------------------------------------------------------ helpers */
 function esc(value) {
   return String(value === undefined || value === null ? "" : value)
@@ -2240,4 +2278,5 @@ async function init() {
   }
 }
 
+initTheme();
 init();
