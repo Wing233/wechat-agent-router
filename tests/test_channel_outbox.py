@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from channels import ChannelManager
+from channel_windows import window_state
 from store import Store
 
 
@@ -56,6 +58,20 @@ def test_channel_window_tracks_inbound_and_releases_blocked(tmp_path: Path) -> N
     assert store.window_get("wechat", "owner")["last_checkin_at"] is not None
     store.window_inbound("wechat", "owner", platform="wechat", user_id="owner")
     assert store.window_get("wechat", "owner")["last_checkin_at"] is None
+
+
+def test_window_state_marks_checkin_due_before_expiry() -> None:
+    now = datetime.now(timezone.utc)
+    row = {"last_inbound_at": (now - timedelta(hours=23, minutes=30)).isoformat(timespec="seconds"),
+           "last_checkin_at": None}
+    state = window_state(row, now.timestamp())
+    assert state["open"] is True
+    assert state["checkin_due"] is True
+    row["last_checkin_at"] = now.isoformat(timespec="seconds")
+    assert window_state(row, now.timestamp())["checkin_due"] is False
+    row = {"last_inbound_at": (now - timedelta(hours=25)).isoformat(timespec="seconds"),
+           "last_checkin_at": None}
+    assert window_state(row, now.timestamp())["open"] is False
 
 
 def test_channel_manager_tracks_last_target(tmp_path: Path) -> None:
