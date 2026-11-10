@@ -1597,6 +1597,8 @@ def health():
 @app.post("/v1/notify")
 def notify(body: NotifyIn, request: Request):
     agent = auth_notify(request)
+    if body.expect_reply and agent["id"] == "service":
+        raise HTTPException(400, "notify service token cannot request a reply")
     if not body.text and not body.image_base64:
         raise HTTPException(400, "text or image_base64 required")
     text = body.text.strip()[:2000]

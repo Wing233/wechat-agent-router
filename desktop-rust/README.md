@@ -15,8 +15,17 @@
 
 ## 未完成
 
-- updater 已实现 GitHub Releases 检查；下载替换 exe 仍未实现
+- updater 已实现 GitHub Releases 检查、下载、SHA-256 校验、替换 exe 与失败回滚；发布时必须同时上传 `WeChatAgentDesktop.exe.sha256`，缺少校验值的版本会被拒绝安装
 - Tauri 窗口目前通过 loopback URL 打开 Web UI；如需关闭本地 HTTP，可把现有 `api()` 改为 Tauri invoke
+
+## 发布
+
+1. 确认 `Cargo.toml`、`Cargo.lock`、`tauri.conf.json` 与 `src/paths.rs` 的版本一致；
+2. 从该提交构建 `npx --yes @tauri-apps/cli@2 build`；
+3. 发布 `target/release/WeChatAgentDesktop.exe`、同名 `.sha256`、NSIS 安装包及其 `.sha256`；
+4. 打与版本一致的源码标签，并开启 GitHub immutable releases，避免发布后替换资产。
+
+1.3.7 发布记录：标签 `v1.3.7`（提交 `a8bfa67`），exe SHA-256 `7020382886e30d21d12df4b0c2ed9bff22fb6e271370faf65ee103554bc0f213`，release 为 immutable。
 
 ## 运行
 
