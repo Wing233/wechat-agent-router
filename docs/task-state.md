@@ -71,10 +71,14 @@ queued -> claimed -> running -> completed
 
 ### 结果只投递一次
 
-- Agent 调 `POST /agent/result` 时带 `task_id`、`ok`、`text`，可选 `lease_token`。
-- `complete_agent_task()` 写结果后 `delivered=0`；等待中的 `call_agent` 和 `/agent/result` 端点通过原子 `mark_agent_task_delivered()` 竞争，只有一个会真正发微信。
-- 等待超时的调用方不会消费结果；Agent 后续回传时端点会发送。
-- 已完成任务重复回传是幂等的，不会覆盖第一次结果。
+- Agent 调 `POST /agent/result` 时带 `task_id`、`ok`、`text`、`lease_token`，可选 `channel`、`chat_id`。
+- `complete_agent_task()` 在**同一条 UPDATE 语句**里校验 `status IN ('claimed','running') AND lease_token=?`，并在同一事务里向 `agent_deliveries` 写一条 `dedupe_key='agent-task:<task_id>'` 的待发记录。任务被重新排队后，旧执行端即使回传也会被拒绝，省略或伪造 lease 同样失败。
+- 发送由后台 `deliver_agent_results()` 完成：先原子领取 `pending` 行（`status='sending'` + 短期发送租约），发送成功后才写 `sent`；进程在“取出结果、发送前”退出，重启时 `recover_agent_deliveries()` 会把 `sending` 改回 `pending` 再重试。
+- 同步等待的 `call_agent` 与后台发送共用同一行：`claim_agent_delivery_inline()` 先把 `pending` 改成 `inline`，只有一个消费者能拿到结果，不会重复发。
+- 目标渠道和会话来自任务 payload（入站时记录的 `channel` / `chat_id`）。`wechat` / `hub` 走 Hub 直发；其他轮询渠道写入 `channel_outbox`，由对应桥接层拉取并 ack。
+- `POST /agent/result` 返回 `{"ok":..., "queued":..., "delivery":...}`；`queued=true` 表示结果已持久化、等待发送，不再表示“已经发出去”。
+- 留言通知 `/agent/notify` 也返回真实状态：`sent`（已发出）、`queued`（Hub 忙，已进重试队列）、`failed`（鉴权失败等，未入队）。
+- 已完成任务重复回传是幂等的，不会覆盖第一次结果，也不会生成第二条待发记录。
 
 ### Agent 侧接口
 
@@ -91,13 +95,15 @@ POST /agent/result                     {"task_id":"...", "ok":true, "text":"..."
 启动时：
 
 1. `store.recover_inbound()`：`processing` 入站消息改回 `pending`。
-2. `BROKER.recover()`：`claimed`/`running` 任务按 attempts 改回 `queued` 或 `failed`。
-3. 失败的 Agent 任务会发一条通知；排队的任务等 Agent 下次轮询领取。
-4. `last_message_id` 保持在最后一条 `done` 的位置，Hub 会重新投递未完成消息。
+2. `store.recover_agent_deliveries()`：`sending` 的结果投递改回 `pending`，重启后继续发送。
+3. `BROKER.recover()`：`claimed`/`running` 任务按 attempts 改回 `queued` 或 `failed`。
+4. 失败的 Agent 任务会发一条通知；排队的任务等 Agent 下次轮询领取。
+5. `last_message_id` 保持在最后一条 `done` 的位置，Hub 会重新投递未完成消息。
 
 ## 4. 已知边界
 
 - 入站和 Agent 任务都是 at-least-once。Agent 任务最好用 `task_id` 做幂等；本地 CLI 任务重复执行的风险由 Agent 侧控制。
+- 结果投递同样是 at-least-once：进程若在“发送成功、还没写 `sent`”之间崩溃，重启后可能再发一次；`dedupe_key` 只保证同一任务最多一条待发记录，不对下游做去重。
 - 本地 Agent 目前不在执行期间发 heartbeat；Router 默认 lease 30 分钟。超过 30 分钟的长任务建议在 Agent 侧加 heartbeat，或调大 `TASK_LEASE_SECONDS`。
 - `channel_inbound`（Koishi/QQ）目前仍按请求处理；如果桥接层会重复投递同一个 `message_id`，下一步可以复用 `claim_inbound` 做同样的去重。
 - 任务表保留 30 天；`list_agent_tasks` / `agent_task_counts` 可在管理接口或 SQL 里查看。

@@ -297,9 +297,15 @@ class AgentBridge:
         if retry_after:
             raise HTTPException(429, "rate limit exceeded",
                                 headers={"Retry-After": str(retry_after)})
-        ok = bool(notify(text))
-        self._audit("notify", {"agent": agent["id"], "ok": ok, "chars": len(text)})
-        return {"status": "sent" if ok else "failed", "queued": ok}
+        result = notify(text)
+        if isinstance(result, str):
+            status = result if result in {"sent", "queued", "failed"} else (
+                "sent" if result else "failed")
+        else:
+            status = "sent" if result else "failed"
+        self._audit("notify", {"agent": agent["id"], "status": status,
+                               "chars": len(text)})
+        return {"status": status, "queued": status == "queued"}
 
     def health(self) -> dict:
         return {

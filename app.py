@@ -249,34 +249,48 @@ def service_auth(request: Request) -> None:
         raise HTTPException(401, "invalid service token")
 
 
-def send_payload(payload: dict) -> bool:
+def send_payload_status(payload: dict) -> str:
+    """Send one payload and report what actually happened.
+
+    "sent"    delivered now
+    "queued"  persisted in the retry outbox (hub busy / rate limited)
+    "failed"  rejected or broken; callers must not claim it was queued
+    """
     try:
         if payload.get("kind") == "image":
             hub.send_image(payload["path"], payload.get("text", ""), payload.get("recipient"))
         else:
             hub.send_text(payload.get("text", ""), payload.get("recipient"))
-        return True
+        return "sent"
     except HubError as exc:
         if exc.status in (409, 503, 0):
             store.enqueue_outbox(payload)
             log.warning("hub send queued (%s): %s", exc.status, exc.message[:200])
-            return False
+            return "queued"
         if exc.status == 401:
             log.error("hub channel key rejected: %s", exc.message[:200])
-            return False
+            return "failed"
         log.error("hub send failed: %s", exc)
-        return False
+        return "failed"
 
 
-def send_text(text: str) -> bool:
+def send_payload(payload: dict) -> bool:
+    return send_payload_status(payload) in {"sent", "queued"}
+
+
+def send_text_status(text: str) -> str:
     traces.note_output(str(text))
     origin = ORIGIN.get()
     if origin is not None:
         collector = origin.get("collector")
         if collector is not None:
             collector.append(str(text))
-            return True
-    return send_payload({"kind": "text", "text": text, "recipient": OWNER})
+            return "sent"
+    return send_payload_status({"kind": "text", "text": text, "recipient": OWNER})
+
+
+def send_text(text: str) -> bool:
+    return send_text_status(text) != "failed"
 
 
 def flush_outbox() -> None:
@@ -296,6 +310,51 @@ def flush_outbox() -> None:
         except Exception:
             store.bump_outbox(item["id"])
             break
+
+
+def deliver_result_text(channel: str, chat_id: str, text: str,
+                        dedupe_key: str = "") -> str:
+    """Deliver an async result to the channel the task came from.
+
+    Hub channels (wechat/hub) send directly; polling channels reuse the
+    channel outbox so their own adapter owns the final send. Returns the same
+    sent/queued/failed vocabulary as send_payload_status.
+    """
+    if not text.strip():
+        return "sent"
+    if channel and channel not in {"wechat", "weixin", "hub"}:
+        store.enqueue_channel(channel, chat_id or OWNER, text,
+                              dedupe_key=dedupe_key)
+        return "queued"
+    payload = {"kind": "text", "text": text,
+               "recipient": chat_id or OWNER}
+    return send_payload_status(payload)
+
+
+def deliver_agent_results(limit: int = 10) -> int:
+    """Retry pending agent results; mark sent only after the send succeeds."""
+    sent = 0
+    for item in store.claim_agent_deliveries(limit):
+        try:
+            status = deliver_result_text(
+                str(item.get("channel") or ""),
+                str(item.get("chat_id") or ""),
+                str(item.get("text") or ""),
+                dedupe_key=str(item.get("dedupe_key") or ""))
+        except Exception as exc:
+            status = "failed"
+            log.warning("agent delivery %s raised: %s", item.get("dedupe_key"), exc)
+        if status in {"sent", "queued"}:
+            # "queued" is already durable in outbox/channel_outbox; keeping it
+            # here as well would send twice.
+            store.finish_agent_delivery(str(item["dedupe_key"]), True)
+            sent += 1
+        else:
+            retry = min(300, 10 * (2 ** min(int(item.get("attempts") or 1), 5)))
+            store.finish_agent_delivery(
+                str(item["dedupe_key"]), False,
+                error="delivery failed", retry_seconds=retry)
+    return sent
 
 
 def new_code() -> str:
@@ -337,7 +396,8 @@ def _call_agent_impl(agent: dict, payload: dict, timeout: int = 20) -> dict:
             "message": payload.get("reply", ""),
             "engine": payload.get("engine", ""),
             "workspace": payload.get("workspace", ""),
-            "chat_id": payload.get("chat_id", OWNER),
+            "channel": payload.get("channel") or (ORIGIN.get() or {}).get("channel") or "",
+            "chat_id": payload.get("chat_id") or (ORIGIN.get() or {}).get("chat_id") or OWNER,
             "meta": payload.get("meta") or {},
             "wait_seconds": wait_seconds,
         }, wait_seconds if online else 0)
@@ -1424,6 +1484,7 @@ async def maintenance_loop() -> None:
             # event loop so inbound polling and agent heartbeats stay responsive.
             await asyncio.to_thread(store.expire_stale)
             await asyncio.to_thread(flush_outbox)
+            await asyncio.to_thread(deliver_agent_results)
             failed_tasks = await asyncio.to_thread(BROKER.requeue_expired)
             for task in failed_tasks:
                 await asyncio.to_thread(
@@ -1484,6 +1545,7 @@ class NotifyIn(BaseModel):
 async def lifespan(_: FastAPI):
     store.init()
     store.recover_inbound()
+    store.recover_agent_deliveries()
     failed_tasks = BROKER.recover()
     for task in failed_tasks:
         send_text(
@@ -1589,14 +1651,21 @@ async def agent_result(request: Request):
     if not task_id:
         raise HTTPException(400, "task_id required")
     text = str(body.get("text") or "")
+    task = store.get_agent_task(task_id) or {}
+    payload = task.get("payload") or {}
+    channel = str(body.get("channel") or payload.get("channel") or "")
+    chat_id = str(body.get("chat_id") or payload.get("chat_id") or "")
     ok = BROKER.complete(
         task_id, bool(body.get("ok")), text,
         agent_id=agent["id"],
-        lease_token=str(body.get("lease_token") or ""))
-    delivered = BROKER.claim_delivery(task_id) if ok else False
-    if delivered:
-        send_agent_result({"text": text, "final": True})
-    return {"ok": ok, "delivered": delivered}
+        lease_token=str(body.get("lease_token") or ""),
+        channel=channel, chat_id=chat_id)
+    # The result is already durably queued in the same transaction as the
+    # task status; the delivery loop sends it and retries after a restart.
+    pending = store.pending_agent_delivery(task_id) if ok else None
+    delivery_status = (pending or {}).get("status", "")
+    return {"ok": ok, "queued": delivery_status == "pending",
+            "delivery": delivery_status}
 
 
 @app.post("/agent/tasks/{task_id}/heartbeat")
@@ -2316,7 +2385,7 @@ async def login_submit_alias(request: Request, service: str, token: str = ""):
 sso_routes.register(app, CFG, SETTINGS, _koishi_page)
 
 # Narrow read-only tool bridge for the lyph site agent.
-agent_bridge.register(app)
+agent_bridge.register(app, notify=send_text_status)
 
 # OpenAI-compatible free-model gateway for lyph's chat backend.
 import openai_compat

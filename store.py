@@ -192,6 +192,27 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
 );
 CREATE INDEX IF NOT EXISTS agent_tasks_agent ON agent_tasks(agent_id, status, created_at);
 CREATE INDEX IF NOT EXISTS agent_tasks_status ON agent_tasks(status, lease_until);
+
+-- Durable result deliveries. A task completion writes exactly one row here in
+-- the same transaction as the status change, so a crash between "result saved"
+-- and "message sent" can always be retried after restart.
+CREATE TABLE IF NOT EXISTS agent_deliveries (
+  dedupe_key TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL DEFAULT '',
+  channel TEXT NOT NULL DEFAULT '',
+  chat_id TEXT NOT NULL DEFAULT '',
+  text TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'pending',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at TEXT,
+  lease_token TEXT NOT NULL DEFAULT '',
+  lease_until TEXT,
+  created_at TEXT NOT NULL,
+  sent_at TEXT,
+  error TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS agent_deliveries_pending
+  ON agent_deliveries(status, next_attempt_at, created_at);
 """
 
 
@@ -228,6 +249,13 @@ class Store:
                     conn.execute(
                         f"ALTER TABLE channel_outbox ADD COLUMN {name} "
                         "TEXT NOT NULL DEFAULT ''")
+            if "dedupe_key" not in columns:
+                conn.execute(
+                    "ALTER TABLE channel_outbox ADD COLUMN dedupe_key "
+                    "TEXT NOT NULL DEFAULT ''")
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS channel_outbox_dedupe "
+                "ON channel_outbox(dedupe_key) WHERE dedupe_key != ''")
 
     # --- generic state -------------------------------------------------
     def state_get(self, key: str, default: str = "") -> str:
@@ -390,14 +418,16 @@ class Store:
     def enqueue_channel(self, channel_id: str, chat_id: str, text: str, *,
                         platform: str = "", user_id: str = "",
                         media_type: str = "", media_path: str = "",
-                        status: str = "pending") -> int:
+                        status: str = "pending", dedupe_key: str = "") -> int:
         with self._conn() as conn:
             cursor = conn.execute(
-                "INSERT INTO channel_outbox(channel_id,platform,chat_id,user_id,text,"
-                "media_type,media_path,status,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                "INSERT OR IGNORE INTO channel_outbox(channel_id,platform,chat_id,"
+                "user_id,text,media_type,media_path,status,dedupe_key,created_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (str(channel_id)[:40], str(platform)[:40], str(chat_id)[:200],
                  str(user_id)[:200], str(text)[:8000], str(media_type)[:20],
-                 str(media_path)[:400], str(status)[:20], now_iso()),
+                 str(media_path)[:400], str(status)[:20], str(dedupe_key)[:200],
+                 now_iso()),
             )
             return int(cursor.lastrowid)
 
@@ -942,7 +972,9 @@ class Store:
 
     def complete_agent_task(self, task_id: str, ok: bool, text: str,
                             *, agent_id: str = "",
-                            lease_token: str = "") -> bool:
+                            lease_token: str = "",
+                            channel: str = "",
+                            chat_id: str = "") -> bool:
         now = now_iso()
         with self._conn() as conn:
             row = conn.execute(
@@ -953,25 +985,120 @@ class Store:
             if agent_id and item["agent_id"] != agent_id:
                 return False
             if item["status"] in {"completed", "failed", "expired", "cancelled"}:
+                # Idempotent retry from the worker that already won the race.
                 return True
-            # An in-flight task can only be completed by the holder of the
-            # current lease. Omitting the lease (or sending a stale one) is not
-            # enough, so a requeued task cannot be finished by the old worker.
-            if item["status"] in {"claimed", "running"}:
-                if (not lease_token or not item.get("lease_token")
-                        or lease_token != item["lease_token"]):
-                    return False
+            # The lease check and the state transition are one statement, so a
+            # task requeued after an expired lease can never be completed by
+            # the previous worker.
             status = "completed" if ok else "failed"
             result = json.dumps({"ok": bool(ok), "text": str(text)[:8000]},
                                 ensure_ascii=False)
             cursor = conn.execute(
                 "UPDATE agent_tasks SET status=?,result_json=?,error=?,"
                 "lease_token='',lease_until=NULL,delivered=0,updated_at=?,"
-                "completed_at=? WHERE id=?",
-                (status, result, "" if ok else str(text)[:2000], now, now, task_id))
+                "completed_at=? "
+                "WHERE id=? AND status IN ('claimed','running') AND lease_token=?",
+                (status, result, "" if ok else str(text)[:2000], now, now,
+                 task_id, lease_token))
             if cursor.rowcount != 1:
                 return False
+            # Enqueue the result in the same transaction as the status change.
+            # The dedupe key makes a duplicate completion a no-op.
+            if str(text).strip():
+                conn.execute(
+                    "INSERT OR IGNORE INTO agent_deliveries("
+                    "dedupe_key,task_id,channel,chat_id,text,status,attempts,"
+                    "next_attempt_at,created_at) VALUES(?,?,?,?,?,'pending',0,?,?)",
+                    (f"agent-task:{task_id}", task_id, str(channel)[:40],
+                     str(chat_id)[:200], str(text)[:8000], now, now))
         return True
+
+    def claim_agent_delivery_inline(self, task_id: str) -> bool:
+        """Hand a just-finished result to the synchronous caller, exactly once."""
+        with self._conn() as conn:
+            cursor = conn.execute(
+                "UPDATE agent_deliveries SET status='inline',sent_at=?,"
+                "lease_token='',lease_until=NULL "
+                "WHERE dedupe_key=? AND status='pending'",
+                (now_iso(), f"agent-task:{task_id}"))
+            if int(cursor.rowcount or 0) == 1:
+                conn.execute(
+                    "UPDATE agent_tasks SET delivered=1 WHERE id=?", (task_id,))
+                return True
+            has_delivery = conn.execute(
+                "SELECT 1 FROM agent_deliveries WHERE dedupe_key=?",
+                (f"agent-task:{task_id}",)).fetchone()
+            if has_delivery:
+                return False
+            # No delivery row means the result text was empty; still let the
+            # caller wake up once.
+            delivered = conn.execute(
+                "UPDATE agent_tasks SET delivered=1 WHERE id=? AND delivered=0",
+                (task_id,))
+            return int(delivered.rowcount or 0) == 1
+
+    def claim_agent_deliveries(self, limit: int = 10,
+                               lease_seconds: int = 120) -> list[dict]:
+        """Atomically take pending deliveries with a short sender lease."""
+        now = now_iso()
+        lease_until = (datetime.now(timezone.utc)
+                       + timedelta(seconds=max(30, int(lease_seconds)))
+                       ).isoformat(timespec="seconds")
+        claimed: list[dict] = []
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM agent_deliveries WHERE status='pending' "
+                "AND (next_attempt_at IS NULL OR next_attempt_at<=?) "
+                "ORDER BY created_at LIMIT ?", (now, max(1, int(limit)))).fetchall()
+            for row in rows:
+                token = uuid.uuid4().hex
+                cursor = conn.execute(
+                    "UPDATE agent_deliveries SET status='sending',lease_token=?,"
+                    "lease_until=?,attempts=attempts+1 "
+                    "WHERE dedupe_key=? AND status='pending'",
+                    (token, lease_until, row["dedupe_key"]))
+                if int(cursor.rowcount or 0) != 1:
+                    continue
+                item = dict(row)
+                item["lease_token"] = token
+                claimed.append(item)
+        return claimed
+
+    def finish_agent_delivery(self, dedupe_key: str, ok: bool, *,
+                              error: str = "", retry_seconds: int = 0) -> bool:
+        now = now_iso()
+        with self._conn() as conn:
+            if ok:
+                cursor = conn.execute(
+                    "UPDATE agent_deliveries SET status='sent',sent_at=?,error='',"
+                    "lease_token='',lease_until=NULL "
+                    "WHERE dedupe_key=? AND status='sending'",
+                    (now, dedupe_key))
+            else:
+                retry_at = (datetime.now(timezone.utc)
+                            + timedelta(seconds=max(0, int(retry_seconds)))
+                            ).isoformat(timespec="seconds")
+                cursor = conn.execute(
+                    "UPDATE agent_deliveries SET status='pending',"
+                    "next_attempt_at=?,error=?,lease_token='',lease_until=NULL "
+                    "WHERE dedupe_key=? AND status='sending'",
+                    (retry_at, str(error)[:500], dedupe_key))
+            return int(cursor.rowcount or 0) == 1
+
+    def recover_agent_deliveries(self) -> int:
+        """On startup, put interrupted sends back in the queue."""
+        with self._conn() as conn:
+            cursor = conn.execute(
+                "UPDATE agent_deliveries SET status='pending',lease_token='',"
+                "lease_until=NULL WHERE status='sending'")
+            return int(cursor.rowcount or 0)
+
+    def pending_agent_delivery(self, task_id: str) -> dict | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM agent_deliveries WHERE dedupe_key=?",
+                (f"agent-task:{task_id}",)).fetchone()
+        return dict(row) if row else None
 
     def mark_agent_task_delivered(self, task_id: str) -> bool:
         with self._conn() as conn:

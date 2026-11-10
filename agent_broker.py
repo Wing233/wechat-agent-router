@@ -71,11 +71,13 @@ class AgentBroker:
         }
 
     def complete(self, task_id: str, ok: bool, text: str, *,
-                 agent_id: str = "", lease_token: str = "") -> bool:
+                 agent_id: str = "", lease_token: str = "",
+                 channel: str = "", chat_id: str = "") -> bool:
         if self.store is None:
             return False
         updated = self.store.complete_agent_task(
-            task_id, ok, text, agent_id=agent_id, lease_token=lease_token)
+            task_id, ok, text, agent_id=agent_id, lease_token=lease_token,
+            channel=channel, chat_id=chat_id)
         if not updated:
             return False
         with self._lock:
@@ -85,7 +87,9 @@ class AgentBroker:
         return True
 
     def claim_delivery(self, task_id: str) -> bool:
-        return bool(self.store and self.store.mark_agent_task_delivered(task_id))
+        # Only the waiter that still owns the pending row may return the text
+        # inline; the background sender must not send it as well.
+        return bool(self.store and self.store.claim_agent_delivery_inline(task_id))
 
     def heartbeat(self, task_id: str, lease_token: str, *, agent_id: str = "") -> bool:
         return bool(self.store and self.store.heartbeat_agent_task(
