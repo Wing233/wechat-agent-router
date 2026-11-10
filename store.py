@@ -954,16 +954,23 @@ class Store:
                 return False
             if item["status"] in {"completed", "failed", "expired", "cancelled"}:
                 return True
-            if lease_token and item["lease_token"] and lease_token != item["lease_token"]:
-                return False
+            # An in-flight task can only be completed by the holder of the
+            # current lease. Omitting the lease (or sending a stale one) is not
+            # enough, so a requeued task cannot be finished by the old worker.
+            if item["status"] in {"claimed", "running"}:
+                if (not lease_token or not item.get("lease_token")
+                        or lease_token != item["lease_token"]):
+                    return False
             status = "completed" if ok else "failed"
             result = json.dumps({"ok": bool(ok), "text": str(text)[:8000]},
                                 ensure_ascii=False)
-            conn.execute(
+            cursor = conn.execute(
                 "UPDATE agent_tasks SET status=?,result_json=?,error=?,"
                 "lease_token='',lease_until=NULL,delivered=0,updated_at=?,"
                 "completed_at=? WHERE id=?",
                 (status, result, "" if ok else str(text)[:2000], now, now, task_id))
+            if cursor.rowcount != 1:
+                return False
         return True
 
     def mark_agent_task_delivered(self, task_id: str) -> bool:

@@ -152,6 +152,9 @@ pub fn apply() -> serde_json::Value {
         if exe_url.is_empty() {
             return json!({"started": false, "error": "请先检查更新"});
         }
+        if sha_url.is_empty() {
+            return json!({"started": false, "error": "更新包缺少校验值，拒绝安装"});
+        }
         set_state(json!({
             "state": "downloading",
             "progress": 0.0,
@@ -248,11 +251,12 @@ fn download_and_install(exe: &std::path::Path, exe_url: &str, sha_url: &str) -> 
     if !bytes.starts_with(b"MZ") {
         anyhow::bail!("下载文件不是有效的 Windows 程序");
     }
-    if !expected.is_empty() {
-        let digest = sha256_hex(&bytes);
-        if digest != expected {
-            anyhow::bail!("下载文件校验失败，请重试");
-        }
+    if expected.is_empty() {
+        anyhow::bail!("更新包缺少校验值，拒绝安装");
+    }
+    let digest = sha256_hex(&bytes);
+    if digest != expected {
+        anyhow::bail!("下载文件校验失败，请重试");
     }
     let script = updater_script(exe);
     {
@@ -298,6 +302,7 @@ for /L %%i in (1,1,20) do (
 goto done
 :replace
 move /Y "%NEW%" "%EXE%" >nul 2>nul
+if not exist "%EXE%" if exist "%BAK%" move /Y "%BAK%" "%EXE%" >nul 2>nul
 timeout /t 2 /nobreak >nul
 start "" /D "%DIR%" "%EXE%"
 :done

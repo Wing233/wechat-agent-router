@@ -286,6 +286,21 @@ class AgentBridge:
                  tool, agent["id"], audit_detail.get("ok"), elapsed_ms)
         return payload
 
+    async def notify(self, request: Request, notify: Callable[[str], bool]) -> dict:
+        agent = self._authenticate(request)
+        payload = await self._arguments(request)
+        text = str(payload.get("text") or "").strip()
+        if not text:
+            raise HTTPException(400, "text required")
+        text = text[:2000]
+        retry_after = self.limiter.hit(str(agent["id"]))
+        if retry_after:
+            raise HTTPException(429, "rate limit exceeded",
+                                headers={"Retry-After": str(retry_after)})
+        ok = bool(notify(text))
+        self._audit("notify", {"agent": agent["id"], "ok": ok, "chars": len(text)})
+        return {"status": "sent" if ok else "failed", "queued": ok}
+
     def health(self) -> dict:
         return {
             "ok": True,
@@ -300,6 +315,7 @@ class AgentBridge:
 def register(app: FastAPI, *, config: dict | None = None, tools=None,
              audit: Callable[[str, dict], None] | None = None,
              allowed_agents: list[str] | None = None,
+             notify: Callable[[str], bool] | None = None,
              clock: Callable[[], float] = time.monotonic) -> AgentBridge:
     """Attach ``POST /agent/tools/{tool}`` and ``GET /agent/health``.
 
@@ -323,6 +339,10 @@ def register(app: FastAPI, *, config: dict | None = None, tools=None,
         tools = host.TOOLS
     if audit is None and host is not None:
         audit = _store_audit(host.store)
+    if notify is None and host is not None:
+        notify = getattr(host, "send_text", None)
+    if notify is None:
+        notify = lambda _text: False
 
     ids = allowed_agents
     if ids is None:
@@ -348,6 +368,10 @@ def register(app: FastAPI, *, config: dict | None = None, tools=None,
     @app.post("/agent/tools/{tool}")
     async def agent_tool(tool: str, request: Request):
         return await bridge.handle(tool, request)
+
+    @app.post("/agent/notify")
+    async def agent_notify(request: Request):
+        return await bridge.notify(request, notify)
 
     @app.get("/agent/health")
     def agent_health():
