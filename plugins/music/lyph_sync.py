@@ -10,12 +10,15 @@ directly.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from datetime import datetime
 from pathlib import Path
 
 import requests
 import sso_auth
+
+log = logging.getLogger("plugin.music.sync")
 
 
 def _data(payload):
@@ -124,11 +127,19 @@ class LyphSync:
             response.raise_for_status()
             payload = response.json()
             site = payload["site"]
+            interests = site.get("interests") or []
             existing = [
-                item for item in (site.get("interests") or [])
+                item for item in interests
                 if isinstance(item, dict)
                 and not str(item.get("id") or "").startswith("ncm-history-")
             ]
+            existing_music = [
+                item for item in interests
+                if isinstance(item, dict)
+                and str(item.get("id") or "").startswith("ncm-history-")
+            ]
+            if existing_music == entries:
+                return {"updated": 0, "unchanged": True, "total": len(interests)}
             if len(existing) + len(entries) > 100:
                 raise RuntimeError("lyph interests would exceed 100 entries")
             site["interests"] = existing + entries
@@ -257,6 +268,8 @@ class MusicSync:
                 continue
             seen.add(key)
             unique.append(item)
+        if not unique:
+            raise RuntimeError("no liked songs returned; keeping the existing knowledge source")
         data = _markdown(unique).encode("utf-8")
         result = self.lyph.replace_knowledge(
             self.knowledge_filename, data,
@@ -268,11 +281,19 @@ class MusicSync:
 
     def run(self, store) -> dict:
         self.lyph.auth()
-        recent = self.sync_recent()
+        try:
+            recent = self.sync_recent()
+        except Exception as exc:
+            log.exception("music recent sync failed")
+            recent = {"error": str(exc)[:300]}
         now = time.time()
         last = float(store.state_get("music:last_liked_sync") or 0)
         liked = {"skipped": "not due"}
         if now - last >= self.liked_interval_seconds:
-            liked = self.sync_liked()
-            store.state_set("music:last_liked_sync", str(now))
+            try:
+                liked = self.sync_liked()
+                store.state_set("music:last_liked_sync", str(now))
+            except Exception as exc:
+                log.exception("music liked sync failed")
+                liked = {"error": str(exc)[:300]}
         return {"recent": recent, "liked": liked}
