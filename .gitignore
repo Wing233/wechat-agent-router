@@ -25,6 +25,7 @@ desktop/*.spec
 # Rust desktop build artifacts
 desktop-rust/target/
 desktop-rust/gen/
+desktop-rust/dist-*/
 desktop-rust/*.log
 desktop-rust/*.err.log
 
