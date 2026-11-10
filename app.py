@@ -260,7 +260,7 @@ def auth_notify(request: Request) -> dict:
     except HTTPException:
         token = service_tokens.from_request(request)
         if service_tokens.match(token, SERVICE_TOKENS.get("notify", "")):
-            return {"id": "service", "name": "service", "api_key": ""}
+            return {"id": "service", "name": "系统通知", "api_key": ""}
         raise
 
 

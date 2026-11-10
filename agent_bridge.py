@@ -298,7 +298,7 @@ class AgentBridge:
             token = service_tokens.from_request(request)
             if not service_tokens.match(token, self.notify_token):
                 raise
-            agent = {"id": "service", "name": "service"}
+            agent = {"id": "service", "name": "系统通知"}
         payload = await self._arguments(request)
         text = str(payload.get("text") or "").strip()
         if not text:
