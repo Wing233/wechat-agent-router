@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 pub const APP_NAME: &str = "WeChatAgentDesktop";
-pub const VERSION: &str = "1.3.7";
+pub const VERSION: &str = "1.3.8";
 
 pub fn data_dir() -> PathBuf {
     if let Some(path) = std::env::var_os("WECHAT_AGENT_DATA") {

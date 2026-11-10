@@ -132,6 +132,37 @@ pub fn check() -> serde_json::Value {
     }
 }
 
+fn begin_download() -> Result<serde_json::Value, serde_json::Value> {
+    let state = STATE.lock().unwrap();
+    if state.get("state").and_then(|value| value.as_str()) == Some("downloading")
+        || state.get("state").and_then(|value| value.as_str()) == Some("applying")
+    {
+        return Err(json!({"started": false, "error": "更新正在进行"}));
+    }
+    let exe_url = state.get("exe_url").and_then(|value| value.as_str()).unwrap_or("").to_string();
+    let sha_url = state.get("sha_url").and_then(|value| value.as_str()).unwrap_or("").to_string();
+    if exe_url.is_empty() {
+        return Err(json!({"started": false, "error": "请先检查更新"}));
+    }
+    if sha_url.is_empty() {
+        return Err(json!({"started": false, "error": "更新包缺少校验值，拒绝安装"}));
+    }
+    Ok(json!({
+        "state": "downloading",
+        "progress": 0.0,
+        "error": "",
+        "current": crate::paths::VERSION,
+        "latest": state.get("latest"),
+        "tag": state.get("tag"),
+        "available": state.get("available"),
+        "relation": state.get("relation"),
+        "exe_url": exe_url,
+        "sha_url": sha_url,
+        "size": state.get("size").cloned().unwrap_or(json!(0)),
+        "checked_at": state.get("checked_at").cloned().unwrap_or(json!(0))
+    }))
+}
+
 pub fn apply() -> serde_json::Value {
     let exe = match std::env::current_exe() {
         Ok(exe) => exe,
@@ -140,36 +171,14 @@ pub fn apply() -> serde_json::Value {
     if !exe.file_name().map(|name| name.to_string_lossy().eq_ignore_ascii_case("WeChatAgentDesktop.exe")).unwrap_or(false) {
         return json!({"started": false, "error": "源码模式不支持自动更新，请下载最新 exe"});
     }
-    {
-        let state = STATE.lock().unwrap();
-        if state.get("state").and_then(|value| value.as_str()) == Some("downloading")
-            || state.get("state").and_then(|value| value.as_str()) == Some("applying")
-        {
-            return json!({"started": false, "error": "更新正在进行"});
-        }
-        let exe_url = state.get("exe_url").and_then(|value| value.as_str()).unwrap_or("").to_string();
-        let sha_url = state.get("sha_url").and_then(|value| value.as_str()).unwrap_or("").to_string();
-        if exe_url.is_empty() {
-            return json!({"started": false, "error": "请先检查更新"});
-        }
-        if sha_url.is_empty() {
-            return json!({"started": false, "error": "更新包缺少校验值，拒绝安装"});
-        }
-        set_state(json!({
-            "state": "downloading",
-            "progress": 0.0,
-            "error": "",
-            "current": crate::paths::VERSION,
-            "latest": state.get("latest"),
-            "tag": state.get("tag"),
-            "available": state.get("available"),
-            "relation": state.get("relation"),
-            "exe_url": exe_url,
-            "sha_url": sha_url,
-            "size": state.get("size").cloned().unwrap_or(json!(0)),
-            "checked_at": state.get("checked_at").cloned().unwrap_or(json!(0))
-        }));
-    }
+    // The guard is released by begin_download before set_state; locking the
+    // same mutex twice here deadlocks the single local-API thread and leaves
+    // the UI permanently unresponsive.
+    let next = match begin_download() {
+        Ok(next) => next,
+        Err(error) => return error,
+    };
+    set_state(next);
     std::thread::spawn(move || {
         if let Err(error) = download_and_install(&exe, &exe_url_value(), &sha_url_value()) {
             set_state_with_error(&error.to_string());
@@ -311,3 +320,33 @@ del "%~f0"
     let _ = std::fs::write(&script, content);
     script
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn begin_download_does_not_hold_the_state_lock() {
+        set_state(json!({
+            "state": "idle",
+            "exe_url": "https://example.com/app.exe",
+            "sha_url": "https://example.com/app.exe.sha256",
+            "latest": "1.3.8"
+        }));
+        let next = begin_download().expect("valid state must start a download");
+        assert_eq!(next["state"], "downloading");
+        // set_state locks the same mutex; this would deadlock if begin_download
+        // still held the guard.
+        set_state(next);
+        assert_eq!(status()["state"], "downloading");
+
+        let busy = begin_download().unwrap_err();
+        assert!(busy["error"].as_str().unwrap_or("").contains("更新正在进行"));
+
+        set_state(json!({"state": "idle", "exe_url": "https://example.com/app.exe"}));
+        let missing = begin_download().unwrap_err();
+        assert!(missing["error"].as_str().unwrap_or("").contains("校验值"));
+        set_state(serde_json::Value::Null);
+    }
+}
+
