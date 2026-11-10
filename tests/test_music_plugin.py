@@ -110,6 +110,25 @@ class FakeClient:
         raise AssertionError(f"unexpected args: {args}")
 
 
+class FakeJobs:
+    def __init__(self):
+        self.jobs = []
+
+    def register(self, job):
+        self.jobs.append(job)
+
+
+class FakeStore:
+    def __init__(self):
+        self.state = {}
+
+    def state_get(self, key, default=""):
+        return self.state.get(key, default)
+
+    def state_set(self, key, value):
+        self.state[key] = value
+
+
 class Ctx:
     def __init__(self):
         self.config = {"transport": "cli", "max_items": 20}
@@ -117,9 +136,16 @@ class Ctx:
         self.log = logging.getLogger("test.music")
         self.registry = ToolRegistry()
         self.tools = ToolRegistrar(self.registry, "music")
+        self.jobs = FakeJobs()
+        self.store = FakeStore()
 
     def http_request(self, *_args, **_kwargs):
         raise AssertionError("http_request should not be used in CLI tests")
+
+    def resource(self, name):
+        if name == "store":
+            return self.store
+        raise KeyError(name)
 
     def on_unload(self, _fn):
         pass
@@ -176,3 +202,95 @@ def test_music_error_is_reported(monkeypatch):
     result = ctx.registry.execute("music__user_profile", {})
     assert result["ok"] is False
     assert result["error"]["code"] == "login_required"
+
+
+def test_sync_job_is_registered(monkeypatch):
+    class FakeLyph:
+        def __init__(self, **_kwargs):
+            pass
+
+    class FakeSync:
+        def __init__(self, **_kwargs):
+            pass
+
+        def run(self, _store):
+            return {"recent": {}, "liked": {}}
+
+    monkeypatch.setattr(music_plugin, "LyphSync", FakeLyph)
+    monkeypatch.setattr(music_plugin, "MusicSync", FakeSync)
+    ctx = Ctx()
+    ctx.config = {
+        "transport": "cli",
+        "max_items": 20,
+        "sync_enabled": True,
+        "liked_interval_days": 7,
+    }
+    music_plugin.apply(ctx)
+    assert [job.id for job in ctx.jobs.jobs] == ["music_sync"]
+    assert ctx.store.state_get("music:last_liked_sync")
+
+
+def test_sync_recent_maps_history_to_interests():
+    from plugins.music.lyph_sync import MusicSync
+
+    class FakeTools:
+        def recent_history(self, _args):
+            return {"items": [{
+                "name": "泥沼地带",
+                "artists": ["项亚蕻"],
+                "album": "泥沼地带",
+                "original_id": 1395070574,
+                "url": "https://music.163.com/#/song?id=1395070574",
+            }]}
+
+    class FakeLyph:
+        def __init__(self):
+            self.entries = None
+
+        def update_interests(self, entries):
+            self.entries = entries
+            return {"updated": len(entries)}
+
+    lyph = FakeLyph()
+    sync = MusicSync(client=None, tools=FakeTools(), lyph=lyph, recent_limit=10)
+    result = sync.sync_recent()
+    assert result["updated"] == 1
+    assert lyph.entries[0]["id"] == "ncm-history-1395070574"
+    assert "网易云音乐最近播放" in lyph.entries[0]["description"]
+
+
+def test_sync_liked_builds_markdown_and_keeps_old_source_on_failure():
+    from plugins.music.lyph_sync import MusicSync
+
+    class FakeClient:
+        def call(self, args):
+            if args[:2] == ["user", "favorite"]:
+                return {"code": 200, "data": {"id": "FAV", "trackCount": 2}}
+            if args[:2] == ["playlist", "tracks"]:
+                return {"code": 200, "data": [
+                    {"name": "泥沼地带", "id": "ENC1", "originalId": 1395070574,
+                     "artists": [{"name": "项亚蕻"}], "album": {"name": "泥沼地带"},
+                     "duration": 240000, "visible": True},
+                    {"name": "蝉想", "id": "ENC2", "originalId": 2620912906,
+                     "artists": [{"name": "苏打绿"}], "album": {"name": "夏／狂热"},
+                     "duration": 299000, "visible": True},
+                ]}
+            raise AssertionError(args)
+
+    class FakeLyph:
+        def __init__(self):
+            self.filename = None
+            self.data = None
+
+        def replace_knowledge(self, filename, data, **_kwargs):
+            self.filename = filename
+            self.data = data
+            return {"source_id": "new"}
+
+    lyph = FakeLyph()
+    sync = MusicSync(client=FakeClient(), tools=None, lyph=lyph)
+    result = sync.sync_liked()
+    assert result["songs"] == 2
+    text = lyph.data.decode("utf-8")
+    assert "泥沼地带" in text and "蝉想" in text
+    assert "https://music.163.com/#/song?id=1395070574" in text

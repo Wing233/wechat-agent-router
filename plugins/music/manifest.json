@@ -4,8 +4,9 @@
   "version": "1.0.0",
   "api_version": "1",
   "entry": "plugin.py",
-  "capabilities": ["tools"],
+  "capabilities": ["tools", "jobs"],
   "permissions": [
+    "db:router",
     "net:host.docker.internal",
     "net:music-bridge",
     "net:127.0.0.1",

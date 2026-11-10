@@ -113,7 +113,15 @@
       "bridge_token": "REPLACE_MUSIC_BRIDGE_TOKEN",
       "bin": "ncm-cli",
       "timeout": 30,
-      "max_items": 20
+      "max_items": 20,
+      "sync_enabled": true,
+      "liked_interval_days": 7,
+      "recent_limit": 10,
+      "knowledge_filename": "netease-liked-songs.md",
+      "knowledge_visibility": "public",
+      "knowledge_rag": true,
+      "lyph_api_url": "http://api-internal:8000",
+      "lyph_origin": "https://123.57.153.49"
     }
   },
   "jobs": {

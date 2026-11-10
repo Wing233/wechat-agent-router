@@ -10,7 +10,10 @@ import logging
 import time
 from datetime import datetime, timezone
 
+from registry import Job
+
 from .client import MusicClient, MusicError
+from .lyph_sync import LyphSync, MusicSync
 
 log = logging.getLogger("plugin.music")
 
@@ -428,6 +431,41 @@ def apply(ctx) -> None:
     tools = MusicTools(client, max_items)
     log.info("music ready transport=%s bin=%s bridge=%s",
              transport, cfg.get("bin") or "ncm-cli", cfg.get("bridge_url") or "-")
+
+    if bool(cfg.get("sync_enabled", False)):
+        try:
+            lyph = LyphSync(
+                config_path=str(cfg.get("router_config_path") or "/app/config.json"),
+                api_url=str(cfg.get("lyph_api_url") or "http://api-internal:8000"),
+                origin=str(cfg.get("lyph_origin") or "https://123.57.153.49"),
+                timeout=int(cfg.get("timeout") or 30),
+            )
+            sync = MusicSync(
+                client=client,
+                tools=tools,
+                lyph=lyph,
+                recent_limit=int(cfg.get("recent_limit") or 10),
+                knowledge_filename=str(cfg.get("knowledge_filename") or "netease-liked-songs.md"),
+                knowledge_visibility=str(cfg.get("knowledge_visibility") or "public"),
+                knowledge_rag=bool(cfg.get("knowledge_rag", True)),
+                liked_interval_days=int(cfg.get("liked_interval_days") or 7),
+            )
+            store = ctx.resource("store")
+            if not store.state_get("music:last_liked_sync"):
+                store.state_set("music:last_liked_sync", str(time.time()))
+            ctx.jobs.register(Job(
+                id="music_sync",
+                interval_minutes=60,
+                handler=lambda: sync.run(store),
+                enabled=True,
+                skip_empty=False,
+                window_minutes=60,
+                meta={"type": "sync", "plugin": "music"},
+            ))
+            log.info("music sync registered hourly; liked interval=%s days",
+                     int(cfg.get("liked_interval_days") or 7))
+        except Exception:
+            log.exception("music sync setup failed; read-only tools remain available")
 
     registrations = (
         ("search",

@@ -94,6 +94,38 @@ Router 本机直接运行 CLI 时：
 
 `bridge_url` 使用其他主机时，需要把该主机加入 `plugins/music/manifest.json` 的 `permissions`（`net:<host>`）。
 
+## 定时同步
+
+配置 `sync_enabled=true` 后，插件注册 Router 任务 `music_sync`，每小时运行一次：
+
+- **每小时**：读取最近播放 10 首，替换 lyph 爱好里 `ncm-history-*` 条目
+- **每 7 天**：重新抓取完整红心歌单，上传新的 `netease-liked-songs.md`，等新来源 `ready` 后再删除旧来源
+- 同步状态保存在 Router 的 `music:last_liked_sync`
+- 写入 lyph 走后台 SSO + Admin API，不直接写 SQLite
+- 红心同步失败时保留旧知识来源；最近播放为空时不会清空旧爱好
+
+相关配置：
+
+```json
+{
+  "sync_enabled": true,
+  "liked_interval_days": 7,
+  "recent_limit": 10,
+  "knowledge_filename": "netease-liked-songs.md",
+  "knowledge_visibility": "public",
+  "knowledge_rag": true,
+  "lyph_api_url": "http://api-internal:8000",
+  "lyph_origin": "https://123.57.153.49"
+}
+```
+
+手动触发：
+
+```bash
+curl -X POST http://127.0.0.1:9900/internal/jobs/music_sync/run \
+  -H "X-Service-Token: <service_token>"
+```
+
 ## 工具
 
 | 工具 | 作用 |
