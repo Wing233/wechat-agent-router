@@ -59,4 +59,10 @@ Router 以前只有一个 `service_token`，推理客户端拿到的凭证同时
 3. 更新对应客户端的 `.env` 或桌面端保存的令牌；
 4. 用 `401` 验证旧令牌已被拒绝，且其他用途不受影响。
 
-不要在浏览器、公开仓库或前端包中出现任何 service token。
+## 部署记录（2026-11-10）
+
+- Router 从 `0f59165` 快进到 `7646bf2` 并重建为 `wechat-agent-router:dev`，镜像 `sha256:0809af2c95986f0eca306ff4946e290327ca5027de086a7171efb49cba32cb64`；回退镜像 `wechat-agent-router:rollback-scoped-20261110-114026`。
+- `config.json` 新增 `service_tokens.inference` 与 `service_tokens.notify`（48 字节随机值），`admin` 仍回退到 legacy `service_token`；`.env` 写入 `ROUTER_INFERENCE_TOKEN`、`ROUTER_NOTIFY_TOKEN`，`ROUTER_SERVICE_TOKEN` 改为 inference token。
+- 隔离验证全部通过：inference 只能调用 `/v1/chat/completions` 和 `/internal/leetcode/*`；notify 只能推通知；admin 只能访问管理接口；legacy token 不再能调用 inference 或 notify。
+- Lyph API `ROUTER_INFERENCE_TOKEN`、`ROUTER_NOTIFY_TOKEN` 已写入 `/opt/lyph/.env` 并重建 API 容器；`lyph-api:0.1.0` digest `sha256:1dd280573a8bce669e9813bae34e7d92a8583d3803485cfbe41b3b8b2361351e`（b06b9ec），health 200，所有相关环境变量已确认 set。
+- 回退：`docker tag wechat-agent-router:rollback-scoped-20261110-114026 wechat-agent-router:dev && docker compose up -d --no-deps --force-recreate router`，并恢复 `/opt/wechat-agent-router/config.json.bak-20261110-194045` 和 `/opt/lyph/.env.bak-20261110-194045`。

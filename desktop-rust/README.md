@@ -27,6 +27,8 @@
 
 1.3.7 发布记录：标签 `v1.3.7`（提交 `a8bfa67`），exe SHA-256 `7020382886e30d21d12df4b0c2ed9bff22fb6e271370faf65ee103554bc0f213`，release 为 immutable。
 
+1.3.8 发布记录：标签 `v1.3.8`（提交 `7646bf2`），exe SHA-256 `a681b4583cfe27c1162d393de2323e58e78e3ecb4d4115e85fb5c92bf98af089`，release 为 immutable。修复 `apply()` 持锁调用 `set_state` 的死锁；运行中 1.3.6 应用手动替换 exe 后已启动 1.3.8，本地控制台恢复响应。
+
 ## 运行
 
 ```powershell
