@@ -102,6 +102,14 @@ def _url(kind: str, original_id) -> str | None:
     return f"https://music.163.com/#/{kind}?id={original_id}"
 
 
+def _cover(*values) -> str | None:
+    """Return the first usable image URL, normalised to HTTPS for the public site."""
+    for value in values:
+        if isinstance(value, str) and value.startswith(("http://", "https://")):
+            return value.replace("http://", "https://", 1)
+    return None
+
+
 def _song(item: dict) -> dict:
     album = item.get("album") if isinstance(item.get("album"), dict) else {}
     return {
@@ -110,6 +118,7 @@ def _song(item: dict) -> dict:
         "original_id": item.get("originalId"),
         "artists": _artists(item),
         "album": album.get("name"),
+        "cover": _cover(item.get("coverImgUrl"), album.get("picUrl")),
         "duration_ms": item.get("duration"),
         "visible": item.get("visible"),
         "playable": item.get("visible") is True,

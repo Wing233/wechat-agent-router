@@ -46,6 +46,7 @@ def _song(item: dict) -> dict:
         "name": item.get("name") or "",
         "artists": artists,
         "album": album.get("name") or "",
+        "cover": item.get("cover") or "",
         "duration_ms": item.get("duration"),
         "original_id": original,
         "encrypted_id": item.get("id"),
@@ -232,6 +233,9 @@ class MusicSync:
             entries.append({
                 "id": f"ncm-history-{original or item.get('id') or len(entries)}",
                 "name": item.get("name") or "未知歌曲",
+                "artists": artists,
+                "album": album,
+                "cover": item.get("cover") or "",
                 "description": f"{artists} · {album} · 网易云音乐最近播放",
                 "category": "网易云音乐 · 最近播放",
                 "url": item.get("url") or "",

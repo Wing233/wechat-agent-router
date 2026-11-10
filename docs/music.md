@@ -98,7 +98,7 @@ Router 本机直接运行 CLI 时：
 
 配置 `sync_enabled=true` 后，插件注册 Router 任务 `music_sync`，每小时运行一次：
 
-- **每小时**：读取最近播放 10 首，替换 lyph 爱好里 `ncm-history-*` 条目
+- **每小时**：读取最近播放 10 首，替换 lyph 爱好里 `ncm-history-*` 条目；每条同时写入 `cover`（专辑封面，http→https）、`artists` 和 `album`，供爱好页音乐分区使用
 - **每 7 天**：重新抓取完整红心歌单，上传新的 `netease-liked-songs.md`，等新来源 `ready` 后再删除旧来源
 - 同步状态保存在 Router 的 `music:last_liked_sync`
 - 写入 lyph 走后台 SSO + Admin API，不直接写 SQLite

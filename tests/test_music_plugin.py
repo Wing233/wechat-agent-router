@@ -93,6 +93,7 @@ class FakeClient:
             return {"code": 200, "data": {"records": [{
                 "name": "晴天", "id": "ENC", "originalId": 123,
                 "artists": [{"name": "周杰伦"}], "album": {"name": "叶惠美"},
+                "coverImgUrl": "http://p1.music.126.net/demo.jpg",
                 "duration": 269000, "visible": True, "liked": False,
             }]}}
         if args[:2] == ["song", "lyric"]:
@@ -165,6 +166,7 @@ def test_search_tool_normalizes_song(tools):
     item = result["data"]["items"][0]
     assert item["name"] == "晴天"
     assert item["artists"] == ["周杰伦"]
+    assert item["cover"] == "https://p1.music.126.net/demo.jpg"
     assert item["url"] == "https://music.163.com/#/song?id=123"
 
 
@@ -239,6 +241,7 @@ def test_sync_recent_maps_history_to_interests():
                 "name": "泥沼地带",
                 "artists": ["项亚蕻"],
                 "album": "泥沼地带",
+                "cover": "https://p1.music.126.net/demo.jpg",
                 "original_id": 1395070574,
                 "url": "https://music.163.com/#/song?id=1395070574",
             }]}
@@ -256,6 +259,9 @@ def test_sync_recent_maps_history_to_interests():
     result = sync.sync_recent()
     assert result["updated"] == 1
     assert lyph.entries[0]["id"] == "ncm-history-1395070574"
+    assert lyph.entries[0]["artists"] == "项亚蕻"
+    assert lyph.entries[0]["album"] == "泥沼地带"
+    assert lyph.entries[0]["cover"] == "https://p1.music.126.net/demo.jpg"
     assert "网易云音乐最近播放" in lyph.entries[0]["description"]
 
 
