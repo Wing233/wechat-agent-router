@@ -21,13 +21,16 @@ class Tools:
         return self.reply
 
 
-def build(tools=None, config=None, rate_limit=60, clock=None):
+def build(tools=None, config=None, rate_limit=60, clock=None, notify=None,
+          notify_token=""):
     app = FastAPI()
     fake = tools or Tools()
     audits = []
     bridge = agent_bridge.register(
         app, config=config or CONFIG, tools=fake,
         audit=lambda action, detail: audits.append((action, detail)),
+        notify=notify or (lambda _text: True),
+        notify_token=notify_token,
         clock=clock or (lambda: 1000.0),
     )
     # allow tests to lower the limit without sleeping
@@ -238,4 +241,57 @@ def test_no_allowed_tool_can_start_with_a_forbidden_prefix():
         "lyph_tools__get_public_content", "lyph_tools__search_companies",
         "lyph_tools__get_company", "lyph_tools__aggregate_companies",
     }
+
+
+def test_notify_sends_trimmed_text_and_audits():
+    sent = []
+    client, _, audits, _ = build(notify=lambda text: sent.append(text) or True)
+    response = client.post("/agent/notify", json={"text": "  hello  "},
+                           headers={"X-Agent-Key": KEY})
+    assert response.status_code == 200
+    assert response.json() == {"status": "sent", "queued": False}
+    assert sent == ["hello"]
+    assert audits[-1][0] == "notify"
+    assert audits[-1][1] == {"agent": "lyph", "status": "sent", "chars": 5}
+
+
+def test_notify_reports_queued_when_the_sender_cannot_deliver():
+    client, _, audits, _ = build(notify=lambda _text: "queued")
+    response = client.post("/agent/notify", json={"text": "hello"},
+                           headers={"X-Agent-Key": KEY})
+    assert response.status_code == 200
+    assert response.json() == {"status": "queued", "queued": True}
+    assert audits[-1][1]["status"] == "queued"
+
+
+def test_notify_reports_failure_instead_of_claiming_it_was_queued():
+    client, _, audits, _ = build(notify=lambda _text: "failed")
+    response = client.post("/agent/notify", json={"text": "hello"},
+                           headers={"X-Agent-Key": KEY})
+    assert response.status_code == 200
+    assert response.json() == {"status": "failed", "queued": False}
+    assert audits[-1][1]["status"] == "failed"
+
+
+def test_notify_token_pushes_without_agent_or_tool_access():
+    sent = []
+    client, _, audits, _ = build(notify=lambda text: sent.append(text) or "sent",
+                                 notify_token="notify-only")
+    headers = {"X-Service-Token": "notify-only"}
+    assert client.post("/agent/notify", json={"text": "hi"},
+                       headers=headers).json()["status"] == "sent"
+    assert sent == ["hi"]
+    assert audits[-1][1]["agent"] == "service"
+    # The notify credential is not an agent key and cannot read tools.
+    assert client.post("/agent/tools/weather", json={},
+                       headers=headers).status_code == 401
+    assert client.post("/agent/notify", json={"text": "x"},
+                       headers={"X-Service-Token": "wrong"}).status_code == 401
+
+
+def test_notify_requires_key_and_non_empty_text():
+    client, _, _, _ = build()
+    assert client.post("/agent/notify", json={"text": "x"}).status_code == 401
+    assert client.post("/agent/notify", json={"text": "  "},
+                       headers={"X-Agent-Key": KEY}).status_code == 400
 

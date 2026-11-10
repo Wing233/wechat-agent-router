@@ -19,6 +19,8 @@ from typing import Callable
 
 from fastapi import FastAPI, HTTPException, Request
 
+import service_tokens
+
 log = logging.getLogger("agent_bridge")
 
 # The only names the lyph agent may call, mapped to router-internal tool names.
@@ -151,13 +153,15 @@ class AgentBridge:
                  allowed_agents: set[str] | None = None,
                  audit: Callable[[str, dict], None] | None = None,
                  clock: Callable[[], float] = time.monotonic,
-                 rate_limit: int = RATE_LIMIT_PER_MINUTE) -> None:
+                 rate_limit: int = RATE_LIMIT_PER_MINUTE,
+                 notify_token: str = "") -> None:
         self.tools = tools
         self._agents = agents
         self.allowed_agents = allowed_agents
         self.audit = audit
         self.clock = clock
         self.limiter = RateLimiter(limit=rate_limit, clock=clock)
+        self.notify_token = notify_token
 
     def available_agents(self) -> dict[str, dict]:
         """Read the live mapping so key rotation/removal applies without restart."""
@@ -287,7 +291,14 @@ class AgentBridge:
         return payload
 
     async def notify(self, request: Request, notify: Callable[[str], bool]) -> dict:
-        agent = self._authenticate(request)
+        try:
+            agent = self._authenticate(request)
+        except HTTPException:
+            # Integrations that only push messages should not need a tool key.
+            token = service_tokens.from_request(request)
+            if not service_tokens.match(token, self.notify_token):
+                raise
+            agent = {"id": "service", "name": "service"}
         payload = await self._arguments(request)
         text = str(payload.get("text") or "").strip()
         if not text:
@@ -322,6 +333,7 @@ def register(app: FastAPI, *, config: dict | None = None, tools=None,
              audit: Callable[[str, dict], None] | None = None,
              allowed_agents: list[str] | None = None,
              notify: Callable[[str], bool] | None = None,
+             notify_token: str = "",
              clock: Callable[[], float] = time.monotonic) -> AgentBridge:
     """Attach ``POST /agent/tools/{tool}`` and ``GET /agent/health``.
 
@@ -368,7 +380,7 @@ def register(app: FastAPI, *, config: dict | None = None, tools=None,
                   if isinstance(item, dict) and item.get("id")}
 
     bridge = AgentBridge(tools=tools, agents=source, allowed_agents=allowed,
-                         audit=audit, clock=clock)
+                         audit=audit, clock=clock, notify_token=notify_token)
     app.state.agent_bridge = bridge
 
     @app.post("/agent/tools/{tool}")

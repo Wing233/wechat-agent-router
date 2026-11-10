@@ -4,17 +4,19 @@
 
 ## 鉴权
 
-只接受 Router 的 service token：
+只接受 inference 用途的 service token：
 
 ```http
-X-Service-Token: <router service_token>
+X-Service-Token: <service_tokens.inference>
 ```
 
 或：
 
 ```http
-Authorization: Bearer <router service_token>
+Authorization: Bearer <service_tokens.inference>
 ```
+
+未配置 `service_tokens.inference` 时回退到旧的 `service_token`。三用途拆分见 [service-tokens](service-tokens.md)。
 
 不要把该 token 放进浏览器、公开仓库或 lyph 前端；它只应保存在 lyph API 的 `.env` 中。
 
@@ -30,7 +32,7 @@ Authorization: Bearer <router service_token>
 
 ```bash
 curl http://127.0.0.1:9900/v1/chat/completions \
-  -H "X-Service-Token: $ROUTER_SERVICE_TOKEN" \
+  -H "X-Service-Token: $ROUTER_INFERENCE_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "free-router",
@@ -56,7 +58,7 @@ curl http://127.0.0.1:9900/v1/chat/completions \
 provider: wechat-agent-router
 base_url: http://wechat-agent-router:9900/v1
 model: free-router
-api_key: <ROUTER_SERVICE_TOKEN>
+api_key: <service_tokens.inference>
 ```
 
-lyph 的 `models_routes.validate_endpoint` 对 `provider=wechat-agent-router` 放行这个内网地址，其他 provider 仍然只允许 HTTPS 公网端点。
+lyph 的 `models_routes` 在 `provider=wechat-agent-router` 时优先读取环境变量 `ROUTER_INFERENCE_TOKEN`，因此轮换 inference token 只需要改 `.env` 并重启 API，不必回写加密的模型密钥。lyph 的 `models_routes.validate_endpoint` 对 `provider=wechat-agent-router` 放行这个内网地址，其他 provider 仍然只允许 HTTPS 公网端点。

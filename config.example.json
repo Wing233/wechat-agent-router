@@ -64,6 +64,11 @@
   "credential_key": "REPLACE_FERNET_KEY",
   "login_token_secret": "REPLACE",
   "service_token": "REPLACE",
+  "service_tokens": {
+    "inference": "",
+    "notify": "",
+    "admin": ""
+  },
   "llm": {
     "base_url": "https://api.deepseek.com",
     "api_key": "REPLACE",

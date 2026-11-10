@@ -12,6 +12,7 @@ from pathlib import Path
 
 from data import CST
 from koishi_auth import new_totp_secret
+import service_tokens
 
 AGENT_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{1,63}$")
 CHANNEL_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{1,31}$")
@@ -524,6 +525,9 @@ class SettingsService:
         hub["channel_key"] = self._mask(hub.get("channel_key"))
         credentials = {key: self._mask(cfg.get(key)) for key in
                        ("credential_key", "service_token", "login_token_secret")}
+        scoped = cfg.get("service_tokens") if isinstance(cfg.get("service_tokens"), dict) else {}
+        credentials["service_tokens"] = {
+            scope: self._mask(scoped.get(scope)) for scope in service_tokens.SCOPES}
         data = {
             "llm": llm,
             "hub": hub,

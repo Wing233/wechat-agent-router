@@ -46,6 +46,7 @@ import sso_routes
 from plugin_loader import PluginError, PluginLoader
 from registry import JobScheduler, ToolRegistry
 from settings_service import SettingsService
+import service_tokens
 from store import INBOUND_MAX_ATTEMPTS, Store, now_iso
 import traces
 import trace_ctx
@@ -199,7 +200,10 @@ IMAGEGEN = ImageGen(
 GENERATED_DIR = Path(IMAGE_CFG.get("dir") or "/workspace/generated")
 GENERATED_DIR.mkdir(parents=True, exist_ok=True)
 LOGIN_SECRET = CFG["login_token_secret"].encode()
-SERVICE_TOKEN = CFG["service_token"]
+# One credential per purpose: inference, notify, admin. A scope without a
+# dedicated value keeps using the legacy shared service_token.
+SERVICE_TOKENS = service_tokens.resolve(CFG)
+SERVICE_TOKEN = SERVICE_TOKENS["admin"]
 PUBLIC_BASE = CFG["public_base_url"].rstrip("/")
 CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 CODE_RE = re.compile(r"\b([" + CODE_ALPHABET + r"]{4})\b")
@@ -243,10 +247,21 @@ def auth_agent(request: Request) -> dict:
     raise HTTPException(401, "invalid agent key")
 
 
-def service_auth(request: Request) -> None:
-    token = request.headers.get("x-service-token", "")
-    if not hmac.compare_digest(token, SERVICE_TOKEN):
-        raise HTTPException(401, "invalid service token")
+def service_auth(request: Request, scope: str = "admin") -> None:
+    token = service_tokens.from_request(request)
+    if not service_tokens.match(token, SERVICE_TOKENS.get(scope, "")):
+        raise HTTPException(401, f"invalid {scope} service token")
+
+
+def auth_notify(request: Request) -> dict:
+    """Agent key for replies/tools, or a notify-only service token."""
+    try:
+        return auth_agent(request)
+    except HTTPException:
+        token = service_tokens.from_request(request)
+        if service_tokens.match(token, SERVICE_TOKENS.get("notify", "")):
+            return {"id": "service", "name": "service", "api_key": ""}
+        raise
 
 
 def send_payload_status(payload: dict) -> str:
@@ -1581,7 +1596,7 @@ def health():
 
 @app.post("/v1/notify")
 def notify(body: NotifyIn, request: Request):
-    agent = auth_agent(request)
+    agent = auth_notify(request)
     if not body.text and not body.image_base64:
         raise HTTPException(400, "text or image_base64 required")
     text = body.text.strip()[:2000]
@@ -1617,7 +1632,7 @@ def notify(body: NotifyIn, request: Request):
 
 @app.get("/v1/notify/{nid}")
 def notify_status(nid: str, request: Request):
-    agent = auth_agent(request)
+    agent = auth_notify(request)
     item = store.get_notification(nid)
     if not item or item["agent_id"] != agent["id"]:
         raise HTTPException(404, "not found")
@@ -1679,7 +1694,7 @@ async def agent_task_heartbeat(task_id: str, request: Request):
 
 @app.post("/v1/notify/{nid}/cancel")
 def notify_cancel(nid: str, request: Request):
-    agent = auth_agent(request)
+    agent = auth_notify(request)
     item = store.get_notification(nid)
     if not item or item["agent_id"] != agent["id"]:
         raise HTTPException(404, "not found")
@@ -1690,7 +1705,7 @@ def notify_cancel(nid: str, request: Request):
 
 @app.post("/internal/leetcode/stats")
 async def leetcode_stats(request: Request):
-    service_auth(request)
+    service_auth(request, "inference")
     if LEETCODE is None:
         raise HTTPException(503, "leetcode plugin unavailable")
     try:
@@ -1705,7 +1720,7 @@ async def leetcode_stats(request: Request):
 
 @app.post("/internal/leetcode/question")
 async def leetcode_question(request: Request):
-    service_auth(request)
+    service_auth(request, "inference")
     if LEETCODE is None:
         raise HTTPException(503, "leetcode plugin unavailable")
     try:
@@ -1725,7 +1740,7 @@ async def leetcode_question(request: Request):
 
 @app.post("/internal/ask")
 async def internal_ask(request: Request):
-    service_auth(request)
+    service_auth(request, "inference")
     body = await request.json()
     try:
         answer = await asyncio.to_thread(llm_answer, body.get("text", ""), [])
@@ -2385,8 +2400,9 @@ async def login_submit_alias(request: Request, service: str, token: str = ""):
 sso_routes.register(app, CFG, SETTINGS, _koishi_page)
 
 # Narrow read-only tool bridge for the lyph site agent.
-agent_bridge.register(app, notify=send_text_status)
+agent_bridge.register(app, notify=send_text_status,
+                      notify_token=SERVICE_TOKENS["notify"])
 
 # OpenAI-compatible free-model gateway for lyph's chat backend.
 import openai_compat
-openai_compat.register(app, llm=llm, service_token=SERVICE_TOKEN)
+openai_compat.register(app, llm=llm, service_token=SERVICE_TOKENS["inference"])
