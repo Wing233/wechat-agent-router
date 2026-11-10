@@ -1,0 +1,10 @@
+{
+  "id": "handwritten_daily",
+  "name": "手写日报发布",
+  "version": "1.0.0",
+  "api_version": "1",
+  "entry": "plugin.py",
+  "capabilities": ["tools"],
+  "permissions": ["http:lyph", "send:wechat"],
+  "description": "在微信/QQ 等端自然语言撰写并发布手写日报/技术分享到 LYPH。主笔 technical-article-writer，终稿 deslop-zh，深度复盘 engineering-blog-post。"
+}

@@ -122,6 +122,12 @@
       "knowledge_rag": true,
       "lyph_api_url": "http://api-internal:8000",
       "lyph_origin": "https://123.57.153.49"
+    },
+    "handwritten_daily": {
+      "lyph_api_url": "http://api-internal:8000",
+      "lyph_origin": "https://123.57.153.49",
+      "router_config_path": "/app/config.json",
+      "timeout": 30
     }
   },
   "jobs": {
