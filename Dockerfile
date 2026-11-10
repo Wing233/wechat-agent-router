@@ -17,8 +17,7 @@ COPY *.py ./
 COPY plugins ./plugins
 COPY local-agent ./local-agent
 COPY vendor ./vendor
-COPY geodb ./geodb
-RUN mkdir -p /data /workspace /sandbox /lyph-src
+RUN mkdir -p /data /workspace /sandbox /lyph-src /geodb
 
 EXPOSE 9900
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
