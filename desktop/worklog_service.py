@@ -151,9 +151,12 @@ class WorklogService:
         config = collector.load_config(self.config_path)
         target = day or datetime.now().astimezone().date().isoformat()
         client = collector._client(config, self.secrets)
+        # 手动补传用于纠正 empty；已上传的日期仍保持幂等，避免 409。
+        existing = self.db.day(target) or {}
+        force = existing.get("status") == "empty"
         return self._start_job(
             "finalize", target,
-            lambda: collector.finalize_day(target, self.db, client, config),
+            lambda: collector.finalize_day(target, self.db, client, config, force=force),
         )
 
     def backfill(self, days: int = 30) -> dict:

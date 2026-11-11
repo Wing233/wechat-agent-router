@@ -737,9 +737,51 @@ def backfill(days: int, db: WorklogDB, client: LyphClient | None, config: dict,
 
 
 def _finalize_target(now: datetime, finalize_hour: int, finalize_minute: int) -> date:
-    """按 (时,分) 与汇总时刻比较：到达/超过则收当天，未到则最新完整日为昨天。"""
-    reached = (now.hour, now.minute) >= (finalize_hour, finalize_minute)
-    return now.date() - timedelta(days=0 if reached else 1)
+    """最新一个采集窗口已经结束的日期。
+
+    晚间时刻（>= 12:00）在当天收当天；凌晨时刻（如 04:00）在次日收前一天，
+    避免 daemon 在白天把仍在进行中的当天提前汇总。
+    """
+    cutoff = now.replace(hour=finalize_hour, minute=finalize_minute,
+                         second=0, microsecond=0)
+    reached = now >= cutoff
+    if finalize_hour < 12:
+        offset = 1 if reached else 2
+    else:
+        offset = 0 if reached else 1
+    return now.date() - timedelta(days=offset)
+
+
+_DONE_STATUSES = ("uploaded", "published", "conflict")
+_EMPTY_RETRY_SECONDS = 600
+
+
+def _empty_retry_due(db: WorklogDB, day: str, existing: dict, now: datetime) -> bool:
+    """只有出现新采样且距上次 empty 判定超过 10 分钟才重试。"""
+    if existing.get("status") != "empty":
+        return False
+    try:
+        updated = datetime.fromisoformat(str(existing.get("updated_at") or ""))
+    except ValueError:
+        return False
+    if (now - updated).total_seconds() < _EMPTY_RETRY_SECONDS:
+        return False
+    samples = db.samples(day)
+    if not samples:
+        return False
+    try:
+        latest = datetime.fromisoformat(str(samples[-1].get("ts") or ""))
+    except ValueError:
+        return False
+    return latest > updated
+
+
+def _should_finalize(db: WorklogDB, day: str, existing: dict, now: datetime) -> bool:
+    if existing.get("status") in _DONE_STATUSES:
+        return False
+    if existing.get("status") == "empty" and not _empty_retry_due(db, day, existing, now):
+        return False
+    return bool(db.samples(day))
 
 
 def catch_up(db: WorklogDB, client: LyphClient | None, config: dict,
@@ -751,9 +793,7 @@ def catch_up(db: WorklogDB, client: LyphClient | None, config: dict,
     for offset in range(max(1, days)):
         day = (newest - timedelta(days=offset)).isoformat()
         existing = db.day(day) or {}
-        if existing.get("status") in ("uploaded", "published", "conflict", "empty"):
-            continue
-        if not db.samples(day):
+        if not _should_finalize(db, day, existing, now):
             continue
         try:
             logging.info("catch-up %s -> %s", day,
@@ -773,11 +813,10 @@ def daemon(db: WorklogDB, client: LyphClient | None, config: dict,
         try:
             sample_once(db, config)
             now = datetime.now().astimezone()
-            if (now.hour, now.minute) >= (finalize_hour, finalize_minute):
-                day = now.date().isoformat()
-                existing = db.day(day) or {}
-                if existing.get("status") not in ("uploaded", "published", "conflict", "empty"):
-                    finalize_day(day, db, client, config)
+            day = _finalize_target(now, finalize_hour, finalize_minute).isoformat()
+            existing = db.day(day) or {}
+            if _should_finalize(db, day, existing, now):
+                finalize_day(day, db, client, config)
             db.prune(30)
         except Exception as exc:
             logging.warning("collector loop failed: %s", exc)

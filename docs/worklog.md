@@ -10,13 +10,13 @@ WeChatAgentDesktop
         ├─ 前台窗口采样（默认 30s）
         ├─ 本机屏幕 OCR（Windows.Media.Ocr，仅文字，像素不出本机）
         ├─ Git / Codex / 浏览器分类 / 文件改动
-        ├─ 每天 22:00 汇总当天
+        ├─ 每天 04:00 汇总前一天（可配置）
         └─ 上传 LYPH device API（纯文字 note，source_kind=note）
                 ↓
-        LYPH 22:30 cron 自动生成日报并 public 发布（无人工审核环节，如需撤回在后台手动撤稿）
+        LYPH 每天 23:00 cron 自动生成日报并 public 发布（无人工审核环节，如需撤回在后台手动撤稿）
 ```
 
-> 汇总/发布时刻是可配置的：桌面端「每日采集时间」对应 `finalize_time`（默认 22:00，本机当前配置为 04:00），服务器发布任务按自己的 cron 运行。
+> 汇总/发布时刻是可配置的：桌面端「每日采集时间」对应 `finalize_time`（默认 22:00，本机当前配置为 04:00）。`04:00` 表示「次日凌晨汇总前一天」，采集器不会在白天把仍在进行中的当天提前标记为 `empty`。LYPH 的日报生成任务按自己的 23:00 cron 运行，因此某天的日报会在该天 note 上传当天的 23:00 生成并公开。
 
 > 2026-11-10 起 Rust 桌面端不再上传任何截图。旧 MVP 会把截图（`source_kind=screenshot`）写进同一个设备，而 `worklog_publish.py` 只接受纯 `note`，导致日报停摆；清理脚本见 `scripts/lyph_cleanup_screenshot_captures.py`。
 
@@ -76,14 +76,15 @@ agent-router\desktop\.runtime\worklog\      # 旧源码模式
 ## 4. 每天的时间线
 
 ```text
-22:00  WorklogService 汇总当天并上传 [worklog] note（纯文字）
-22:30  LYPH 服务器 cron 自动生成日报并 public 发布（无人工审核环节，如需撤回在后台手动撤稿）
+04:00  WorklogService 汇总前一天并上传 [worklog] note（纯文字）
+23:00  LYPH 服务器 cron 自动生成日报并 public 发布（无人工审核环节，如需撤回在后台手动撤稿）
 ```
 
 - 采集线程随桌面端启动，不需要单独任务。
 - 30s 前台采样与本机屏幕 OCR 在同一循环、同一节奏完成，只保留脱敏后的文字。
-- 如果 22:00 时电脑关机/休眠，下次桌面端启动会自动补跑当天/往日。
-- 服务器按 22:30 cron 自动生成日报并 public 发布，无人工审核环节（如需撤回在后台手动撤稿）。
+- 如果 04:00 时电脑关机/休眠，下次桌面端启动会自动补跑前一天及往日。
+- 内容过短或当天没有有效证据时先记为 `empty`；距上次判定至少 10 分钟且出现新采样后会自动重试，不会把仍在采集的当天提前封存。
+- 服务器按 23:00 cron 自动生成日报并 public 发布，无人工审核环节（如需撤回在后台手动撤稿）。
 - 如果桌面端被关闭，采集也会停止；重新打开后继续。
 
 ## 5. 补全往日
@@ -96,7 +97,7 @@ agent-router\desktop\.runtime\worklog\      # 旧源码模式
 - 文件修改数
 - 本地已有采样与屏幕文字线索
 
-每天生成一条 `[worklog]` note，上传到 LYPH。没有证据的日期会跳过；内容过短的日期也会跳过。
+每天生成一条 `[worklog]` note，上传到 LYPH。没有证据的日期会跳过；内容过短的日期先记为 `empty`，出现新采样且距上次判定至少 10 分钟后会自动重试。
 
 ### 修复被截图污染的历史日期
 
@@ -125,7 +126,7 @@ python D:\xx\wechatbot\agent-router\worklog_collector.py `
   --backfill 30
 ```
 
-服务器默认按 22:30 cron 自动生成日报并 public 发布，无人工审核环节（如需撤回在后台手动撤稿）。以下命令仅用于手动重跑 / 补发：
+服务器默认按 23:00 cron 自动生成日报并 public 发布，无人工审核环节（如需撤回在后台手动撤稿）。以下命令仅用于手动重跑 / 补发：
 
 ```bash
 docker exec lyph-api-1 python /data/worklog_publish.py \
@@ -154,7 +155,7 @@ docker exec lyph-api-1 python /data/worklog_publish.py \
 - 浏览器只上传分类和次数，不上传 URL、查询参数、页面标题。
 - Codex 只上传 cwd 最后一级和消息数量，不上传提示词或回复正文。
 - 窗口标题会脱敏；浏览器标题统一隐藏。
-- 服务器按 22:30 cron 自动生成日报并 public 发布，无人工审核环节（如需撤回在后台手动撤稿）。
+- 服务器按 23:00 cron 自动生成日报并 public 发布，无人工审核环节（如需撤回在后台手动撤稿）。
 - 设备 token 用 Windows DPAPI 加密，只有当前 Windows 用户能解密。
 - 采集进程只上传到 `https://123.57.153.49`，不访问其他地址。
 

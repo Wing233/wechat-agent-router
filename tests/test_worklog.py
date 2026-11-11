@@ -255,6 +255,33 @@ def test_finalize_target_honors_minute_of_non_round_time() -> None:
     assert collector._finalize_target(datetime(2026, 11, 2, 23, 0), 22, 30).isoformat() == "2026-11-02"
 
 
+def test_finalize_target_supports_next_morning_schedule() -> None:
+    from datetime import datetime
+    # 04:00 属于“次日汇总前一天”：凌晨 01:00 只收到前天，04:00 后才收昨天
+    assert collector._finalize_target(datetime(2026, 11, 12, 1, 0), 4, 0).isoformat() == "2026-11-10"
+    assert collector._finalize_target(datetime(2026, 11, 12, 4, 0), 4, 0).isoformat() == "2026-11-11"
+    assert collector._finalize_target(datetime(2026, 11, 12, 19, 55), 4, 0).isoformat() == "2026-11-11"
+
+
+def test_empty_day_retries_only_after_new_samples(tmp_path: Path) -> None:
+    from datetime import datetime, timedelta
+
+    db = collector.WorklogDB(tmp_path / "worklog.sqlite3")
+    db.init()
+    db.save_day("2026-11-11", status="empty")
+    now = datetime.now().astimezone()
+    assert not collector._should_finalize(db, "2026-11-11", db.day("2026-11-11"), now)
+
+    past = (now - timedelta(minutes=30)).isoformat(timespec="seconds")
+    with db._conn() as conn:
+        conn.execute("UPDATE days SET updated_at=? WHERE day=?", (past, "2026-11-11"))
+    db.sample("2026-11-11", "Code.exe", "main.py", 0)
+    assert collector._should_finalize(db, "2026-11-11", db.day("2026-11-11"), now)
+
+    db.save_day("2026-11-11", status="uploaded")
+    assert not collector._should_finalize(db, "2026-11-11", db.day("2026-11-11"), now)
+
+
 def test_backfill_skips_today() -> None:
     from datetime import datetime, timedelta
     from unittest.mock import patch

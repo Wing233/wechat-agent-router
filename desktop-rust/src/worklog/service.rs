@@ -19,7 +19,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const DONE_STATUSES: [&str; 4] = ["uploaded", "published", "conflict", "empty"];
+const DONE_STATUSES: [&str; 3] = ["uploaded", "published", "conflict"];
+/// Do not rebuild an `empty` note on every sample; wait for fresh evidence.
+const EMPTY_RETRY_SECONDS: i64 = 600;
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct JobState {
@@ -201,7 +203,7 @@ impl WorklogService {
                         *last_error.lock().unwrap() = error.to_string();
                         log.add("WARN", &format!("工作日志采样失败：{error}"));
                     }
-                    maybe_finalize_today(&db, &cfg, &secrets, &log, &last_error);
+                    maybe_finalize_due(&db, &cfg, &secrets, &log, &last_error);
                     let _ = db.prune(30);
 
                     let interval = config::get_i64(&cfg, "sample_seconds", 30).clamp(5, 600);
@@ -346,11 +348,20 @@ impl WorklogService {
         let root = self.root.clone();
         let config_path = self.config_path.clone();
         let target = day.clone();
+        // A manual retry is meant to replace an `empty` decision, while an
+        // uploaded day stays untouched to avoid a 409 duplicate upload.
+        let force = self
+            .db
+            .day(&day)
+            .ok()
+            .flatten()
+            .map(|row| row.status == "empty")
+            .unwrap_or(false);
         self.start_job("finalize", &target, move || {
             let db = WorklogDb::new(root.join("worklog.sqlite3"));
             let secrets = SecretStore::new(root.join("secrets.json"));
             let _ = db.init();
-            finalize_day(&db, &config_path, &secrets, &day, false)
+            finalize_day(&db, &config_path, &secrets, &day, force)
         })
     }
 
@@ -369,8 +380,15 @@ impl WorklogService {
                 let day = (today - chrono::Duration::days(offset as i64))
                     .format("%Y-%m-%d")
                     .to_string();
-                // One broken day must not stop the whole backfill.
-                if finalize_day(&db, &config_path, &secrets, &day, false).is_ok() {
+                // One broken day must not stop the whole backfill. An `empty`
+                // decision is retryable; uploaded days stay untouched.
+                let force = db
+                    .day(&day)
+                    .ok()
+                    .flatten()
+                    .map(|row| row.status == "empty")
+                    .unwrap_or(false);
+                if finalize_day(&db, &config_path, &secrets, &day, force).is_ok() {
                     processed += 1;
                 }
             }
@@ -586,27 +604,89 @@ fn next_finalize_time(hour: u32, minute: u32) -> String {
     target.format("%Y-%m-%dT%H:%M").to_string()
 }
 
-fn maybe_finalize_today(
+/// Latest day whose collection window has closed.
+///
+/// An evening time (>= 12:00) closes the same day; an early-morning time
+/// (e.g. 04:00) closes the previous day, so the running collector never
+/// finalizes a day that still has hours left.
+fn finalize_target(
+    now: chrono::NaiveDateTime,
+    hour: u32,
+    minute: u32,
+) -> chrono::NaiveDate {
+    let cutoff = now
+        .date()
+        .and_hms_opt(hour.min(23), minute.min(59), 0)
+        .unwrap_or(now);
+    let reached = now >= cutoff;
+    let offset = if hour < 12 {
+        if reached { 1 } else { 2 }
+    } else if reached {
+        0
+    } else {
+        1
+    };
+    now.date() - chrono::Duration::days(offset)
+}
+
+fn is_done(status: &str) -> bool {
+    DONE_STATUSES.contains(&status)
+}
+
+/// Retry an `empty` day only when new samples arrived after that decision.
+fn empty_retry_due(
+    db: &WorklogDb,
+    day: &str,
+    row: &DayRow,
+    now: chrono::DateTime<chrono::Local>,
+) -> bool {
+    if row.status != "empty" {
+        return false;
+    }
+    let Ok(updated) = chrono::DateTime::parse_from_rfc3339(&row.updated_at) else {
+        return false;
+    };
+    if now.timestamp() - updated.timestamp() < EMPTY_RETRY_SECONDS {
+        return false;
+    }
+    db.samples(day)
+        .ok()
+        .and_then(|samples| samples.last().map(|sample| sample.ts.clone()))
+        .and_then(|latest| chrono::DateTime::parse_from_rfc3339(&latest).ok())
+        .map(|latest| latest.timestamp() > updated.timestamp())
+        .unwrap_or(false)
+}
+
+fn maybe_finalize_due(
     db: &WorklogDb,
     cfg: &Value,
     secrets: &SecretStore,
     log: &EventLog,
     last_error: &Arc<Mutex<String>>,
 ) {
-    use chrono::Timelike;
     let now = chrono::Local::now();
     let (hour, minute) = config::parse_time(&config::get_str(cfg, "finalize_time", "22:00"));
-    if (now.hour(), now.minute()) < (hour, minute) {
+    let day = finalize_target(now.naive_local(), hour, minute)
+        .format("%Y-%m-%d")
+        .to_string();
+    let existing = db.day(&day).ok().flatten();
+    let status = existing
+        .as_ref()
+        .map(|row| row.status.as_str())
+        .unwrap_or_default();
+    if is_done(status) {
         return;
     }
-    let day = now.format("%Y-%m-%d").to_string();
-    let status = db
-        .day(&day)
-        .ok()
-        .flatten()
-        .map(|row| row.status)
-        .unwrap_or_default();
-    if DONE_STATUSES.contains(&status.as_str()) {
+    if status == "empty" {
+        let Some(row) = existing.as_ref() else {
+            return;
+        };
+        if !empty_retry_due(db, &day, row, now) {
+            return;
+        }
+    }
+    // A day without samples is either unused or already handled by catch_up.
+    if !db.has_samples(&day).unwrap_or(false) {
         return;
     }
     if let Err(error) = finalize_with_config(db, cfg, secrets, &day, false) {
@@ -622,28 +702,29 @@ fn catch_up(
     log: &EventLog,
     last_error: &Arc<Mutex<String>>,
 ) {
-    use chrono::Timelike;
     let cfg = config::load(config_path);
     let (hour, minute) = config::parse_time(&config::get_str(&cfg, "finalize_time", "22:00"));
     let now = chrono::Local::now();
-    let reached = (now.hour(), now.minute()) >= (hour, minute);
-    let newest = if reached {
-        now.date_naive()
-    } else {
-        now.date_naive() - chrono::Duration::days(1)
-    };
+    let newest = finalize_target(now.naive_local(), hour, minute);
     for offset in 0..7i64 {
         let day = (newest - chrono::Duration::days(offset))
             .format("%Y-%m-%d")
             .to_string();
-        let status = db
-            .day(&day)
-            .ok()
-            .flatten()
-            .map(|row| row.status)
+        let existing = db.day(&day).ok().flatten();
+        let status = existing
+            .as_ref()
+            .map(|row| row.status.as_str())
             .unwrap_or_default();
-        if DONE_STATUSES.contains(&status.as_str()) {
+        if is_done(status) {
             continue;
+        }
+        if status == "empty" {
+            let Some(row) = existing.as_ref() else {
+                continue;
+            };
+            if !empty_retry_due(db, &day, row, now) {
+                continue;
+            }
         }
         if !db.has_samples(&day).unwrap_or(false) {
             continue;
@@ -676,7 +757,7 @@ fn finalize_with_config(
     sources::clear_caches();
     let existing = db.day(day)?;
     if let Some(row) = existing.as_ref() {
-        if DONE_STATUSES.contains(&row.status.as_str()) && !force {
+        if is_done(&row.status) && !force {
             return Ok(json!({"day": day, "status": "skipped", "reason": "already processed"}));
         }
     }
@@ -733,4 +814,45 @@ fn finalize_with_config(
         "duplicate": result.get("duplicate").cloned().unwrap_or(json!(false)),
         "chars": note.chars().count()
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::finalize_target;
+
+    fn at(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> chrono::NaiveDateTime {
+        chrono::NaiveDate::from_ymd_opt(year, month, day)
+            .unwrap()
+            .and_hms_opt(hour, minute, 0)
+            .unwrap()
+    }
+
+    #[test]
+    fn evening_finalize_closes_the_same_day() {
+        assert_eq!(
+            finalize_target(at(2026, 11, 2, 21, 0), 22, 0).to_string(),
+            "2026-11-01"
+        );
+        assert_eq!(
+            finalize_target(at(2026, 11, 2, 22, 0), 22, 0).to_string(),
+            "2026-11-02"
+        );
+    }
+
+    #[test]
+    fn morning_finalize_closes_the_previous_day() {
+        // 04:00 on Nov 12 summarizes Nov 11; before that, only Nov 10 is closed.
+        assert_eq!(
+            finalize_target(at(2026, 11, 12, 1, 0), 4, 0).to_string(),
+            "2026-11-10"
+        );
+        assert_eq!(
+            finalize_target(at(2026, 11, 12, 4, 0), 4, 0).to_string(),
+            "2026-11-11"
+        );
+        assert_eq!(
+            finalize_target(at(2026, 11, 12, 19, 55), 4, 0).to_string(),
+            "2026-11-11"
+        );
+    }
 }
