@@ -84,17 +84,18 @@ impl WorklogService {
     }
 
     fn ensure_config(&self) {
-        if self.config_path.is_file() {
-            return;
+        if !self.config_path.is_file() {
+            let mut value = config::default_config();
+            if let Some(obj) = value.as_object_mut() {
+                obj.insert(
+                    "worklog_dir".into(),
+                    json!(self.root.join("notes").to_string_lossy()),
+                );
+            }
+            let _ = config::save(&self.config_path, &value);
         }
-        let mut value = config::default_config();
-        if let Some(obj) = value.as_object_mut() {
-            obj.insert(
-                "worklog_dir".into(),
-                json!(self.root.join("notes").to_string_lossy()),
-            );
-        }
-        let _ = config::save(&self.config_path, &value);
+        // 兼容旧配置：缺 install_id 时自动生成并持久化，保证跨设备 capture_id 不冲突。
+        let _ = config::ensure_install_id(&self.config_path);
     }
 
     /// Copy a legacy worklog directory once so old days stay visible.
@@ -375,23 +376,11 @@ impl WorklogService {
             let _ = db.init();
             sources::clear_caches();
             let today = chrono::Local::now().date_naive();
-            let mut processed = 0u64;
-            for offset in 1..=days {
-                let day = (today - chrono::Duration::days(offset as i64))
-                    .format("%Y-%m-%d")
-                    .to_string();
-                // One broken day must not stop the whole backfill. An `empty`
-                // decision is retryable; uploaded days stay untouched.
-                let force = db
-                    .day(&day)
-                    .ok()
-                    .flatten()
-                    .map(|row| row.status == "empty")
-                    .unwrap_or(false);
-                if finalize_day(&db, &config_path, &secrets, &day, force).is_ok() {
-                    processed += 1;
-                }
-            }
+            // 每天都强制重新生成/重传，交给 LYPH 端用大模型合并去重；
+            // 本地 status 仅用于展示，不再决定是否跳过。单日失败不影响其它日期。
+            let processed = backfill_days(days, today, |day, force| {
+                finalize_day(&db, &config_path, &secrets, day, force)
+            });
             Ok(json!({"days": days, "processed": processed}))
         })
     }
@@ -736,6 +725,24 @@ fn catch_up(
     }
 }
 
+/// 对每一天以 `force=true` 调用 finalize；单日失败不影响其它日期，返回成功计数。
+/// 抽成独立函数便于单元测试“已 uploaded 的日期仍会被 force finalize”。
+fn backfill_days<F>(days: u64, today: chrono::NaiveDate, mut finalize: F) -> u64
+where
+    F: FnMut(&str, bool) -> anyhow::Result<Value>,
+{
+    let mut processed = 0u64;
+    for offset in 1..=days {
+        let day = (today - chrono::Duration::days(offset as i64))
+            .format("%Y-%m-%d")
+            .to_string();
+        if finalize(&day, true).is_ok() {
+            processed += 1;
+        }
+    }
+    processed
+}
+
 fn finalize_day(
     db: &WorklogDb,
     config_path: &Path,
@@ -805,7 +812,7 @@ fn finalize_with_config(
     db.save_day(
         day,
         &note,
-        &format!("worklog-{day}-v1"),
+        &client.capture_id(day),
         if conflict { "conflict" } else { "uploaded" },
     )?;
     Ok(json!({
@@ -818,7 +825,7 @@ fn finalize_with_config(
 
 #[cfg(test)]
 mod tests {
-    use super::finalize_target;
+    use super::*;
 
     fn at(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> chrono::NaiveDateTime {
         chrono::NaiveDate::from_ymd_opt(year, month, day)
@@ -854,5 +861,70 @@ mod tests {
             finalize_target(at(2026, 11, 12, 19, 55), 4, 0).to_string(),
             "2026-11-11"
         );
+    }
+
+    #[test]
+    fn backfill_force_finalizes_even_uploaded_days() {
+        use std::cell::RefCell;
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 11, 18).unwrap();
+        let calls = RefCell::new(Vec::<(String, bool)>::new());
+        let processed = backfill_days(3, today, |day, force| {
+            calls.borrow_mut().push((day.to_string(), force));
+            // 第一天模拟本地已是 uploaded，仍必须被调用
+            Ok(json!({"day": day, "status": "uploaded"}))
+        });
+        assert_eq!(processed, 3);
+        let calls = calls.borrow();
+        assert_eq!(calls.len(), 3);
+        assert!(
+            calls.iter().all(|(_, force)| *force),
+            "每一天都必须以 force=true finalize"
+        );
+        assert_eq!(calls[0].0, "2026-11-17");
+        assert_eq!(calls[1].0, "2026-11-16");
+        assert_eq!(calls[2].0, "2026-11-15");
+    }
+
+    #[test]
+    fn backfill_continues_after_a_failed_day() {
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 11, 18).unwrap();
+        let processed = backfill_days(3, today, |day, _| {
+            if day == "2026-11-16" {
+                anyhow::bail!("模拟单日失败")
+            }
+            Ok(json!({"day": day}))
+        });
+        assert_eq!(processed, 2);
+    }
+
+    #[test]
+    fn force_finalize_reprocesses_an_uploaded_day() {
+        let dir = std::env::temp_dir().join(format!("worklog-force-{}", uuid::Uuid::new_v4()));
+        let _ = std::fs::create_dir_all(&dir);
+        let db = WorklogDb::new(dir.join("worklog.sqlite3"));
+        db.init().unwrap();
+        let day = "2026-11-17";
+        db.save_day(day, "足够长的已上传日报正文内容", "worklog-old-v1", "uploaded")
+            .unwrap();
+
+        let config_path = dir.join("config.json");
+        let mut cfg = config::default_config();
+        config::object_mut(&mut cfg).insert(
+            "worklog_dir".into(),
+            json!(dir.join("notes").to_string_lossy()),
+        );
+        config::save(&config_path, &cfg).unwrap();
+        config::ensure_install_id(&config_path).unwrap();
+
+        let secrets = SecretStore::new(dir.join("secrets.json"));
+        // 无 device token → client_for 返回 None；若 force 生效，应走到 "local" 而非 "skipped"
+        let result = finalize_day(&db, &config_path, &secrets, day, true).unwrap();
+        assert_eq!(
+            result.get("status").and_then(|v| v.as_str()),
+            Some("local"),
+            "已 uploaded 的日期在 force=true 时不应被跳过"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

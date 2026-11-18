@@ -121,6 +121,23 @@ pub fn save(path: &Path, config: &Value) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// 返回稳定的安装 ID，用于隔离各设备的 `capture_id` 命名空间。
+/// 首次缺失时生成 UUID v4 并写回配置；已有配置缺字段时自动补齐。
+pub fn ensure_install_id(path: &Path) -> anyhow::Result<String> {
+    let mut config = load(path);
+    if let Some(id) = config
+        .get("install_id")
+        .and_then(|value| value.as_str())
+        .filter(|text| !text.trim().is_empty())
+    {
+        return Ok(id.to_string());
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    object_mut(&mut config).insert("install_id".into(), json!(id));
+    save(path, &config)?;
+    Ok(id)
+}
+
 pub fn get_i64(config: &Value, key: &str, fallback: i64) -> i64 {
     config.get(key).and_then(|v| v.as_i64()).unwrap_or(fallback)
 }
@@ -166,4 +183,31 @@ pub fn object_mut(value: &mut Value) -> &mut Map<String, Value> {
         *value = Value::Object(Map::new());
     }
     value.as_object_mut().expect("object")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn install_id_is_generated_once_and_backfilled() {
+        let dir = std::env::temp_dir().join(format!("worklog-cfg-{}", uuid::Uuid::new_v4()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("config.json");
+
+        let first = ensure_install_id(&path).unwrap();
+        assert!(!first.is_empty());
+        // 再次调用保持稳定
+        assert_eq!(ensure_install_id(&path).unwrap(), first);
+
+        // 已有配置缺字段时自动补齐，且不影响原有字段
+        save(&path, &json!({"sample_seconds": 42})).unwrap();
+        let backfilled = ensure_install_id(&path).unwrap();
+        assert!(!backfilled.is_empty());
+        let cfg = load(&path);
+        assert_eq!(get_str(&cfg, "install_id", ""), backfilled);
+        assert_eq!(get_i64(&cfg, "sample_seconds", 0), 42);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
