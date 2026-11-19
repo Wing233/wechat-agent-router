@@ -1,0 +1,15 @@
+FROM mcr.microsoft.com/playwright:v1.49.1-jammy
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends fonts-noto-cjk \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY package.json ./
+RUN npm install --omit=dev --no-audit --no-fund
+COPY server.js ./
+
+ENV HOME=/tmp
+USER pwuser
+EXPOSE 9801
+CMD ["node", "server.js"]

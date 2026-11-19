@@ -1,0 +1,15 @@
+[request]
+method = "POST"
+path = "/render"
+body = '{"url": "http://127.0.0.1:19817/print/resume/timeout", "timeout_ms": 2}'
+
+[request.headers]
+content-type = "application/json"
+x-render-token = "fixture-render-token"
+
+[response]
+status = 500
+
+[response.headers]
+cache-control = "no-store"
+content-type = "application/json; charset=utf-8"

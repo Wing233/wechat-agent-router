@@ -42,6 +42,7 @@
 - [内置插件](#内置插件)
 - [自然语言运维](#自然语言运维)
 - [5 分钟跑起来](#5-分钟跑起来)
+- [简历 PDF 渲染器](#简历-pdf-渲染器)
 - [本机 Agent](#本机-agent)
 - [桌面控制台](#桌面控制台)
 - [配置参考](#配置参考)
@@ -537,6 +538,12 @@ python local-agent/agent.py --config local-agent/config.json
 ### 可选的网易云音乐桥接
 
 Rust 音乐桥接提供带鉴权的只读 HTTP 接口。安装、登录、调用和差分验证步骤见[网易云音乐桥接](docs/music-bridge-rust.md)。
+
+---
+
+## 简历 PDF 渲染器
+
+可选的 Rust 侧车，通过 Chromium 将 LYPH 的简历打印页转换为 PDF。独立镜像可用 `docker build -t wechat-resume-render ./renderer` 构建。启动参数、HTTP 接口和对照测试见 [渲染器文档](renderer/README.md)。
 
 ---
 

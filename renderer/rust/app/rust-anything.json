@@ -1,0 +1,26 @@
+{
+  "schema": "rust-anything/front-door@1",
+  "name": "wechat-resume-render",
+  "commands": [],
+  "units": [
+    {
+      "name": "resume-render-service",
+      "crate": "resume-render-service",
+      "path": "../renderer",
+      "commands": [],
+      "routes": [
+        "*"
+      ],
+      "switch": "RUST_ANYTHING_UNIT_RESUME_RENDER_SERVICE"
+    }
+  ],
+  "lifted": true,
+  "kind": "http",
+  "routes": [
+    "POST /render",
+    "HEAD /health",
+    "GET /health",
+    "PATCH /not-found",
+    "GET /render"
+  ]
+}

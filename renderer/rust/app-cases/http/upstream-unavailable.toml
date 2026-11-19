@@ -1,0 +1,15 @@
+[request]
+method = "POST"
+path = "/render"
+body = '{"url": "http://127.0.0.1:19817/print/resume/unavailable"}'
+
+[request.headers]
+content-type = "application/json"
+x-render-token = "fixture-render-token"
+
+[response]
+status = 502
+
+[response.headers]
+cache-control = "no-store"
+content-type = "application/json; charset=utf-8"

@@ -1,0 +1,10 @@
+[request]
+method = "PATCH"
+path = "/not-found"
+
+[response]
+status = 404
+
+[response.headers]
+cache-control = "no-store"
+content-type = "application/json; charset=utf-8"

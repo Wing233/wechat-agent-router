@@ -1,0 +1,13 @@
+[package]
+name = "wechat-resume-render"
+version = "1.0.0"
+edition = "2024"
+publish = false
+description = "Chromium renderer for LYPH resume print pages"
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+resume-render-service = { path = "../renderer" }
+
+[workspace]

@@ -1,0 +1,10 @@
+{
+  "name": "resume-render",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Headless Chromium renderer for LYPH resume print pages",
+  "dependencies": {
+    "pdf-lib": "1.17.1",
+    "playwright-core": "1.49.1"
+  }
+}

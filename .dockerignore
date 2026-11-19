@@ -2,6 +2,7 @@
 .github
 docs
 desktop
+renderer
 local-agent
 backups
 data

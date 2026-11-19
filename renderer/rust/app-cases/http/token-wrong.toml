@@ -1,0 +1,13 @@
+[request]
+method = "POST"
+path = "/render"
+
+[request.headers]
+x-render-token = "other"
+
+[response]
+status = 401
+
+[response.headers]
+cache-control = "no-store"
+content-type = "application/json; charset=utf-8"

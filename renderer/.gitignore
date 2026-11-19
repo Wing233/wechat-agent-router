@@ -1,0 +1,4 @@
+/node_modules/
+/rust/**/target/
+/rust/app-cases/replay-report.md
+/rust/verification/__pycache__/

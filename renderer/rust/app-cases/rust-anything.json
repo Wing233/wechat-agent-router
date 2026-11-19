@@ -1,0 +1,10 @@
+{
+  "schema": "rust-anything/app-cases@1",
+  "name": "server",
+  "run": [
+    "node",
+    "server.js"
+  ],
+  "timeout_secs": 30,
+  "http": {}
+}
