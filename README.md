@@ -534,6 +534,10 @@ python local-agent/agent.py --config local-agent/config.json
 
 看到 `PONG` 就说明整条链路通了。
 
+### 可选的网易云音乐桥接
+
+Rust 音乐桥接提供带鉴权的只读 HTTP 接口。安装、登录、调用和差分验证步骤见[网易云音乐桥接](docs/music-bridge-rust.md)。
+
 ---
 
 ## 本机 Agent

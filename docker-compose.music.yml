@@ -1,0 +1,28 @@
+services:
+  music-bridge:
+    image: wechat-agent-router-music-bridge:0.1.0-rust
+    build:
+      context: .
+      dockerfile: deploy/music-bridge.Dockerfile
+    container_name: wechat-agent-music-bridge
+    restart: unless-stopped
+    environment:
+      NCM_BRIDGE_TOKEN: ${NCM_BRIDGE_TOKEN:?set NCM_BRIDGE_TOKEN}
+      HOME: /data
+    volumes:
+      - ./data/music-bridge:/data
+    networks:
+      - default
+    mem_limit: 192m
+    cpus: 0.3
+    healthcheck:
+      test:
+        ["CMD", "wget", "-q", "-T", "3", "-O", "/dev/null", "http://127.0.0.1:18888/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+networks:
+  default:
+    external: true
+    name: wechat-agent-router_default

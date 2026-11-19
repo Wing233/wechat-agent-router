@@ -1,0 +1,7 @@
+**
+!rust/
+!rust/app/
+!rust/app/Cargo.toml
+!rust/app/Cargo.lock
+!rust/app/src/
+!rust/app/src/**

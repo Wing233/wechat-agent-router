@@ -7,6 +7,7 @@ backups
 data
 workspace
 sandbox
+rust
 config.json
 **/__pycache__
 **/*.pyc
